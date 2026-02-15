@@ -5,9 +5,11 @@
  * Hooks call client.query(prompt) and get back scored files.
  */
 
+import type Database from 'better-sqlite3';
 import type { ClaudexConfig, HologramResponse, ScoredFile } from '../shared/types.js';
 import { HologramError, HologramUnavailableError } from '../shared/errors.js';
 import { createLogger } from '../shared/logger.js';
+import { upsertPressureScore } from '../db/pressure.js';
 import { SidecarManager } from './launcher.js';
 import { ProtocolHandler, buildRequest } from './protocol.js';
 
@@ -141,6 +143,33 @@ export class HologramClient {
     }
 
     return port;
+  }
+
+  /**
+   * Persist hologram query results as pressure scores in the database.
+   * Called after a successful hologram query to maintain state across sessions.
+   */
+  persistScores(db: Database.Database, response: HologramResponse, project?: string): void {
+    try {
+      const persistBucket = (files: ScoredFile[], temperature: 'HOT' | 'WARM' | 'COLD') => {
+        for (const file of files) {
+          upsertPressureScore(db, {
+            file_path: file.path,
+            project,
+            raw_pressure: file.raw_pressure,
+            temperature,
+            last_accessed_epoch: Date.now(),
+            decay_rate: 0.05,
+          });
+        }
+      };
+
+      persistBucket(response.hot, 'HOT');
+      persistBucket(response.warm, 'WARM');
+      persistBucket(response.cold, 'COLD');
+    } catch (err) {
+      log.error('Failed to persist hologram scores to database', err);
+    }
   }
 
   /**
