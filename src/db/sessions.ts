@@ -9,6 +9,8 @@ import type Database from 'better-sqlite3';
 import type { SessionRecord } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
 
+const validStatuses: readonly SessionRecord['status'][] = ['active', 'completed', 'failed'] as const;
+
 const log = createLogger('sessions');
 
 /**
@@ -48,10 +50,15 @@ export function createSession(
 export function updateSessionStatus(
   db: Database.Database,
   sessionId: string,
-  status: string,
+  status: SessionRecord['status'],
   endedAt?: string,
 ): void {
   try {
+    if (!validStatuses.includes(status)) {
+      log.warn(`Invalid session status: ${status}`);
+      return;
+    }
+
     if (endedAt) {
       const endedAtEpoch = new Date(endedAt).getTime();
       db.prepare(`

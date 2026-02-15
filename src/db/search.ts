@@ -54,6 +54,10 @@ export function migration_2(runner: MigrationRunner): void {
     END;
   `);
 
+  // Backfill: rebuild FTS5 index from content table to capture pre-existing rows
+  // Content-sync FTS5 tables require 'rebuild' — manual INSERT doesn't work
+  runner.db.exec(`INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`);
+
   runner.recordVersion(2);
   log.info('Migration 2 applied successfully');
 }
