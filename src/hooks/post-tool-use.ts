@@ -11,6 +11,7 @@
 import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { extractObservation } from '../lib/observation-extractor.js';
+import { loadConfig } from '../shared/config.js';
 import type { PostToolUseInput } from '../shared/types.js';
 
 const HOOK_NAME = 'post-tool-use';
@@ -22,6 +23,13 @@ runHook(HOOK_NAME, async (input) => {
   const toolName = postInput.tool_name || '';
   const toolInput = postInput.tool_input || {};
   const toolResponse = postInput.tool_response;
+
+  // Gate: skip observation capture when explicitly disabled in config
+  const config = loadConfig();
+  if (config.observation?.enabled === false) {
+    logToFile(HOOK_NAME, 'DEBUG', 'Observation capture disabled by config');
+    return {};
+  }
 
   // Step 1: Detect scope
   const scope = detectScope(cwd);

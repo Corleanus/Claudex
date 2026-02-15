@@ -13,6 +13,7 @@ import { PATHS } from '../shared/paths.js';
 import { DatabaseError } from '../shared/errors.js';
 import { createLogger } from '../shared/logger.js';
 import { MigrationRunner } from './migrations.js';
+import { loadConfig } from '../shared/config.js';
 
 const log = createLogger('database');
 
@@ -41,7 +42,10 @@ export function getDatabase(dbPath?: string): Database.Database {
     const db = new Database(resolvedPath);
 
     // Apply PRAGMAs
-    db.pragma('journal_mode = WAL');
+    const config = loadConfig();
+    if (config.database?.wal_mode !== false) {
+      db.pragma('journal_mode = WAL');
+    }
     db.pragma('synchronous = NORMAL');
     db.pragma('foreign_keys = ON');
     db.pragma('temp_store = memory');
