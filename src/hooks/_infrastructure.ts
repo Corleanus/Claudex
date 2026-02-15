@@ -27,9 +27,14 @@ export async function readStdin<T>(): Promise<T> {
   return JSON.parse(raw) as T;
 }
 
-/** Write JSON to stdout (consumed by Claude Code). */
-export function writeStdout(output: HookStdout): void {
-  process.stdout.write(JSON.stringify(output) + '\n');
+/** Write JSON to stdout (consumed by Claude Code). Optionally exit after flush. */
+export function writeStdout(output: HookStdout, exitAfter?: boolean): void {
+  const data = JSON.stringify(output) + '\n';
+  if (exitAfter) {
+    process.stdout.write(data, () => process.exit(0));
+  } else {
+    process.stdout.write(data);
+  }
 }
 
 /**
@@ -44,16 +49,16 @@ export async function runHook(
   try {
     const input = await readStdin<HookStdin>();
     const output = await handler(input);
-    writeStdout(output);
+    writeStdout(output, true); // flush then exit
   } catch (error) {
     logToFile(hookName, 'ERROR', error);
     try {
-      writeStdout({}); // Silent pass-through on failure
+      writeStdout({}, true); // Silent pass-through on failure, flush then exit
     } catch {
-      // stdout broken — nothing we can do
+      // stdout broken — exit directly
+      process.exit(0);
     }
   }
-  process.exit(0);
 }
 
 /** Structured logging to per-hook log files in ~/.claudex/hooks/logs/. */

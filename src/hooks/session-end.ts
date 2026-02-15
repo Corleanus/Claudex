@@ -120,21 +120,14 @@ runHook('session-end', async (input: HookStdin) => {
       const handoffsDir = path.join(scope.path, 'context', 'handoffs');
       fs.mkdirSync(handoffsDir, { recursive: true });
 
-      const activeMdPath = path.join(handoffsDir, 'ACTIVE.md');
-
       // Timestamp for filename: YYYY-MM-DD_HH-mm-ss
       const fileTimestamp = now.toISOString()
         .replace(/T/, '_')
         .replace(/:/g, '-')
         .replace(/\.\d{3}Z$/, '');
 
-      let targetPath: string;
-      if (fs.existsSync(activeMdPath)) {
-        // Never overwrite ACTIVE.md — use timestamped name
-        targetPath = path.join(handoffsDir, `auto_handoff_${fileTimestamp}.md`);
-      } else {
-        targetPath = activeMdPath;
-      }
+      // Always write auto_handoff_*.md — ACTIVE.md is reserved for explicit /handoff only
+      const targetPath = path.join(handoffsDir, `auto_handoff_${fileTimestamp}.md`);
 
       const handoffContent = `---
 handoff_id: auto-${session_id}
