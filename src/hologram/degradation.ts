@@ -142,3 +142,45 @@ export class ResilientHologramClient {
     };
   }
 }
+
+// =============================================================================
+// Standalone Re-score Fallback
+// =============================================================================
+
+/**
+ * Attempt re-score via sidecar, fall back to DB pressure scores if unavailable.
+ * Returns the source used: 'hologram', 'db-pressure', or 'none'.
+ * Never throws.
+ */
+export async function rescoreWithFallback(
+  client: HologramClient,
+  sessionId: string,
+  db?: Database.Database,
+  project?: string,
+): Promise<{ source: 'hologram' | 'db-pressure' | 'none' }> {
+  // Try sidecar first
+  try {
+    const success = await client.requestRescore(sessionId);
+    if (success) {
+      return { source: 'hologram' };
+    }
+  } catch {
+    // Fall through to DB
+  }
+
+  // DB fallback: scores are already persisted, just confirm they exist
+  if (db) {
+    try {
+      const hot = getHotFiles(db, project);
+      if (hot.length > 0) {
+        log.info('Re-score falling back to DB pressure scores');
+        return { source: 'db-pressure' };
+      }
+    } catch {
+      // Fall through
+    }
+  }
+
+  log.info('No re-score source available');
+  return { source: 'none' };
+}

@@ -299,6 +299,12 @@ export interface ClaudexConfig {
     redact_secrets: boolean;
     retention_days?: number;
   };
+  wrapper?: {
+    enabled: boolean;
+    warnThreshold: number;      // default 0.70 — emit warning log
+    flushThreshold: number;     // default 0.80 — trigger flush
+    cooldownMs: number;         // default 30000 — min time between flushes
+  };
 }
 
 /** Default configuration values */
@@ -318,6 +324,12 @@ export const DEFAULT_CONFIG: ClaudexConfig = {
     enabled: true,
     redact_secrets: true,
     retention_days: 90,
+  },
+  wrapper: {
+    enabled: true,
+    warnThreshold: 0.70,
+    flushThreshold: 0.80,
+    cooldownMs: 30000,
   },
 };
 

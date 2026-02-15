@@ -102,6 +102,46 @@ export class HologramClient {
   }
 
   /**
+   * Request the sidecar to re-evaluate all pressure scores.
+   * Called after a flush to ensure post-compaction context loading
+   * uses the most current scores.
+   *
+   * Sends a query with a special '__rescore__' prompt that signals
+   * the sidecar to refresh its internal state.
+   *
+   * Never throws — logs errors and returns false on failure.
+   */
+  async requestRescore(sessionId: string): Promise<boolean> {
+    try {
+      const port = this.launcher.getPort();
+      if (port === null) {
+        log.info('Sidecar not running, skipping re-score request');
+        return false;
+      }
+
+      const request = buildRequest('query', {
+        prompt: '__rescore__',
+        session_state: {
+          turn_number: 0,
+          session_id: sessionId,
+        },
+      });
+
+      const response = await this.protocol.send(port, request);
+      if (response.type === 'error') {
+        log.warn('Re-score request returned error:', response.payload.error_message);
+        return false;
+      }
+
+      log.info('Re-score request accepted by sidecar');
+      return true;
+    } catch (err) {
+      log.warn('Re-score request failed (non-fatal):', err);
+      return false;
+    }
+  }
+
+  /**
    * Check if hologram sidecar is available (process alive + port file present).
    */
   isAvailable(): boolean {
