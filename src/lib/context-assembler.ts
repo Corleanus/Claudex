@@ -8,10 +8,12 @@
  * 1. Identity context (AGENT.md, USER.md)
  * 2. Project context (primer, handoff)
  * 3. HOT files (pressure >= 0.851)
- * 4. Relevant observations (FTS5 top-ranked)
- * 5. Session continuity (post-compaction)
- * 6. WARM files (pressure >= 0.426)
- * 7. Recent observations (fallback)
+ * 4. Flow Reasoning (reasoning chains)
+ * 5. Relevant observations (FTS5 top-ranked)
+ * 6. Consensus Decisions
+ * 7. Session continuity (post-compaction)
+ * 8. WARM files (pressure >= 0.426)
+ * 9. Recent observations (fallback)
  *
  * Never throws — returns empty AssembledContext on error.
  */
@@ -22,6 +24,8 @@ import type {
   ScoredFile,
   Observation,
   SearchResult,
+  ReasoningChain,
+  ConsensusDecision,
 } from '../shared/types.js';
 
 // =============================================================================
@@ -98,6 +102,28 @@ function buildSearchSection(results: SearchResult[]): string {
   return `## Related Observations\n${lines.join('\n')}\n`;
 }
 
+function buildReasoningSection(chains: ReasoningChain[]): string {
+  if (chains.length === 0) return '';
+  const lines = chains.map(c => {
+    const ago = formatTimeAgo(c.timestamp_epoch);
+    const truncated =
+      c.reasoning.length > 500 ? c.reasoning.slice(0, 500) + '...' : c.reasoning;
+    return `### ${c.title} (${ago})\n${truncated}\n`;
+  });
+  return `## Flow Reasoning\n${lines.join('\n')}\n`;
+}
+
+function buildConsensusSection(decisions: ConsensusDecision[]): string {
+  if (decisions.length === 0) return '';
+  const lines = decisions.map(d => {
+    const ago = formatTimeAgo(d.timestamp_epoch);
+    const truncated =
+      d.description.length > 300 ? d.description.slice(0, 300) + '...' : d.description;
+    return `### ${d.title} [${d.status}] (${ago})\n${truncated}\n`;
+  });
+  return `## Consensus Decisions\n${lines.join('\n')}\n`;
+}
+
 function buildPostCompactionSection(): string {
   return `## Session Continuity\n- Context was recently compacted. Prior conversation state has been summarized.\n`;
 }
@@ -137,8 +163,10 @@ export function assembleContext(
     const hasIdentity = !!(sources.identity?.agent || sources.identity?.user);
     const hasProject = sources.scope.type === 'project' &&
       !!(sources.projectContext?.primer || sources.projectContext?.handoff);
+    const hasReasoning = !!(sources.reasoningChains?.length);
+    const hasConsensus = !!(sources.consensusDecisions?.length);
 
-    if (!hasHologram && !hasSearch && !hasRecent && !hasIdentity && !hasProject && !sources.postCompaction) {
+    if (!hasHologram && !hasSearch && !hasRecent && !hasIdentity && !hasProject && !sources.postCompaction && !hasReasoning && !hasConsensus) {
       return { markdown: '', tokenEstimate: 0, sources: [] };
     }
 
@@ -172,22 +200,32 @@ export function assembleContext(
       tryAppend(buildHotSection(sources.hologram!.hot), 'hologram');
     }
 
-    // 4. FTS5 search results
+    // 4. Flow Reasoning
+    if (hasReasoning) {
+      tryAppend(buildReasoningSection(sources.reasoningChains!), 'reasoning');
+    }
+
+    // 5. FTS5 search results
     if (hasSearch) {
       tryAppend(buildSearchSection(sources.searchResults), 'fts5');
     }
 
-    // 5. Post-compaction continuity
+    // 6. Consensus Decisions
+    if (hasConsensus) {
+      tryAppend(buildConsensusSection(sources.consensusDecisions!), 'consensus');
+    }
+
+    // 7. Post-compaction continuity
     if (sources.postCompaction) {
       tryAppend(buildPostCompactionSection(), 'session');
     }
 
-    // 6. WARM files
+    // 8. WARM files
     if (hasHologram && sources.hologram!.warm.length > 0) {
       tryAppend(buildWarmSection(sources.hologram!.warm), 'hologram');
     }
 
-    // 7. Fallback: recent observations (only if no hologram AND no FTS5)
+    // 9. Fallback: recent observations (only if no hologram AND no FTS5)
     if (!hasHologram && !hasSearch && hasRecent) {
       tryAppend(buildRecentObservationsSection(sources.recentObservations), 'recency');
     }

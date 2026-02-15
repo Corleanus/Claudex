@@ -1,18 +1,26 @@
 /**
  * Claudex v2 — Flat File Mirror
  *
- * Mirrors SQLite observations to human-readable markdown files.
+ * Mirrors SQLite data to human-readable markdown files.
  * The human is never locked out of their own data: SQLite is the machine
  * interface, markdown files are the human interface.
  *
- * Append-only. Never overwrites. Never crashes the caller.
+ * Observations are append-only. Pressure scores overwrite (single snapshot).
+ * Never crashes the caller.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { dailyMemoryPath } from '../shared/paths.js';
-import type { Observation, Scope } from '../shared/types.js';
+import { CLAUDEX_HOME, dailyMemoryPath } from '../shared/paths.js';
+import type {
+  ConsensusDecision,
+  Observation,
+  PressureScore,
+  ReasoningChain,
+  Scope,
+  TemperatureLevel,
+} from '../shared/types.js';
 
 /**
  * Mirror an observation to the appropriate daily markdown file.
@@ -95,4 +103,217 @@ function formatFiles(
   }
 
   return parts.join(', ');
+}
+
+// =============================================================================
+// Filename sanitizer
+// =============================================================================
+
+/**
+ * Replace non-filesystem-safe characters with hyphens and truncate to 50 chars.
+ */
+export function sanitizeFilename(title: string): string {
+  return title
+    .replace(/[^a-zA-Z0-9_\-. ]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50);
+}
+
+// =============================================================================
+// Reasoning chain mirror
+// =============================================================================
+
+/**
+ * Mirror a reasoning chain to a markdown file.
+ *
+ * - Global scope → ~/.claudex/reasoning/<session_id>/<timestamp>-<sanitized_title>.md
+ * - Project scope → <project_path>/context/reasoning/<session_id>/<timestamp>-<sanitized_title>.md
+ *
+ * Never throws — logs errors to stderr and continues.
+ */
+export function mirrorReasoning(chain: ReasoningChain, scope: Scope): void {
+  try {
+    const ts = chain.timestamp.replace(/[:.]/g, '-').split('T')[0]!;
+    const filename = `${ts}-${sanitizeFilename(chain.title)}.md`;
+
+    const dir =
+      scope.type === 'global'
+        ? path.join(CLAUDEX_HOME, 'reasoning', chain.session_id)
+        : path.join(scope.path, 'context', 'reasoning', chain.session_id);
+
+    const filePath = path.join(dir, filename);
+
+    const decisions =
+      chain.decisions && chain.decisions.length > 0
+        ? chain.decisions.map(d => `- ${d}`).join('\n')
+        : 'None recorded';
+
+    const files =
+      chain.files_involved && chain.files_involved.length > 0
+        ? chain.files_involved.map(f => `- ${f}`).join('\n')
+        : 'None recorded';
+
+    const content = [
+      `# ${chain.title}`,
+      '',
+      `- **Trigger:** ${chain.trigger}`,
+      `- **Session:** ${chain.session_id}`,
+      `- **Time:** ${chain.timestamp}`,
+      `- **Importance:** ${chain.importance}/5`,
+      '',
+      '## Reasoning',
+      '',
+      chain.reasoning,
+      '',
+      '## Decisions',
+      '',
+      decisions,
+      '',
+      '## Files Involved',
+      '',
+      files,
+      '',
+    ].join('\n');
+
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, content, 'utf-8');
+  } catch (err) {
+    console.error('[claudex] flat-file-mirror: reasoning write failed:', err);
+  }
+}
+
+// =============================================================================
+// Consensus decision mirror
+// =============================================================================
+
+/**
+ * Mirror a consensus decision to a markdown file.
+ *
+ * - Global scope → ~/.claudex/consensus/<session_id>/<timestamp>-<sanitized_title>.md
+ * - Project scope → <project_path>/context/consensus/<session_id>/<timestamp>-<sanitized_title>.md
+ *
+ * Never throws — logs errors to stderr and continues.
+ */
+export function mirrorConsensus(decision: ConsensusDecision, scope: Scope): void {
+  try {
+    const ts = decision.timestamp.replace(/[:.]/g, '-').split('T')[0]!;
+    const filename = `${ts}-${sanitizeFilename(decision.title)}.md`;
+
+    const dir =
+      scope.type === 'global'
+        ? path.join(CLAUDEX_HOME, 'consensus', decision.session_id)
+        : path.join(scope.path, 'context', 'consensus', decision.session_id);
+
+    const filePath = path.join(dir, filename);
+
+    const tags =
+      decision.tags && decision.tags.length > 0
+        ? decision.tags.join(', ')
+        : 'None';
+
+    const files =
+      decision.files_affected && decision.files_affected.length > 0
+        ? decision.files_affected.map(f => `- ${f}`).join('\n')
+        : 'None';
+
+    const content = [
+      `# ${decision.title}`,
+      '',
+      `- **Status:** ${decision.status}`,
+      `- **Session:** ${decision.session_id}`,
+      `- **Time:** ${decision.timestamp}`,
+      `- **Importance:** ${decision.importance}/5`,
+      '',
+      '## Description',
+      '',
+      decision.description,
+      '',
+      '## Positions',
+      '',
+      `**Claude:** ${decision.claude_position || 'Not recorded'}`,
+      `**Codex:** ${decision.codex_position || 'Not recorded'}`,
+      `**Human verdict:** ${decision.human_verdict || 'Not recorded'}`,
+      '',
+      '## Tags',
+      '',
+      tags,
+      '',
+      '## Files Affected',
+      '',
+      files,
+      '',
+    ].join('\n');
+
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, content, 'utf-8');
+  } catch (err) {
+    console.error('[claudex] flat-file-mirror: consensus write failed:', err);
+  }
+}
+
+// =============================================================================
+// Pressure scores mirror
+// =============================================================================
+
+/**
+ * Mirror pressure scores to a single markdown snapshot file.
+ *
+ * - Global scope → ~/.claudex/pressure/scores.md
+ * - Project scope → <project_path>/context/pressure/scores.md
+ *
+ * Overwrites the file each time (snapshot, not append-only).
+ * Never throws — logs errors to stderr and continues.
+ */
+export function mirrorPressureScores(scores: PressureScore[], scope: Scope): void {
+  try {
+    const dir =
+      scope.type === 'global'
+        ? path.join(CLAUDEX_HOME, 'pressure')
+        : path.join(scope.path, 'context', 'pressure');
+
+    const filePath = path.join(dir, 'scores.md');
+
+    const now = new Date().toISOString();
+
+    const grouped: Record<TemperatureLevel, PressureScore[]> = {
+      HOT: [],
+      WARM: [],
+      COLD: [],
+    };
+
+    for (const s of scores) {
+      grouped[s.temperature].push(s);
+    }
+
+    function buildTable(level: TemperatureLevel): string {
+      const rows = grouped[level];
+      let section = `## ${level} Files\n`;
+      section += '| File | Pressure | Decay Rate |\n';
+      section += '|------|----------|------------|\n';
+      for (const r of rows) {
+        section += `| ${r.file_path} | ${r.raw_pressure.toFixed(3)} | ${r.decay_rate.toFixed(3)} |\n`;
+      }
+      return section;
+    }
+
+    const content = [
+      '# Pressure Scores',
+      '',
+      `Updated: ${now}`,
+      '',
+      buildTable('HOT'),
+      '',
+      buildTable('WARM'),
+      '',
+      buildTable('COLD'),
+      '',
+    ].join('\n');
+
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, content, 'utf-8');
+  } catch (err) {
+    console.error('[claudex] flat-file-mirror: pressure write failed:', err);
+  }
 }
