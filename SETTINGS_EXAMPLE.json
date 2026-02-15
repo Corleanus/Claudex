@@ -1,0 +1,98 @@
+{
+  "_readme": [
+    "Claudex v2 -- Claude Code settings.json hook registration example",
+    "",
+    "INSTALLATION",
+    "  Global:  ~/.claude/settings.json          (all projects)",
+    "  Project: <project>/.claude/settings.json  (single project)",
+    "",
+    "PREREQUISITES",
+    "  1. Run 'npm run build' to generate dist/*.mjs bundles",
+    "  2. Unix only: chmod +x hooks/*.sh",
+    "",
+    "HOOKS (6 total, mapped to 5 Claude Code events)",
+    "  session-start       -> SessionStart      -> initializes session tracking",
+    "  session-end         -> SessionEnd         -> finalizes session, writes handoff",
+    "  user-prompt-submit  -> UserPromptSubmit   -> processes each user prompt",
+    "  post-tool-use       -> PostToolUse        -> runs after every tool invocation",
+    "  pre-compact         -> PreCompact         -> captures transcript + reasoning before compaction",
+    "  pre-flush           -> UserPromptSubmit   -> checks context pressure, triggers memory flush",
+    "",
+    "NOTE: pre-flush is NOT a native Claude Code event. It piggybacks on",
+    "UserPromptSubmit so it runs on every prompt to check context utilization.",
+    "Claude Code supports multiple hooks per event (array entries).",
+    "",
+    "WINDOWS vs UNIX",
+    "  Windows: use .cmd wrappers (shown below)",
+    "  Unix:    replace .cmd paths with .sh equivalents, e.g.:",
+    "    ~/Projects/Claudex v2/Claudex/hooks/session-start.sh"
+  ],
+
+  "hooks": {
+
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Users\\Grigorije\\Desktop\\Projects\\Claudex v2\\Claudex\\hooks\\session-start.cmd"
+          }
+        ]
+      }
+    ],
+
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Users\\Grigorije\\Desktop\\Projects\\Claudex v2\\Claudex\\hooks\\session-end.cmd"
+          }
+        ]
+      }
+    ],
+
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Users\\Grigorije\\Desktop\\Projects\\Claudex v2\\Claudex\\hooks\\user-prompt-submit.cmd"
+          },
+          {
+            "type": "command",
+            "command": "C:\\Users\\Grigorije\\Desktop\\Projects\\Claudex v2\\Claudex\\hooks\\pre-flush.cmd"
+          }
+        ]
+      }
+    ],
+
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Users\\Grigorije\\Desktop\\Projects\\Claudex v2\\Claudex\\hooks\\post-tool-use.cmd"
+          }
+        ]
+      }
+    ],
+
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Users\\Grigorije\\Desktop\\Projects\\Claudex v2\\Claudex\\hooks\\pre-compact.cmd"
+          }
+        ]
+      }
+    ]
+
+  }
+}

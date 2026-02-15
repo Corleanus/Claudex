@@ -195,6 +195,24 @@ runHook(HOOK_NAME, async (input) => {
   // Step 4: SQLite registration (soft dependency)
   await registerInSqlite(scope, sessionId, cwd);
 
+  // Step 4.5: Health check
+  try {
+    const { loadConfig } = await import('../shared/config.js');
+    const { checkHealth } = await import('../shared/health.js');
+    const { getDatabase } = await import('../db/connection.js');
+
+    const config = loadConfig();
+    const db = getDatabase();
+    try {
+      const health = checkHealth(config, db);
+      logToFile(HOOK_NAME, 'INFO', `System health: ${JSON.stringify(health)}`);
+    } finally {
+      db.close();
+    }
+  } catch (healthErr) {
+    logToFile(HOOK_NAME, 'WARN', 'Health check failed (non-fatal)', healthErr);
+  }
+
   // Step 5: First-run detection
   const isFirstRun = detectFirstRun();
   logToFile(HOOK_NAME, 'INFO', `First run: ${isFirstRun}`);

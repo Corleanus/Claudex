@@ -11,6 +11,7 @@ import type { ClaudexConfig, HologramResponse, ScoredFile } from '../shared/type
 import type { HologramClient } from './client.js';
 import { getHotFiles, getWarmFiles } from '../db/pressure.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('hologram-degradation');
 
@@ -78,15 +79,20 @@ export class ResilientHologramClient {
 
     // DB pressure fallback — try persisted scores before recency
     if (db) {
+      const dbFallbackStart = Date.now();
       const dbFallback = this.dbPressureFallback(db, project);
       if (dbFallback !== null) {
+        recordMetric('degradation.fallback_db', Date.now() - dbFallbackStart);
         log.info('Using DB pressure scores as fallback');
         return dbFallback;
       }
     }
 
+    const recencyStart = Date.now();
     log.info('Falling back to recency-based context');
-    return this.recencyFallback(recentFiles);
+    const recencyResult = this.recencyFallback(recentFiles);
+    recordMetric('degradation.fallback_recency', Date.now() - recencyStart);
+    return recencyResult;
   }
 
   /**

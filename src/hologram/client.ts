@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3';
 import type { ClaudexConfig, HologramResponse, ScoredFile } from '../shared/types.js';
 import { HologramError, HologramUnavailableError } from '../shared/errors.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 import { upsertPressureScore } from '../db/pressure.js';
 import { SidecarManager } from './launcher.js';
 import { ProtocolHandler, buildRequest } from './protocol.js';
@@ -39,6 +40,7 @@ export class HologramClient {
    * (WP-08 degradation layer catches this).
    */
   async query(prompt: string, turnNumber: number, sessionId: string): Promise<HologramResponse> {
+    const startMs = Date.now();
     const port = await this.ensureSidecar();
 
     const request = buildRequest('query', {
@@ -52,11 +54,13 @@ export class HologramClient {
     const response = await this.protocol.send(port, request);
 
     if (response.type === 'error') {
+      recordMetric('hologram.query', Date.now() - startMs, true);
       throw new HologramError(
         `Sidecar returned error: ${response.payload.error_message ?? 'unknown'}`,
       );
     }
 
+    recordMetric('hologram.query', Date.now() - startMs);
     return this.buildHologramResponse(
       response.payload.hot ?? [],
       response.payload.warm ?? [],
@@ -89,14 +93,20 @@ export class HologramClient {
    * Never throws.
    */
   async ping(): Promise<boolean> {
+    const startMs = Date.now();
     try {
       const port = this.launcher.getPort();
-      if (port === null) return false;
+      if (port === null) {
+        recordMetric('hologram.ping', Date.now() - startMs, true);
+        return false;
+      }
 
       const request = buildRequest('ping');
       const response = await this.protocol.send(port, request);
+      recordMetric('hologram.ping', Date.now() - startMs);
       return response.type === 'pong';
     } catch {
+      recordMetric('hologram.ping', Date.now() - startMs, true);
       return false;
     }
   }
@@ -112,10 +122,12 @@ export class HologramClient {
    * Never throws — logs errors and returns false on failure.
    */
   async requestRescore(sessionId: string): Promise<boolean> {
+    const startMs = Date.now();
     try {
       const port = this.launcher.getPort();
       if (port === null) {
         log.info('Sidecar not running, skipping re-score request');
+        recordMetric('hologram.rescore', Date.now() - startMs, true);
         return false;
       }
 
@@ -130,12 +142,15 @@ export class HologramClient {
       const response = await this.protocol.send(port, request);
       if (response.type === 'error') {
         log.warn('Re-score request returned error:', response.payload.error_message);
+        recordMetric('hologram.rescore', Date.now() - startMs, true);
         return false;
       }
 
       log.info('Re-score request accepted by sidecar');
+      recordMetric('hologram.rescore', Date.now() - startMs);
       return true;
     } catch (err) {
+      recordMetric('hologram.rescore', Date.now() - startMs, true);
       log.warn('Re-score request failed (non-fatal):', err);
       return false;
     }

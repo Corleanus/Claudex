@@ -14,6 +14,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { loadConfig } from '../shared/config.js';
+import { recordMetric, getMetrics } from '../shared/metrics.js';
 import { PATHS } from '../shared/paths.js';
 import type { HookStdin, HookStdout } from '../shared/types.js';
 
@@ -48,7 +50,52 @@ export async function runHook(
 ): Promise<void> {
   try {
     const input = await readStdin<HookStdin>();
-    const output = await handler(input);
+
+    const startMs = Date.now();
+    let output: HookStdout;
+    try {
+      output = await handler(input);
+    } catch (handlerError) {
+      const endMs = Date.now();
+      const durationMs = endMs - startMs;
+      // Record metric with error flag — in its own try/catch so hook still succeeds
+      try {
+        recordMetric(`hook.${hookName}`, durationMs, true);
+      } catch {
+        // Metrics must never break the hook.
+      }
+      throw handlerError;
+    }
+    const endMs = Date.now();
+    const durationMs = endMs - startMs;
+
+    // Record success metric — isolated so failures don't break the hook
+    try {
+      recordMetric(`hook.${hookName}`, durationMs);
+    } catch {
+      // Metrics must never break the hook.
+    }
+
+    // Latency budget warning — isolated from hook execution
+    try {
+      const config = loadConfig();
+      const latencyBudgetMs = config.hooks?.latency_budget_ms ?? 3000;
+      if (durationMs > latencyBudgetMs) {
+        logToFile(hookName, 'WARN', `Hook ${hookName} exceeded latency budget: ${durationMs}ms > ${latencyBudgetMs}ms`);
+      }
+    } catch {
+      // Config/budget check must never break the hook.
+    }
+
+    // Session-end metrics dump
+    if (hookName === 'session-end') {
+      try {
+        logToFile(hookName, 'INFO', 'Metrics dump:', getMetrics());
+      } catch {
+        // Metrics dump must never break the hook.
+      }
+    }
+
     writeStdout(output, true); // flush then exit
   } catch (error) {
     logToFile(hookName, 'ERROR', error);

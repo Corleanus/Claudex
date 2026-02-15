@@ -8,6 +8,7 @@
 import type Database from 'better-sqlite3';
 import type { ConsensusDecision, ConsensusStatus } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('consensus');
 
@@ -62,6 +63,7 @@ export function insertConsensus(
   db: Database.Database,
   decision: Omit<ConsensusDecision, 'id' | 'created_at' | 'created_at_epoch'>,
 ): { id: number } {
+  const startMs = Date.now();
   try {
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
@@ -94,8 +96,10 @@ export function insertConsensus(
       nowEpoch,
     );
 
+    recordMetric('db.insert', Date.now() - startMs);
     return { id: Number(result.lastInsertRowid) };
   } catch (err) {
+    recordMetric('db.insert', Date.now() - startMs, true);
     log.error('Failed to insert consensus decision:', err);
     return { id: -1 };
   }
@@ -106,9 +110,11 @@ export function insertConsensus(
  * Validates status against ConsensusStatus type. Returns silently on error.
  */
 export function updateConsensusStatus(db: Database.Database, id: number, status: ConsensusStatus): void {
+  const startMs = Date.now();
   try {
     if (!validStatuses.includes(status)) {
       log.warn(`Invalid consensus status: ${status}`);
+      recordMetric('db.query', Date.now() - startMs);
       return;
     }
 
@@ -116,7 +122,9 @@ export function updateConsensusStatus(db: Database.Database, id: number, status:
       UPDATE consensus_decisions SET status = ?
       WHERE id = ?
     `).run(status, id);
+    recordMetric('db.query', Date.now() - startMs);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to update consensus status:', err);
   }
 }
@@ -125,6 +133,7 @@ export function updateConsensusStatus(db: Database.Database, id: number, status:
  * Get all consensus decisions for a session, ordered by timestamp ascending.
  */
 export function getConsensusBySession(db: Database.Database, sessionId: string): ConsensusDecision[] {
+  const startMs = Date.now();
   try {
     const rows = db.prepare(`
       SELECT id, session_id, project, timestamp, timestamp_epoch,
@@ -137,8 +146,10 @@ export function getConsensusBySession(db: Database.Database, sessionId: string):
       ORDER BY timestamp_epoch ASC
     `).all(sessionId) as ConsensusRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToConsensusDecision);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get consensus by session:', err);
     return [];
   }
@@ -149,6 +160,7 @@ export function getConsensusBySession(db: Database.Database, sessionId: string):
  * Ordered by timestamp_epoch DESC.
  */
 export function getRecentConsensus(db: Database.Database, limit: number, project?: string): ConsensusDecision[] {
+  const startMs = Date.now();
   try {
     const sql = project
       ? `SELECT id, session_id, project, timestamp, timestamp_epoch,
@@ -173,8 +185,10 @@ export function getRecentConsensus(db: Database.Database, limit: number, project
       ? db.prepare(sql).all(project, limit) as ConsensusRow[]
       : db.prepare(sql).all(limit) as ConsensusRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToConsensusDecision);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get recent consensus:', err);
     return [];
   }

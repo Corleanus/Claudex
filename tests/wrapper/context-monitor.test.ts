@@ -10,6 +10,7 @@ import {
   assessUtilization,
   shouldFlush,
   shouldWarn,
+  validateThresholds,
   type ContextUtilization,
 } from '../../src/wrapper/context-monitor.js';
 
@@ -109,6 +110,72 @@ describe('shouldFlush', () => {
       level: 'normal',
     };
     expect(shouldFlush(normal)).toBe(false);
+  });
+});
+
+describe('validateThresholds', () => {
+  it('passes through valid thresholds', () => {
+    const result = validateThresholds({ warnThreshold: 0.60, flushThreshold: 0.85 });
+    expect(result.warnThreshold).toBeCloseTo(0.60);
+    expect(result.flushThreshold).toBeCloseTo(0.85);
+  });
+
+  it('clamps thresholds below 0 to 0', () => {
+    const result = validateThresholds({ warnThreshold: -0.5, flushThreshold: 0.80 });
+    expect(result.warnThreshold).toBe(0);
+    expect(result.flushThreshold).toBeCloseTo(0.80);
+  });
+
+  it('clamps thresholds above 1 to 1', () => {
+    const result = validateThresholds({ warnThreshold: 0.70, flushThreshold: 1.5 });
+    expect(result.warnThreshold).toBeCloseTo(0.70);
+    expect(result.flushThreshold).toBe(1);
+  });
+
+  it('resets to defaults when warnThreshold >= flushThreshold', () => {
+    const result = validateThresholds({ warnThreshold: 0.90, flushThreshold: 0.80 });
+    expect(result.warnThreshold).toBeCloseTo(0.70);
+    expect(result.flushThreshold).toBeCloseTo(0.80);
+  });
+
+  it('resets to defaults when thresholds are equal', () => {
+    const result = validateThresholds({ warnThreshold: 0.80, flushThreshold: 0.80 });
+    expect(result.warnThreshold).toBeCloseTo(0.70);
+    expect(result.flushThreshold).toBeCloseTo(0.80);
+  });
+
+  it('handles both thresholds out of range with warn >= flush after clamping', () => {
+    // Both clamp to 1.0, then 1.0 >= 1.0 triggers reset to defaults
+    const result = validateThresholds({ warnThreshold: 2.0, flushThreshold: 1.5 });
+    expect(result.warnThreshold).toBeCloseTo(0.70);
+    expect(result.flushThreshold).toBeCloseTo(0.80);
+  });
+
+  it('replaces NaN thresholds with defaults', () => {
+    const result = validateThresholds({ warnThreshold: NaN, flushThreshold: NaN });
+    expect(result.warnThreshold).toBe(0.70);
+    expect(result.flushThreshold).toBe(0.80);
+  });
+
+  it('replaces Infinity thresholds with defaults', () => {
+    const result = validateThresholds({ warnThreshold: Infinity, flushThreshold: -Infinity });
+    expect(result.warnThreshold).toBe(0.70);
+    expect(result.flushThreshold).toBe(0.80);
+  });
+
+  it('replaces only the non-finite threshold, keeps the valid one', () => {
+    const result = validateThresholds({ warnThreshold: NaN, flushThreshold: 0.90 });
+    expect(result.warnThreshold).toBe(0.70);
+    expect(result.flushThreshold).toBeCloseTo(0.90);
+  });
+});
+
+describe('assessUtilization with invalid thresholds', () => {
+  it('uses defaults when warn >= flush', () => {
+    // Inverted thresholds: should reset to 0.70/0.80
+    // At 75% utilization, should be "warn" with default thresholds
+    const result = assessUtilization(7500, 10000, { warnThreshold: 0.90, flushThreshold: 0.80 });
+    expect(result.level).toBe('warn');
   });
 });
 

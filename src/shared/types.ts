@@ -305,6 +305,11 @@ export interface ClaudexConfig {
     flushThreshold: number;     // default 0.80 — trigger flush
     cooldownMs: number;         // default 30000 — min time between flushes
   };
+  vector?: {
+    enabled: boolean;           // default false (use FTS5)
+    provider: 'fts5' | 'openai' | 'local';
+    openai?: { apiKey?: string; model?: string };
+  };
 }
 
 /** Default configuration values */
@@ -330,6 +335,10 @@ export const DEFAULT_CONFIG: ClaudexConfig = {
     warnThreshold: 0.70,
     flushThreshold: 0.80,
     cooldownMs: 30000,
+  },
+  vector: {
+    enabled: false,
+    provider: 'fts5',
   },
 };
 

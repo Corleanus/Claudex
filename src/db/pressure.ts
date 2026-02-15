@@ -8,6 +8,7 @@
 import type Database from 'better-sqlite3';
 import type { PressureScore, TemperatureLevel } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('pressure');
 
@@ -49,6 +50,7 @@ export function upsertPressureScore(
   db: Database.Database,
   score: Omit<PressureScore, 'id' | 'updated_at' | 'updated_at_epoch'>,
 ): void {
+  const startMs = Date.now();
   try {
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
@@ -69,7 +71,9 @@ export function upsertPressureScore(
       now,
       nowEpoch,
     );
+    recordMetric('db.insert', Date.now() - startMs);
   } catch (err) {
+    recordMetric('db.insert', Date.now() - startMs, true);
     log.error('Failed to upsert pressure score:', err);
   }
 }
@@ -79,6 +83,7 @@ export function upsertPressureScore(
  * Ordered by raw_pressure DESC.
  */
 export function getPressureScores(db: Database.Database, project?: string): PressureScore[] {
+  const startMs = Date.now();
   try {
     const sql = project
       ? `SELECT id, file_path, project, raw_pressure, temperature,
@@ -95,8 +100,10 @@ export function getPressureScores(db: Database.Database, project?: string): Pres
       ? db.prepare(sql).all(project) as PressureRow[]
       : db.prepare(sql).all() as PressureRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToPressureScore);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get pressure scores:', err);
     return [];
   }
@@ -106,6 +113,7 @@ export function getPressureScores(db: Database.Database, project?: string): Pres
  * Get only HOT files. Ordered by raw_pressure DESC.
  */
 export function getHotFiles(db: Database.Database, project?: string): PressureScore[] {
+  const startMs = Date.now();
   try {
     const sql = project
       ? `SELECT id, file_path, project, raw_pressure, temperature,
@@ -123,8 +131,10 @@ export function getHotFiles(db: Database.Database, project?: string): PressureSc
       ? db.prepare(sql).all(project) as PressureRow[]
       : db.prepare(sql).all() as PressureRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToPressureScore);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get hot files:', err);
     return [];
   }
@@ -134,6 +144,7 @@ export function getHotFiles(db: Database.Database, project?: string): PressureSc
  * Get only WARM files. Ordered by raw_pressure DESC.
  */
 export function getWarmFiles(db: Database.Database, project?: string): PressureScore[] {
+  const startMs = Date.now();
   try {
     const sql = project
       ? `SELECT id, file_path, project, raw_pressure, temperature,
@@ -151,8 +162,10 @@ export function getWarmFiles(db: Database.Database, project?: string): PressureS
       ? db.prepare(sql).all(project) as PressureRow[]
       : db.prepare(sql).all() as PressureRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToPressureScore);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get warm files:', err);
     return [];
   }
@@ -165,6 +178,7 @@ export function getWarmFiles(db: Database.Database, project?: string): PressureS
  * Returns number of rows updated. Returns 0 on error.
  */
 export function decayAllScores(db: Database.Database, project?: string): number {
+  const startMs = Date.now();
   try {
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
@@ -194,8 +208,10 @@ export function decayAllScores(db: Database.Database, project?: string): number 
       ? db.prepare(sql).run(now, nowEpoch, project)
       : db.prepare(sql).run(now, nowEpoch);
 
+    recordMetric('db.query', Date.now() - startMs);
     return result.changes;
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to decay pressure scores:', err);
     return 0;
   }

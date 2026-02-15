@@ -12,6 +12,7 @@ import type Database from 'better-sqlite3';
 import type { Observation, ObservationCategory, SearchResult } from '../shared/types.js';
 import type { MigrationRunner } from './migrations.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('search');
 
@@ -195,6 +196,7 @@ export function searchObservations(
     minImportance?: number;
   },
 ): SearchResult[] {
+  const searchStart = Date.now();
   try {
     const trimmed = query.trim();
     if (!trimmed) {
@@ -230,12 +232,16 @@ export function searchObservations(
       limit,
     ) as SearchRow[];
 
-    return rows.map(row => ({
+    const result = rows.map(row => ({
       observation: rowToObservation(row),
       rank: row.rank,
       snippet: row.snippet ?? '',
     }));
+
+    recordMetric('db.search_fts5', Date.now() - searchStart);
+    return result;
   } catch (err) {
+    recordMetric('db.search_fts5', Date.now() - searchStart, true);
     log.error('Search failed:', err);
     return [];
   }
@@ -291,6 +297,7 @@ export function searchReasoning(
   query: string,
   options?: { project?: string; limit?: number },
 ): SearchResult[] {
+  const searchStart = Date.now();
   try {
     const trimmed = query.trim();
     if (!trimmed) {
@@ -320,8 +327,11 @@ export function searchReasoning(
       limit,
     ) as ReasoningSearchRow[];
 
-    return rows.map(reasoningRowToSearchResult);
+    const result = rows.map(reasoningRowToSearchResult);
+    recordMetric('db.search_fts5', Date.now() - searchStart);
+    return result;
   } catch (err) {
+    recordMetric('db.search_fts5', Date.now() - searchStart, true);
     log.error('Reasoning search failed:', err);
     return [];
   }
@@ -380,6 +390,7 @@ export function searchConsensus(
   query: string,
   options?: { project?: string; limit?: number },
 ): SearchResult[] {
+  const searchStart = Date.now();
   try {
     const trimmed = query.trim();
     if (!trimmed) {
@@ -410,8 +421,11 @@ export function searchConsensus(
       limit,
     ) as ConsensusSearchRow[];
 
-    return rows.map(consensusRowToSearchResult);
+    const result = rows.map(consensusRowToSearchResult);
+    recordMetric('db.search_fts5', Date.now() - searchStart);
+    return result;
   } catch (err) {
+    recordMetric('db.search_fts5', Date.now() - searchStart, true);
     log.error('Consensus search failed:', err);
     return [];
   }
@@ -431,6 +445,7 @@ export function searchAll(
   query: string,
   options?: { project?: string; limit?: number },
 ): SearchResult[] {
+  const searchStart = Date.now();
   try {
     const trimmed = query.trim();
     if (!trimmed) {
@@ -447,8 +462,11 @@ export function searchAll(
     const merged = [...obsResults, ...reasoningResults, ...consensusResults];
     merged.sort((a, b) => a.rank - b.rank);
 
-    return merged.slice(0, limit);
+    const result = merged.slice(0, limit);
+    recordMetric('db.search_fts5', Date.now() - searchStart);
+    return result;
   } catch (err) {
+    recordMetric('db.search_fts5', Date.now() - searchStart, true);
     log.error('Unified search failed:', err);
     return [];
   }

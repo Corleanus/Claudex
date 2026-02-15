@@ -8,6 +8,7 @@
 import type Database from 'better-sqlite3';
 import type { Observation } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('observations');
 
@@ -16,6 +17,7 @@ const log = createLogger('observations');
  * Returns the inserted row id, or { id: -1 } on error.
  */
 export function storeObservation(db: Database.Database, obs: Observation): { id: number } {
+  const startMs = Date.now();
   try {
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
@@ -46,8 +48,10 @@ export function storeObservation(db: Database.Database, obs: Observation): { id:
       nowEpoch,
     );
 
+    recordMetric('db.insert', Date.now() - startMs);
     return { id: Number(result.lastInsertRowid) };
   } catch (err) {
+    recordMetric('db.insert', Date.now() - startMs, true);
     log.error('Failed to store observation:', err);
     return { id: -1 };
   }
@@ -92,6 +96,7 @@ function rowToObservation(row: ObservationRow): Observation {
  * Get all observations for a given session, ordered by timestamp ascending.
  */
 export function getObservationsBySession(db: Database.Database, sessionId: string): Observation[] {
+  const startMs = Date.now();
   try {
     const rows = db.prepare(`
       SELECT id, session_id, project, timestamp, timestamp_epoch,
@@ -102,8 +107,10 @@ export function getObservationsBySession(db: Database.Database, sessionId: strin
       ORDER BY timestamp_epoch ASC
     `).all(sessionId) as ObservationRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToObservation);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get observations by session:', err);
     return [];
   }
@@ -113,6 +120,7 @@ export function getObservationsBySession(db: Database.Database, sessionId: strin
  * Get the most recent observations, optionally filtered by project.
  */
 export function getRecentObservations(db: Database.Database, limit: number, project?: string): Observation[] {
+  const startMs = Date.now();
   try {
     const sql = project
       ? `SELECT id, session_id, project, timestamp, timestamp_epoch,
@@ -133,8 +141,10 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
       ? db.prepare(sql).all(project, limit) as ObservationRow[]
       : db.prepare(sql).all(limit) as ObservationRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToObservation);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get recent observations:', err);
     return [];
   }
@@ -145,13 +155,16 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
  * Returns the number of deleted rows, or 0 on error.
  */
 export function deleteOldObservations(db: Database.Database, olderThanEpoch: number): number {
+  const startMs = Date.now();
   try {
     const result = db.prepare(
       'DELETE FROM observations WHERE timestamp_epoch < ?'
     ).run(olderThanEpoch);
 
+    recordMetric('db.query', Date.now() - startMs);
     return result.changes;
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to delete old observations:', err);
     return 0;
   }

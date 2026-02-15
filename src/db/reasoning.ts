@@ -8,6 +8,7 @@
 import type Database from 'better-sqlite3';
 import type { ReasoningChain, ReasoningTrigger } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('reasoning');
 
@@ -54,6 +55,7 @@ export function insertReasoning(
   db: Database.Database,
   chain: Omit<ReasoningChain, 'id' | 'created_at' | 'created_at_epoch'>,
 ): { id: number } {
+  const startMs = Date.now();
   try {
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
@@ -82,8 +84,10 @@ export function insertReasoning(
       nowEpoch,
     );
 
+    recordMetric('db.insert', Date.now() - startMs);
     return { id: Number(result.lastInsertRowid) };
   } catch (err) {
+    recordMetric('db.insert', Date.now() - startMs, true);
     log.error('Failed to insert reasoning chain:', err);
     return { id: -1 };
   }
@@ -93,6 +97,7 @@ export function insertReasoning(
  * Get all reasoning chains for a session, ordered by timestamp ascending.
  */
 export function getReasoningBySession(db: Database.Database, sessionId: string): ReasoningChain[] {
+  const startMs = Date.now();
   try {
     const rows = db.prepare(`
       SELECT id, session_id, project, timestamp, timestamp_epoch,
@@ -104,8 +109,10 @@ export function getReasoningBySession(db: Database.Database, sessionId: string):
       ORDER BY timestamp_epoch ASC
     `).all(sessionId) as ReasoningRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToReasoningChain);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get reasoning by session:', err);
     return [];
   }
@@ -116,6 +123,7 @@ export function getReasoningBySession(db: Database.Database, sessionId: string):
  * Ordered by timestamp_epoch DESC.
  */
 export function getRecentReasoning(db: Database.Database, limit: number, project?: string): ReasoningChain[] {
+  const startMs = Date.now();
   try {
     const sql = project
       ? `SELECT id, session_id, project, timestamp, timestamp_epoch,
@@ -138,8 +146,10 @@ export function getRecentReasoning(db: Database.Database, limit: number, project
       ? db.prepare(sql).all(project, limit) as ReasoningRow[]
       : db.prepare(sql).all(limit) as ReasoningRow[];
 
+    recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToReasoningChain);
   } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get recent reasoning:', err);
     return [];
   }
@@ -155,8 +165,10 @@ export function searchReasoning(
   query: string,
   options?: { project?: string; limit?: number },
 ): ReasoningChain[] {
+  const startMs = Date.now();
   try {
     if (!query || query.trim().length === 0) {
+      recordMetric('db.search_fts5', Date.now() - startMs);
       return [];
     }
 
@@ -186,8 +198,10 @@ export function searchReasoning(
       ? db.prepare(sql).all(searchTerm, searchTerm, options.project, limit) as ReasoningRow[]
       : db.prepare(sql).all(searchTerm, searchTerm, limit) as ReasoningRow[];
 
+    recordMetric('db.search_fts5', Date.now() - startMs);
     return rows.map(rowToReasoningChain);
   } catch (err) {
+    recordMetric('db.search_fts5', Date.now() - startMs, true);
     log.error('Failed to search reasoning:', err);
     return [];
   }

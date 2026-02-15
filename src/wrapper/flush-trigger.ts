@@ -12,6 +12,7 @@ import type Database from 'better-sqlite3';
 import type { Scope, ReasoningChain, PressureScore } from '../shared/types.js';
 import { CLAUDEX_HOME } from '../shared/paths.js';
 import { createLogger } from '../shared/logger.js';
+import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('flush-trigger');
 
@@ -169,6 +170,8 @@ export async function executeFlush(options: FlushOptions): Promise<FlushResult> 
   // Update cooldown (persisted to file for cross-process durability)
   writeCooldownEpoch(Date.now());
   result.durationMs = Date.now() - startMs;
+
+  recordMetric('flush.trigger', result.durationMs);
 
   log.info('Flush complete', {
     reasoning: result.reasoningCaptured,
