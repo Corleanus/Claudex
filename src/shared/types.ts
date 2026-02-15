@@ -256,6 +256,8 @@ export interface ContextSources {
   hologram: HologramResponse | null;
   searchResults: SearchResult[];
   recentObservations: Observation[];
+  reasoningChains?: ReasoningChain[];
+  consensusDecisions?: ConsensusDecision[];
   scope: Scope;
   identity?: { agent?: string; user?: string };
   projectContext?: { primer?: string; handoff?: string };

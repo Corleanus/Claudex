@@ -227,6 +227,102 @@ Session ended without /endsession. This is a fail-safe handoff.
   }
 
   // =========================================================================
+  // Section 6: State capture — persist pressure scores and session summary
+  // =========================================================================
+  let pressureCaptured = false;
+  let summaryCaptured = false;
+
+  // 6a: Persist pressure scores from hologram (if available) to DB
+  try {
+    const { getDatabase } = await import('../db/connection.js');
+    const { upsertPressureScore } = await import('../db/pressure.js');
+    const { loadConfig } = await import('../shared/config.js');
+
+    const config = loadConfig();
+    const db = getDatabase();
+    try {
+      if (config.hologram?.enabled) {
+        try {
+          const { HologramClient } = await import('../hologram/client.js');
+          const { SidecarManager } = await import('../hologram/launcher.js');
+          const { ProtocolHandler } = await import('../hologram/protocol.js');
+
+          const launcher = new SidecarManager();
+          const protocol = new ProtocolHandler();
+          const client = new HologramClient(launcher, protocol, config);
+
+          if (client.isAvailable()) {
+            const response = await client.query('session-end', 0, session_id);
+            const allFiles = [...response.hot, ...response.warm, ...response.cold];
+
+            for (const file of allFiles) {
+              upsertPressureScore(db, {
+                file_path: file.path,
+                project: scope.type === 'project' ? scope.name : undefined,
+                raw_pressure: file.raw_pressure,
+                temperature: file.temperature,
+                last_accessed_epoch: Date.now(),
+                decay_rate: 0.05,
+              });
+            }
+
+            pressureCaptured = true;
+            logToFile('session-end', 'INFO',
+              `Pressure scores captured from hologram: ${allFiles.length} files`);
+          } else {
+            logToFile('session-end', 'DEBUG', 'Hologram not available — skipping pressure capture');
+          }
+        } catch (hologramErr) {
+          logToFile('session-end', 'DEBUG', 'Hologram query for pressure capture failed (non-fatal)', hologramErr);
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    logToFile('session-end', 'WARN', 'Section 6a (pressure capture) failed (non-fatal):', err);
+  }
+
+  // 6b: Write session summary to flat-file mirror
+  try {
+    const scopeStr = scope.type === 'project' ? `project:${scope.name}` : 'global';
+
+    const summaryLines = [
+      '---',
+      `session_id: ${session_id}`,
+      `scope: ${scopeStr}`,
+      `reason: ${reason}`,
+      `started_at: unknown`,
+      `ended_at: ${isoTimestamp}`,
+      `transcript_saved: ${transcriptSaved}`,
+      `completion_marker: ${completionMarkerFound}`,
+      `failsafe_written: ${failsafeWritten}`,
+      `sqlite_updated: ${sqliteUpdated}`,
+      `pressure_captured: ${pressureCaptured}`,
+      '---',
+      '',
+      '# Session Summary',
+      '',
+      `Session \`${session_id}\` ended at ${isoTimestamp}.`,
+      `- **Scope**: ${scopeStr}`,
+      `- **Reason**: ${reason}`,
+      `- **CWD**: ${cwd}`,
+      '',
+    ];
+
+    const sessionDir = path.join(PATHS.sessions, session_id);
+    fs.mkdirSync(sessionDir, { recursive: true });
+
+    const summaryPath = path.join(sessionDir, 'summary.md');
+    fs.writeFileSync(summaryPath, summaryLines.join('\n'), 'utf-8');
+
+    summaryCaptured = true;
+    logToFile('session-end', 'INFO', `Session summary written: ${summaryPath}`);
+  } catch (err) {
+    logToFile('session-end', 'WARN', 'Section 6b (session summary) failed (non-fatal):', err);
+  }
+
+  // =========================================================================
   // Summary log
   // =========================================================================
   logToFile('session-end', 'INFO', [
@@ -239,6 +335,8 @@ Session ended without /endsession. This is a fail-safe handoff.
     `  failsafeLocation=${failsafeLocation || '(none)'}`,
     `  sessionIndexUpdated=${sessionIndexUpdated}`,
     `  sqliteUpdated=${sqliteUpdated}`,
+    `  pressureCaptured=${pressureCaptured}`,
+    `  summaryCaptured=${summaryCaptured}`,
   ].join('\n'));
 
   return {};

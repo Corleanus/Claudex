@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { PATHS } from '../shared/paths.js';
-import type { SessionStartInput, Scope } from '../shared/types.js';
+import type { SessionStartInput, Scope, ContextSources, HookStdout } from '../shared/types.js';
 
 const HOOK_NAME = 'session-start';
 
@@ -199,12 +199,132 @@ runHook(HOOK_NAME, async (input) => {
   const isFirstRun = detectFirstRun();
   logToFile(HOOK_NAME, 'INFO', `First run: ${isFirstRun}`);
 
-  // Step 6: Final log summary
+  // Step 6: Context restoration from DB
+  let additionalContext: string | undefined;
+  try {
+    const { getDatabase } = await import('../db/connection.js');
+    const { getRecentObservations } = await import('../db/observations.js');
+    const { getRecentReasoning } = await import('../db/reasoning.js');
+    const { getRecentConsensus } = await import('../db/consensus.js');
+    const { getPressureScores } = await import('../db/pressure.js');
+    const { assembleContext } = await import('../lib/context-assembler.js');
+    const { loadConfig } = await import('../shared/config.js');
+
+    const db = getDatabase();
+    try {
+      // Query previous session state
+      const observations = getRecentObservations(db, 20, project ?? undefined);
+      const reasoningChains = getRecentReasoning(db, 5, project ?? undefined);
+      const consensusDecisions = getRecentConsensus(db, 5, project ?? undefined);
+      const pressureScores = getPressureScores(db, project ?? undefined);
+
+      logToFile(HOOK_NAME, 'DEBUG',
+        `DB restoration data: observations=${observations.length} reasoning=${reasoningChains.length} consensus=${consensusDecisions.length} pressure=${pressureScores.length}`);
+
+      // Build hologram-like response from DB pressure scores (fallback)
+      // If hologram is available, query it instead
+      let hologramResponse: import('../shared/types.js').HologramResponse | null = null;
+      const config = loadConfig();
+
+      if (config.hologram?.enabled) {
+        try {
+          const { HologramClient } = await import('../hologram/client.js');
+          const { SidecarManager } = await import('../hologram/launcher.js');
+          const { ProtocolHandler } = await import('../hologram/protocol.js');
+
+          const launcher = new SidecarManager();
+          const protocol = new ProtocolHandler();
+          const client = new HologramClient(launcher, protocol, config);
+
+          if (client.isAvailable()) {
+            hologramResponse = await client.query('session-start', 0, sessionId);
+            logToFile(HOOK_NAME, 'DEBUG', 'Hologram sidecar responded with scores');
+          } else {
+            logToFile(HOOK_NAME, 'DEBUG', 'Hologram sidecar not available, using DB pressure scores as fallback');
+          }
+        } catch (hologramErr) {
+          logToFile(HOOK_NAME, 'DEBUG', 'Hologram query failed, falling back to DB pressure scores', hologramErr);
+        }
+      }
+
+      // If hologram unavailable, build scored files from DB pressure scores
+      if (!hologramResponse && pressureScores.length > 0) {
+        const hot = pressureScores
+          .filter(s => s.temperature === 'HOT')
+          .map(s => ({
+            path: s.file_path,
+            raw_pressure: s.raw_pressure,
+            temperature: 'HOT' as const,
+            system_bucket: 0,
+            pressure_bucket: Math.round(s.raw_pressure * 47),
+          }));
+        const warm = pressureScores
+          .filter(s => s.temperature === 'WARM')
+          .map(s => ({
+            path: s.file_path,
+            raw_pressure: s.raw_pressure,
+            temperature: 'WARM' as const,
+            system_bucket: 0,
+            pressure_bucket: Math.round(s.raw_pressure * 47),
+          }));
+        const cold = pressureScores
+          .filter(s => s.temperature === 'COLD')
+          .map(s => ({
+            path: s.file_path,
+            raw_pressure: s.raw_pressure,
+            temperature: 'COLD' as const,
+            system_bucket: 0,
+            pressure_bucket: Math.round(s.raw_pressure * 47),
+          }));
+
+        hologramResponse = { hot, warm, cold };
+        logToFile(HOOK_NAME, 'DEBUG',
+          `Built hologram fallback from DB: hot=${hot.length} warm=${warm.length} cold=${cold.length}`);
+      }
+
+      // Build ContextSources
+      const sources: ContextSources = {
+        hologram: hologramResponse,
+        searchResults: [],
+        recentObservations: observations,
+        reasoningChains,
+        consensusDecisions,
+        scope,
+        postCompaction: false,
+      };
+
+      // Assemble context
+      const assembled = assembleContext(sources, { maxTokens: 4000 });
+
+      if (assembled.markdown.length > 0) {
+        additionalContext = assembled.markdown;
+        logToFile(HOOK_NAME, 'INFO',
+          `Context restoration assembled: ${assembled.tokenEstimate} tokens, sources=[${assembled.sources.join(', ')}]`);
+      } else {
+        logToFile(HOOK_NAME, 'INFO', 'Context restoration: no restorable context found');
+      }
+    } finally {
+      db.close();
+    }
+  } catch (restorationErr) {
+    logToFile(HOOK_NAME, 'WARN', 'Context restoration failed (non-fatal, continuing without restoration)', restorationErr);
+  }
+
+  // Step 7: Final log summary
   logToFile(
     HOOK_NAME,
     'INFO',
-    `=== SESSION START === id=${sessionId} cwd=${cwd} source=${source} scope=${scopeStr} project=${project ?? 'none'} firstRun=${isFirstRun}`,
+    `=== SESSION START === id=${sessionId} cwd=${cwd} source=${source} scope=${scopeStr} project=${project ?? 'none'} firstRun=${isFirstRun} restored=${!!additionalContext}`,
   );
 
-  return {};
+  // Build output
+  const output: HookStdout = {};
+  if (additionalContext) {
+    output.hookSpecificOutput = {
+      hookEventName: 'SessionStart',
+      additionalContext,
+    };
+  }
+
+  return output;
 });
