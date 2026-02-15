@@ -9,7 +9,7 @@
 import type Database from 'better-sqlite3';
 import { createLogger } from '../shared/logger.js';
 import { migration_1 } from './schema.js';
-import { migration_2 } from './search.js';
+import { migration_2, migration_4 } from './search.js';
 import { migration_3 } from './schema-phase2.js';
 
 const log = createLogger('migrations');
@@ -26,6 +26,7 @@ export class MigrationRunner {
     migration_1(this);
     migration_2(this);
     migration_3(this);
+    migration_4(this);
     // Future migrations added here in sequence
   }
 
