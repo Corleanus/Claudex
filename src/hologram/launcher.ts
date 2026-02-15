@@ -10,19 +10,22 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as net from 'node:net';
 import * as path from 'node:path';
 
 import { loadConfig } from '../shared/config.js';
 import { HologramError, HologramUnavailableError } from '../shared/errors.js';
 import { createLogger } from '../shared/logger.js';
 import { PATHS } from '../shared/paths.js';
+import { ProtocolHandler, buildRequest } from './protocol.js';
 
 const log = createLogger('hologram-sidecar');
 
 const PORT_POLL_INTERVAL_MS = 200;
 const PORT_POLL_TIMEOUT_MS = 5000;
 const STOP_GRACE_MS = 3000;
+
+/** Timeout for the ping verification probe (shorter than normal requests). */
+const PING_PROBE_TIMEOUT_MS = 1500;
 
 /**
  * Check whether a process with the given PID is alive.
@@ -34,28 +37,6 @@ function isProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Attempt a TCP connection to localhost:port.
- * Resolves true if connection succeeds, false on ECONNREFUSED or timeout.
- */
-function probePort(port: number, timeoutMs: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const socket = net.createConnection({ host: '127.0.0.1', port }, () => {
-      socket.destroy();
-      resolve(true);
-    });
-    socket.setTimeout(timeoutMs);
-    socket.on('timeout', () => {
-      socket.destroy();
-      resolve(false);
-    });
-    socket.on('error', () => {
-      socket.destroy();
-      resolve(false);
-    });
-  });
 }
 
 /**
@@ -79,6 +60,30 @@ function safeUnlink(filePath: string): void {
     fs.unlinkSync(filePath);
   } catch {
     // Already gone or permission issue — nothing we can do.
+  }
+}
+
+/**
+ * Send a ping to a port and verify the response is a valid hologram sidecar pong.
+ * Returns 'ours' if the sidecar responds correctly, 'foreign' if the port is occupied
+ * by something else, or 'dead' if nothing is listening.
+ */
+async function verifySidecarPing(port: number): Promise<'ours' | 'foreign' | 'dead'> {
+  try {
+    const protocol = new ProtocolHandler(PING_PROBE_TIMEOUT_MS);
+    const request = buildRequest('ping');
+    const response = await protocol.send(port, request);
+    return response.type === 'pong' ? 'ours' : 'foreign';
+  } catch (err: unknown) {
+    // HologramUnavailableError with ECONNREFUSED → nothing listening
+    if (
+      err instanceof Error &&
+      (err.message.includes('connection refused') || err.message.includes('ECONNREFUSED'))
+    ) {
+      return 'dead';
+    }
+    // Timeout, malformed response, id mismatch → foreign process
+    return 'foreign';
   }
 }
 
@@ -121,21 +126,32 @@ export class SidecarManager {
         const existingPort = readNumericFile(PATHS.hologramPort);
 
         if (existingPort !== null) {
-          const config = loadConfig();
-          const timeoutMs = config.hologram?.timeout_ms ?? 2000;
-          const alive = await probePort(existingPort, timeoutMs);
+          // Verify the port is actually our sidecar via NDJSON ping, not just a raw probe.
+          // This catches: (a) foreign process occupying the port, (b) stale port from
+          // a dead sidecar whose PID was recycled by the OS.
+          const status = await verifySidecarPing(existingPort);
 
-          if (alive) {
-            log.info('Sidecar already running', { pid: existingPid, port: existingPort });
+          if (status === 'ours') {
+            log.info('Sidecar already running (ping verified)', { pid: existingPid, port: existingPort });
             return;
           }
 
-          // Port unreachable even though process alive — stale port file
-          log.warn('Sidecar process alive but port unreachable, cleaning up', {
-            pid: existingPid,
-            port: existingPort,
-          });
-          safeUnlink(PATHS.hologramPort);
+          if (status === 'foreign') {
+            // Something else is listening on our port — don't kill it, just discard our stale port file.
+            // The spawn below will use port 0 (OS-assigned) to avoid conflict.
+            log.warn('Foreign process occupies sidecar port, will pick a new port', {
+              pid: existingPid,
+              port: existingPort,
+            });
+            safeUnlink(PATHS.hologramPort);
+          } else {
+            // 'dead' — port unreachable even though process alive — stale port file
+            log.warn('Sidecar process alive but port unreachable, cleaning up', {
+              pid: existingPid,
+              port: existingPort,
+            });
+            safeUnlink(PATHS.hologramPort);
+          }
         }
 
         // Process alive but no valid port — kill and restart
@@ -147,11 +163,41 @@ export class SidecarManager {
         }
         safeUnlink(PATHS.hologramPid);
       } else {
-        // Orphan: PID file exists but process dead
-        log.warn('Orphaned sidecar PID file, cleaning up', { pid: existingPid });
+        // Orphan: PID file exists but process dead.
+        // Port file may also be stale — but check if a foreign process now occupies the port.
+        const orphanPort = readNumericFile(PATHS.hologramPort);
+        if (orphanPort !== null) {
+          const status = await verifySidecarPing(orphanPort);
+          if (status === 'foreign') {
+            log.warn('Orphaned PID file and foreign process on port, discarding port file', {
+              pid: existingPid,
+              port: orphanPort,
+            });
+          } else {
+            log.warn('Orphaned sidecar PID file, cleaning up', { pid: existingPid });
+          }
+          safeUnlink(PATHS.hologramPort);
+        } else {
+          log.warn('Orphaned sidecar PID file, cleaning up', { pid: existingPid });
+        }
         safeUnlink(PATHS.hologramPid);
-        safeUnlink(PATHS.hologramPort);
       }
+    }
+
+    // --- Pre-spawn port check: verify port file isn't left from a crash ---
+    // Handles the edge case where PID file is missing but port file remains.
+    const stalePort = readNumericFile(PATHS.hologramPort);
+    if (stalePort !== null) {
+      const status = await verifySidecarPing(stalePort);
+      if (status === 'ours') {
+        // A sidecar is running without a PID file — adopt it
+        log.info('Found running sidecar without PID file, reusing', { port: stalePort });
+        return;
+      }
+      if (status === 'foreign') {
+        log.warn('Foreign process on stale port, discarding port file', { port: stalePort });
+      }
+      safeUnlink(PATHS.hologramPort);
     }
 
     // --- Spawn new sidecar ---
@@ -248,6 +294,30 @@ export class SidecarManager {
 
     const port = readNumericFile(PATHS.hologramPort);
     log.info('Sidecar started', { pid: this.proc.pid, port });
+
+    // Register cleanup handler: remove PID/port files when this Node process exits.
+    // This prevents stale files if the parent process is killed unexpectedly.
+    this.registerExitCleanup();
+  }
+
+  /** Whether the exit cleanup handler has been registered. */
+  private exitCleanupRegistered = false;
+
+  /**
+   * Register a one-time process exit handler that cleans up PID and port files.
+   * Idempotent — only registers once per SidecarManager instance.
+   */
+  private registerExitCleanup(): void {
+    if (this.exitCleanupRegistered) return;
+    this.exitCleanupRegistered = true;
+
+    const cleanup = (): void => {
+      safeUnlink(PATHS.hologramPid);
+      safeUnlink(PATHS.hologramPort);
+    };
+
+    // 'exit' fires on clean exit and process.exit() — runs synchronously only
+    process.on('exit', cleanup);
   }
 
   /**
