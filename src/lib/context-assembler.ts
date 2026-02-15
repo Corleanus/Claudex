@@ -36,8 +36,9 @@ function estimateTokens(text: string): number {
 // Time formatting
 // =============================================================================
 
+// timestamp_epoch is always milliseconds (epoch ms)
 function formatTimeAgo(epochMs: number): string {
-  const diffMs = Date.now() - epochMs * 1000;
+  const diffMs = Date.now() - epochMs;
   const minutes = Math.floor(diffMs / 60_000);
 
   if (minutes < 1) return 'just now';
