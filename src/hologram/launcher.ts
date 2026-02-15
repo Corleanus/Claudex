@@ -294,30 +294,10 @@ export class SidecarManager {
 
     const port = readNumericFile(PATHS.hologramPort);
     log.info('Sidecar started', { pid: this.proc.pid, port });
-
-    // Register cleanup handler: remove PID/port files when this Node process exits.
-    // This prevents stale files if the parent process is killed unexpectedly.
-    this.registerExitCleanup();
-  }
-
-  /** Whether the exit cleanup handler has been registered. */
-  private exitCleanupRegistered = false;
-
-  /**
-   * Register a one-time process exit handler that cleans up PID and port files.
-   * Idempotent — only registers once per SidecarManager instance.
-   */
-  private registerExitCleanup(): void {
-    if (this.exitCleanupRegistered) return;
-    this.exitCleanupRegistered = true;
-
-    const cleanup = (): void => {
-      safeUnlink(PATHS.hologramPid);
-      safeUnlink(PATHS.hologramPort);
-    };
-
-    // 'exit' fires on clean exit and process.exit() — runs synchronously only
-    process.on('exit', cleanup);
+    // NOTE: No process-exit cleanup registered here. Hooks are ephemeral processes
+    // that exit after each invocation. The sidecar is detached and long-lived.
+    // Cleaning up PID/port files on hook exit would erase tracking for a live sidecar.
+    // Cleanup happens in stop() or via orphan detection on next start().
   }
 
   /**
@@ -386,10 +366,10 @@ export class SidecarManager {
 
   /**
    * Get the TCP port the sidecar is listening on.
-   * Returns null if sidecar is not running or port file missing/invalid.
+   * Returns null if port file missing/invalid.
+   * Does NOT require PID file — supports adopted sidecars (port file only).
    */
   getPort(): number | null {
-    if (!this.isRunning()) return null;
     return readNumericFile(PATHS.hologramPort);
   }
 
