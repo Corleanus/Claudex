@@ -134,6 +134,71 @@ export interface SearchResult {
 }
 
 // =============================================================================
+// Reasoning Chains (Flow)
+// =============================================================================
+
+export type ReasoningTrigger = 'pre_compact' | 'manual' | 'session_end';
+
+export interface ReasoningChain {
+  id?: number;
+  session_id: string;
+  project?: string;
+  timestamp: string;
+  timestamp_epoch: number;      // milliseconds
+  trigger: ReasoningTrigger;
+  title: string;
+  reasoning: string;
+  decisions?: string[];         // JSON array when stored
+  files_involved?: string[];    // JSON array when stored
+  importance: number;
+  created_at?: string;
+  created_at_epoch?: number;
+}
+
+// =============================================================================
+// Consensus Decisions
+// =============================================================================
+
+export type ConsensusStatus = 'proposed' | 'agreed' | 'rejected' | 'superseded';
+
+export interface ConsensusDecision {
+  id?: number;
+  session_id: string;
+  project?: string;
+  timestamp: string;
+  timestamp_epoch: number;
+  title: string;
+  description: string;
+  claude_position?: string;
+  codex_position?: string;
+  human_verdict?: string;
+  status: ConsensusStatus;
+  tags?: string[];              // JSON array when stored
+  files_affected?: string[];    // JSON array when stored
+  importance: number;
+  created_at?: string;
+  created_at_epoch?: number;
+}
+
+// =============================================================================
+// Pressure Scores
+// =============================================================================
+
+export type TemperatureLevel = 'HOT' | 'WARM' | 'COLD';
+
+export interface PressureScore {
+  id?: number;
+  file_path: string;
+  project?: string;
+  raw_pressure: number;
+  temperature: TemperatureLevel;
+  last_accessed_epoch?: number;
+  decay_rate: number;
+  updated_at?: string;
+  updated_at_epoch?: number;
+}
+
+// =============================================================================
 // Hologram Sidecar
 // =============================================================================
 
