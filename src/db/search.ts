@@ -476,7 +476,9 @@ export function rebuildSearchIndex(db: Database.Database): void {
 export function optimizeSearchIndex(db: Database.Database): void {
   try {
     db.exec(`INSERT INTO observations_fts(observations_fts) VALUES('optimize')`);
-    log.info('FTS5 index optimized');
+    db.exec(`INSERT INTO reasoning_fts(reasoning_fts) VALUES('optimize')`);
+    db.exec(`INSERT INTO consensus_fts(consensus_fts) VALUES('optimize')`);
+    log.info('All FTS5 indexes optimized');
   } catch (err) {
     log.error('FTS5 optimize failed:', err);
   }

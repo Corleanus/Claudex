@@ -32,6 +32,7 @@ async function queryHologram(
   promptText: string,
   sessionId: string,
   recentFiles: string[],
+  scope: Scope,
 ): Promise<HologramResponse | null> {
   try {
     const config = loadConfig();
@@ -45,16 +46,30 @@ async function queryHologram(
     const { ProtocolHandler } = await import('../hologram/protocol.js');
     const { HologramClient } = await import('../hologram/client.js');
     const { ResilientHologramClient } = await import('../hologram/degradation.js');
+    const { getDatabase } = await import('../db/connection.js');
 
     const launcher = new SidecarManager();
     const protocol = new ProtocolHandler(config.hologram?.timeout_ms ?? 2000);
     const client = new HologramClient(launcher, protocol, config);
     const resilient = new ResilientHologramClient(client, config);
 
-    const result = await resilient.queryWithFallback(promptText, 0, sessionId, recentFiles);
+    // Open DB for fallback tier — but don't let DB failure block hologram query
+    let db: import('better-sqlite3').Database | undefined;
+    try {
+      db = getDatabase();
+    } catch (dbErr) {
+      logToFile(HOOK_NAME, 'WARN', 'DB unavailable for fallback tier, continuing without', dbErr);
+    }
 
-    logToFile(HOOK_NAME, 'DEBUG', `Hologram query complete, source=${result.source}`);
-    return result;
+    try {
+      const project = scope.type === 'project' ? scope.name : undefined;
+      const result = await resilient.queryWithFallback(promptText, 0, sessionId, recentFiles, db, project);
+
+      logToFile(HOOK_NAME, 'DEBUG', `Hologram query complete, source=${result.source}`);
+      return result;
+    } finally {
+      db?.close();
+    }
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'Hologram query failed entirely', err);
     return null;
@@ -195,7 +210,7 @@ runHook(HOOK_NAME, async (input) => {
 
   // 5. Query hologram sidecar (with degradation fallback using recent file paths)
   const recentFiles = extractRecentFiles(recentObservations);
-  const hologramResult = await queryHologram(promptText, sessionId, recentFiles);
+  const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope);
 
   // 6. Query FTS5 search (keywords from prompt)
   const ftsResults = queryFts5(promptText, scope);

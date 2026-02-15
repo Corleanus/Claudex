@@ -11,11 +11,14 @@ import { createLogger } from '../shared/logger.js';
 
 const log = createLogger('pressure');
 
+/** Sentinel value for global scope (no project). Avoids NULL in UNIQUE index. */
+const GLOBAL_PROJECT_SENTINEL = '__global__';
+
 /** Row shape returned by SQLite before hydration */
 interface PressureRow {
   id: number;
   file_path: string;
-  project: string | null;
+  project: string;
   raw_pressure: number;
   temperature: string;
   last_accessed_epoch: number | null;
@@ -28,7 +31,7 @@ function rowToPressureScore(row: PressureRow): PressureScore {
   return {
     id: row.id,
     file_path: row.file_path,
-    project: row.project ?? undefined,
+    project: row.project,
     raw_pressure: row.raw_pressure,
     temperature: row.temperature as TemperatureLevel,
     last_accessed_epoch: row.last_accessed_epoch ?? undefined,
@@ -58,7 +61,7 @@ export function upsertPressureScore(
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       score.file_path,
-      score.project ?? null,
+      score.project ?? GLOBAL_PROJECT_SENTINEL,
       score.raw_pressure,
       score.temperature,
       score.last_accessed_epoch ?? null,

@@ -189,6 +189,11 @@ export type TemperatureLevel = 'HOT' | 'WARM' | 'COLD';
 export interface PressureScore {
   id?: number;
   file_path: string;
+  /**
+   * Project scope for this pressure score. Uses `'__global__'` sentinel
+   * for global scope (no project). Never stored as NULL in SQLite —
+   * the sentinel ensures UNIQUE(file_path, project) works correctly.
+   */
   project?: string;
   raw_pressure: number;
   temperature: TemperatureLevel;

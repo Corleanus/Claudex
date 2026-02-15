@@ -66,7 +66,7 @@ export function migration_3(runner: MigrationRunner): void {
     CREATE TABLE pressure_scores (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       file_path TEXT NOT NULL,
-      project TEXT,
+      project TEXT NOT NULL DEFAULT '__global__',
       raw_pressure REAL NOT NULL DEFAULT 0.0,
       temperature TEXT CHECK(temperature IN ('HOT', 'WARM', 'COLD')) DEFAULT 'COLD',
       last_accessed_epoch INTEGER,
