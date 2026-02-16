@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Claudex v2 — Pre-push hook
+# Delegates to the cross-platform Node.js codex review script.
+# If node is not available, allows push (non-blocking).
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REVIEW_SCRIPT="$SCRIPT_DIR/../scripts/codex-review.mjs"
+
+if ! command -v node &>/dev/null; then
+  echo "Warning: node not found. Skipping Codex pre-push review."
+  exit 0
+fi
+
+if [ ! -f "$REVIEW_SCRIPT" ]; then
+  echo "Warning: codex-review.mjs not found at $REVIEW_SCRIPT. Skipping review."
+  exit 0
+fi
+
+exec node "$REVIEW_SCRIPT"

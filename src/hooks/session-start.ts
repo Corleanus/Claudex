@@ -195,22 +195,30 @@ runHook(HOOK_NAME, async (input) => {
   // Step 4: SQLite registration (soft dependency)
   await registerInSqlite(scope, sessionId, cwd);
 
-  // Step 4.5: Health check
+  // Step 4.5: Health check + Recovery
   try {
     const { loadConfig } = await import('../shared/config.js');
     const { checkHealth } = await import('../shared/health.js');
     const { getDatabase } = await import('../db/connection.js');
+    const { runRecovery } = await import('../lib/recovery.js');
 
     const config = loadConfig();
     const db = getDatabase();
     try {
+      // Run recovery first — cleans up stale state before health check
+      const recovery = await runRecovery(config, db);
+      if (recovery.actionsPerformed.length > 0) {
+        logToFile(HOOK_NAME, 'INFO', `Recovery: ${recovery.actionsPerformed.join(', ')}`);
+      }
+
       const health = checkHealth(config, db);
+      health.recovery = recovery;
       logToFile(HOOK_NAME, 'INFO', `System health: ${JSON.stringify(health)}`);
     } finally {
       db.close();
     }
   } catch (healthErr) {
-    logToFile(HOOK_NAME, 'WARN', 'Health check failed (non-fatal)', healthErr);
+    logToFile(HOOK_NAME, 'WARN', 'Health check / recovery failed (non-fatal)', healthErr);
   }
 
   // Step 5: First-run detection
@@ -257,6 +265,40 @@ runHook(HOOK_NAME, async (input) => {
           if (client.isAvailable()) {
             hologramResponse = await client.query('session-start', 0, sessionId);
             logToFile(HOOK_NAME, 'DEBUG', 'Hologram sidecar responded with scores');
+
+            // Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
+            if (hologramResponse) {
+              try {
+                const { upsertPressureScore } = await import('../db/pressure.js');
+                const projectKey = project ?? '__global__';
+                const nowEpoch = Date.now();
+
+                const entries: Array<{ list: typeof hologramResponse.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
+                  { list: hologramResponse.hot, temp: 'HOT', pressure: 0.9 },
+                  { list: hologramResponse.warm, temp: 'WARM', pressure: 0.5 },
+                  { list: hologramResponse.cold, temp: 'COLD', pressure: 0.1 },
+                ];
+
+                let persisted = 0;
+                for (const { list, temp, pressure } of entries) {
+                  for (const file of list) {
+                    upsertPressureScore(db, {
+                      file_path: file.path,
+                      project: projectKey,
+                      raw_pressure: file.raw_pressure ?? pressure,
+                      temperature: temp,
+                      last_accessed_epoch: nowEpoch,
+                      decay_rate: 0.05,
+                    });
+                    persisted++;
+                  }
+                }
+
+                logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} hologram pressure scores to DB`);
+              } catch (persistErr) {
+                logToFile(HOOK_NAME, 'WARN', 'Failed to persist hologram pressure scores (non-fatal)', persistErr);
+              }
+            }
           } else {
             logToFile(HOOK_NAME, 'DEBUG', 'Hologram sidecar not available, using DB pressure scores as fallback');
           }
@@ -326,6 +368,31 @@ runHook(HOOK_NAME, async (input) => {
     }
   } catch (restorationErr) {
     logToFile(HOOK_NAME, 'WARN', 'Context restoration failed (non-fatal, continuing without restoration)', restorationErr);
+  }
+
+  // Step 6.5: Audit log — session restoration
+  try {
+    const { getDatabase: getAuditDb } = await import('../db/connection.js');
+    const { logAudit } = await import('../db/audit.js');
+    const auditDb = getAuditDb();
+    try {
+      const auditNow = new Date();
+      logAudit(auditDb, {
+        timestamp: auditNow.toISOString(),
+        timestamp_epoch: auditNow.getTime(),
+        session_id: sessionId,
+        event_type: 'context_assembly',
+        actor: 'hook:session-start',
+        details: {
+          restored: !!additionalContext,
+          source,
+        },
+      });
+    } finally {
+      auditDb.close();
+    }
+  } catch (auditErr) {
+    logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);
   }
 
   // Step 7: Final log summary

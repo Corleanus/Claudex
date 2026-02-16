@@ -227,7 +227,54 @@ Session ended without /endsession. This is a fail-safe handoff.
   }
 
   // =========================================================================
-  // Section 6: State capture — persist pressure scores and session summary
+  // Section 6: Retention policy enforcement
+  // =========================================================================
+  let retentionRan = false;
+  try {
+    const { loadConfig } = await import('../shared/config.js');
+    const config = loadConfig();
+
+    // retention_days=0 means "purge everything immediately" (valid)
+    // retention_days=undefined/null means "use default 90 days" — skip here, only run when explicitly configured
+    if (config.observation?.retention_days != null) {
+      const { enforceRetention } = await import('../lib/retention.js');
+      const { getDatabase } = await import('../db/connection.js');
+
+      const retentionDb = getDatabase();
+      try {
+        const retentionResult = enforceRetention(retentionDb, config);
+        retentionRan = true;
+        if (retentionResult.observationsDeleted > 0 || retentionResult.reasoningDeleted > 0) {
+          logToFile('session-end', 'INFO',
+            `Retention cleanup: ${retentionResult.observationsDeleted} observations, ${retentionResult.reasoningDeleted} reasoning chains, ${retentionResult.consensusDeleted} consensus deleted (${retentionResult.durationMs}ms)`);
+        }
+        // Audit the retention action + self-clean old audit entries
+        try {
+          const { logAudit, cleanOldAuditLogs } = await import('../db/audit.js');
+          logAudit(retentionDb, {
+            timestamp: new Date().toISOString(),
+            timestamp_epoch: Date.now(),
+            session_id,
+            event_type: 'retention_cleanup',
+            actor: 'hook:session-end',
+            details: {
+              observations: retentionResult.observationsDeleted,
+              reasoning: retentionResult.reasoningDeleted,
+              consensus: retentionResult.consensusDeleted,
+            },
+          });
+          cleanOldAuditLogs(retentionDb, 30);
+        } catch { /* audit is best-effort */ }
+      } finally {
+        retentionDb.close();
+      }
+    }
+  } catch (err) {
+    logToFile('session-end', 'WARN', 'Section 6 (retention policy) failed (non-fatal):', err);
+  }
+
+  // =========================================================================
+  // Section 7: State capture — persist pressure scores and session summary
   // =========================================================================
   let pressureCaptured = false;
   let summaryCaptured = false;
@@ -335,6 +382,7 @@ Session ended without /endsession. This is a fail-safe handoff.
     `  failsafeLocation=${failsafeLocation || '(none)'}`,
     `  sessionIndexUpdated=${sessionIndexUpdated}`,
     `  sqliteUpdated=${sqliteUpdated}`,
+    `  retentionRan=${retentionRan}`,
     `  pressureCaptured=${pressureCaptured}`,
     `  summaryCaptured=${summaryCaptured}`,
   ].join('\n'));

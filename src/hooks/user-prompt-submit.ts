@@ -212,6 +212,47 @@ runHook(HOOK_NAME, async (input) => {
   const recentFiles = extractRecentFiles(recentObservations);
   const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope);
 
+  // 5.5. Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
+  if (hologramResult) {
+    try {
+      const { getDatabase } = await import('../db/connection.js');
+      const { upsertPressureScore } = await import('../db/pressure.js');
+
+      const db = getDatabase();
+      try {
+        const project = scope.type === 'project' ? scope.name : '__global__';
+        const nowEpoch = Date.now();
+
+        const entries: Array<{ list: typeof hologramResult.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
+          { list: hologramResult.hot, temp: 'HOT', pressure: 0.9 },
+          { list: hologramResult.warm, temp: 'WARM', pressure: 0.5 },
+          { list: hologramResult.cold, temp: 'COLD', pressure: 0.1 },
+        ];
+
+        let persisted = 0;
+        for (const { list, temp, pressure } of entries) {
+          for (const file of list) {
+            upsertPressureScore(db, {
+              file_path: file.path,
+              project,
+              raw_pressure: file.raw_pressure ?? pressure,
+              temperature: temp,
+              last_accessed_epoch: nowEpoch,
+              decay_rate: 0.05,
+            });
+            persisted++;
+          }
+        }
+
+        logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} pressure scores to DB`);
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      logToFile(HOOK_NAME, 'WARN', 'Failed to persist hologram pressure scores (non-fatal)', err);
+    }
+  }
+
   // 6. Query FTS5 search (keywords from prompt)
   const ftsResults = queryFts5(promptText, scope);
 
@@ -228,6 +269,32 @@ runHook(HOOK_NAME, async (input) => {
 
   const elapsedMs = Date.now() - startMs;
   logToFile(HOOK_NAME, 'INFO', `Completed in ${elapsedMs}ms, tokens=${assembled.tokenEstimate}, sources=[${assembled.sources.join(',')}]`);
+
+  // 8.5. Audit log: context assembly
+  try {
+    const { getDatabase: getAuditDb } = await import('../db/connection.js');
+    const { logAudit } = await import('../db/audit.js');
+    const auditDb = getAuditDb();
+    try {
+      const now = new Date();
+      logAudit(auditDb, {
+        timestamp: now.toISOString(),
+        timestamp_epoch: now.getTime(),
+        session_id: sessionId,
+        event_type: 'context_assembly',
+        actor: 'hook:user-prompt-submit',
+        details: {
+          sources: assembled.sources,
+          tokenEstimate: assembled.tokenEstimate,
+          durationMs: elapsedMs,
+        },
+      });
+    } finally {
+      auditDb.close();
+    }
+  } catch (auditErr) {
+    logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);
+  }
 
   // 8. Return — empty if nothing assembled
   if (!assembled.markdown) {

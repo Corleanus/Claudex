@@ -8,8 +8,10 @@ request, gets routed, and receives one response before the connection closes.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
+import os
 import time
 from typing import Any, Dict, Optional
 
@@ -18,6 +20,33 @@ logger = logging.getLogger("claudex.sidecar")
 # Type aliases
 Request = Dict[str, Any]
 Response = Dict[str, Any]
+
+# Lazy import: hologram may not be installed
+_Session = None
+
+def _get_session_class():
+    global _Session
+    if _Session is None:
+        from hologram import Session
+        _Session = Session
+    return _Session
+
+# Module-level session cache (persists across requests within same sidecar process)
+_session_cache: dict[str, object] = {}
+_session_locks: dict[str, asyncio.Lock] = {}
+
+def _get_session(claude_dir: str):
+    """Get or create a cached Session for the given claude_dir."""
+    if claude_dir not in _session_cache:
+        SessionCls = _get_session_class()
+        _session_cache[claude_dir] = SessionCls(claude_dir)
+    return _session_cache[claude_dir]
+
+def _get_lock(claude_dir: str) -> asyncio.Lock:
+    """Get or create a per-session asyncio lock to serialize turn()+save()."""
+    if claude_dir not in _session_locks:
+        _session_locks[claude_dir] = asyncio.Lock()
+    return _session_locks[claude_dir]
 
 
 def _error_response(request_id: str, message: str) -> Response:
@@ -28,27 +57,47 @@ def _handle_ping(req: Request) -> Response:
     return {"id": req["id"], "type": "pong", "payload": {}}
 
 
-def _handle_query(req: Request) -> Response:
-    """Process a hologram context query.
+async def _handle_query(req: Request) -> Response:
+    """Process a hologram context query via Session.turn()."""
+    payload = req.get("payload", {})
+    prompt = payload.get("prompt", "")
+    claude_dir = payload.get("claude_dir", "")
 
-    Phase 1: Returns empty pressure arrays. The hologram-cognitive pressure
-    engine is not yet integrated — callers degrade to Tier 3 (recency fallback)
-    or Tier 4 (FTS5 only) as designed. This is intentional, NOT a bug.
+    if not claude_dir:
+        claude_dir = os.path.expanduser("~/.claude")
 
-    Phase 2+ will wire in system.process_turn() -> router.get_context() here.
-    """
-    prompt = req.get("payload", {}).get("prompt", "")
-    logger.debug("Query received (prompt length: %d chars)", len(prompt))
-    return {
-        "id": req["id"],
-        "type": "result",
-        "payload": {"hot": [], "warm": [], "cold": []},
-    }
+    logger.debug("Query received (prompt length: %d chars, claude_dir: %s)", len(prompt), claude_dir)
+
+    try:
+        lock = _get_lock(claude_dir)
+        async with lock:
+            session = _get_session(claude_dir)
+            result = await asyncio.to_thread(session.turn, prompt)
+            await asyncio.to_thread(session.save)
+
+        return {
+            "id": req["id"],
+            "type": "result",
+            "payload": {
+                "hot": result.hot,
+                "warm": result.warm,
+                "cold": result.cold,
+                "turn": result.turn_number,
+                "tension": getattr(result, "tension", 0.0),
+                "cluster_size": getattr(result, "cluster_size", 0),
+            },
+        }
+    except Exception as e:
+        logger.exception("Error handling query for claude_dir=%s", claude_dir)
+        return {
+            "id": req["id"],
+            "type": "error",
+            "payload": {"error_message": str(e)},
+        }
 
 
-def _handle_update(req: Request) -> Response:
-    # Stub: acknowledge. When integrated, will call
-    # system.notify_file_changes(files)
+async def _handle_update(req: Request) -> Response:
+    """Acknowledge update. Hologram discovers files from disk — no action needed."""
     return {"id": req["id"], "type": "result", "payload": {}}
 
 
@@ -59,7 +108,7 @@ _HANDLERS = {
 }
 
 
-def route_request(req: Request) -> Response:
+async def route_request(req: Request) -> Response:
     """Route an incoming request dict to the appropriate handler."""
     req_id: Optional[str] = req.get("id")
     if req_id is None:
@@ -77,7 +126,10 @@ def route_request(req: Request) -> Response:
     if handler is None:
         return _error_response(req_id, f"Unknown request type: {req_type}")
 
-    return handler(req)
+    result = handler(req)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 class SidecarServer:
@@ -148,7 +200,7 @@ class SidecarServer:
                 return
 
             start = time.monotonic()
-            resp = route_request(req)
+            resp = await route_request(req)
             elapsed_ms = round((time.monotonic() - start) * 1000, 1)
             resp["timing_ms"] = elapsed_ms
 

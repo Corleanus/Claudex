@@ -6,28 +6,10 @@
  */
 
 import type { Observation, ObservationCategory, Scope } from '../shared/types.js';
+import { redactSensitive } from './redaction.js';
 
-// =============================================================================
-// Secret Redaction
-// =============================================================================
-
-const SECRET_PATTERNS: RegExp[] = [
-  /(?:api[_-]?key|token|secret|password|credential)[s]?\s*[:=]\s*['"]?[^\s'"]+/gi,
-  /(?:sk|pk|ak|rk)[-_][a-zA-Z0-9]{20,}/g,
-  /(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}/g,
-  /(?:eyJ)[A-Za-z0-9_-]+\.(?:eyJ)[A-Za-z0-9_-]+/g,
-  /(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-];
-
-export function redactSecrets(text: string): string {
-  let result = text;
-  for (const pattern of SECRET_PATTERNS) {
-    // Reset lastIndex for global regexes reused across calls
-    pattern.lastIndex = 0;
-    result = result.replace(pattern, '[REDACTED]');
-  }
-  return result;
-}
+// Backward-compatible alias: existing imports of redactSecrets keep working
+export { redactSensitive as redactSecrets } from './redaction.js';
 
 // =============================================================================
 // Helpers
@@ -89,8 +71,8 @@ function makeObservation(
     timestamp_epoch: now.getTime(),
     tool_name: toolName,
     category,
-    title: redactSecrets(title),
-    content: redactSecrets(content),
+    title: redactSensitive(title),
+    content: redactSensitive(content),
     files_read: filesRead,
     files_modified: filesModified,
     importance,

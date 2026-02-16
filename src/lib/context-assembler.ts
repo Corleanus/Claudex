@@ -27,6 +27,7 @@ import type {
   ReasoningChain,
   ConsensusDecision,
 } from '../shared/types.js';
+import { redactAssemblyOutput } from './redaction.js';
 
 // =============================================================================
 // Token estimation
@@ -235,7 +236,9 @@ export function assembleContext(
       return { markdown: '', tokenEstimate: 0, sources: [] };
     }
 
-    const markdown = assembled.trimEnd() + '\n';
+    const rawMarkdown = assembled.trimEnd() + '\n';
+    // Safety-net: redact any secrets/high-entropy that slipped through ingestion
+    const markdown = redactAssemblyOutput(rawMarkdown);
     return {
       markdown,
       tokenEstimate: estimateTokens(markdown),

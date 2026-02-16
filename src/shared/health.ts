@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { MetricEntry } from './metrics.js';
 import type { ClaudexConfig } from './types.js';
+import type { RecoveryReport } from '../lib/recovery.js';
 import { PATHS, CLAUDEX_HOME } from './paths.js';
 import { getMetrics } from './metrics.js';
 import { createLogger } from './logger.js';
@@ -19,6 +20,7 @@ export interface HealthReport {
   hologram: { ok: boolean; port: number | null };
   wrapper: { enabled: boolean; lastFlushEpoch: number };
   metrics: Record<string, MetricEntry>;
+  recovery?: RecoveryReport;
 }
 
 // =============================================================================

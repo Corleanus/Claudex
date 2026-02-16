@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import { loadConfig } from '../shared/config.js';
 import { recordMetric, getMetrics } from '../shared/metrics.js';
 import { PATHS } from '../shared/paths.js';
+import { detectVersion, migrateInput, stampOutput, validateInput } from '../shared/hook-schema.js';
 import type { HookStdin, HookStdout } from '../shared/types.js';
 
 /** Read JSON from stdin (piped by Claude Code). */
@@ -49,7 +50,15 @@ export async function runHook(
   handler: (input: HookStdin) => Promise<HookStdout>,
 ): Promise<void> {
   try {
-    const input = await readStdin<HookStdin>();
+    const rawInput = await readStdin<HookStdin>();
+
+    // Schema versioning: detect, migrate, validate
+    const version = detectVersion(rawInput as unknown as Record<string, unknown>);
+    const input = migrateInput(rawInput as unknown as Record<string, unknown>, version) as unknown as HookStdin;
+    const validation = validateInput(hookName, input as unknown as Record<string, unknown>, version);
+    if (!validation.valid) {
+      logToFile(hookName, 'WARN', `Input validation warnings: ${validation.errors.join(', ')}`);
+    }
 
     const startMs = Date.now();
     let output: HookStdout;
@@ -96,11 +105,13 @@ export async function runHook(
       }
     }
 
-    writeStdout(output, true); // flush then exit
+    // Stamp output with schema version
+    writeStdout(stampOutput(output as unknown as Record<string, unknown>) as unknown as HookStdout, true);
   } catch (error) {
     logToFile(hookName, 'ERROR', error);
     try {
-      writeStdout({}, true); // Silent pass-through on failure, flush then exit
+      // Stamp error outputs too — version info is always present
+      writeStdout(stampOutput({}) as unknown as HookStdout, true);
     } catch {
       // stdout broken — exit directly
       process.exit(0);

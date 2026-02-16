@@ -5,8 +5,9 @@
  * Hooks call client.query(prompt) and get back scored files.
  */
 
+import * as path from 'node:path';
 import type Database from 'better-sqlite3';
-import type { ClaudexConfig, HologramResponse, ScoredFile } from '../shared/types.js';
+import type { ClaudexConfig, HologramResponse, ScoredFile, SidecarRequest } from '../shared/types.js';
 import { HologramError, HologramUnavailableError } from '../shared/errors.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
@@ -43,13 +44,13 @@ export class HologramClient {
     const startMs = Date.now();
     const port = await this.ensureSidecar();
 
-    const request = buildRequest('query', {
+    const request = buildRequest('query', this.buildPayload({
       prompt,
       session_state: {
         turn_number: turnNumber,
         session_id: sessionId,
       },
-    });
+    }));
 
     const response = await this.protocol.send(port, request);
 
@@ -131,13 +132,13 @@ export class HologramClient {
         return false;
       }
 
-      const request = buildRequest('query', {
+      const request = buildRequest('query', this.buildPayload({
         prompt: '__rescore__',
         session_state: {
           turn_number: 0,
           session_id: sessionId,
         },
-      });
+      }));
 
       const response = await this.protocol.send(port, request);
       if (response.type === 'error') {
@@ -161,6 +162,26 @@ export class HologramClient {
    */
   isAvailable(): boolean {
     return this.launcher.isRunning();
+  }
+
+  /**
+   * Resolve the path to the user's .claude directory.
+   * Uses HOME (Unix) or USERPROFILE (Windows) as the base.
+   */
+  private resolveClaudeDir(): string {
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    return path.join(home, '.claude');
+  }
+
+  /**
+   * Build a query payload with claude_dir included.
+   * Centralizes claude_dir injection for all sidecar requests.
+   */
+  private buildPayload(extra: Record<string, unknown> = {}): SidecarRequest['payload'] {
+    return {
+      claude_dir: this.resolveClaudeDir(),
+      ...extra,
+    };
   }
 
   /**

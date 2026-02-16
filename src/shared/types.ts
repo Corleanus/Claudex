@@ -11,6 +11,7 @@
 
 /** Common stdin fields received by all hooks */
 export interface HookStdin {
+  schema_version?: number;  // Absent = v1 (backward compat)
   session_id: string;
   hook_event_name: string;
   cwd: string;
@@ -50,6 +51,7 @@ export interface PostToolUseInput extends HookStdin {
 
 /** Stdout format for all hooks (Claude Code v1.0.21+ protocol) */
 export interface HookStdout {
+  schema_version?: number;  // Stamped on output by infrastructure
   hookSpecificOutput?: {
     hookEventName: string;
     additionalContext?: string;
@@ -232,6 +234,7 @@ export interface SidecarRequest {
   type: 'query' | 'ping' | 'update' | 'shutdown';
   payload: {
     prompt?: string;
+    claude_dir?: string;
     files_changed?: string[];
     session_state?: {
       turn_number: number;
