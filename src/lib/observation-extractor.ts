@@ -6,7 +6,7 @@
  */
 
 import type { Observation, ObservationCategory, Scope } from '../shared/types.js';
-import { redactSensitive } from './redaction.js';
+import { redactSensitive, sanitizePath } from './redaction.js';
 
 // Backward-compatible alias: existing imports of redactSecrets keep working
 export { redactSensitive as redactSecrets } from './redaction.js';
@@ -65,6 +65,12 @@ function makeObservation(
   filesModified?: string[],
 ): Observation {
   const now = new Date();
+  const projectRoot = scope.type === 'project' ? scope.path : undefined;
+
+  // Sanitize file paths to remove usernames/PII
+  const sanitizedFilesRead = filesRead?.map(f => sanitizePath(f, projectRoot));
+  const sanitizedFilesModified = filesModified?.map(f => sanitizePath(f, projectRoot));
+
   return {
     session_id: sessionId,
     timestamp: now.toISOString(),
@@ -73,8 +79,8 @@ function makeObservation(
     category,
     title: redactSensitive(title),
     content: redactSensitive(content),
-    files_read: filesRead,
-    files_modified: filesModified,
+    files_read: sanitizedFilesRead,
+    files_modified: sanitizedFilesModified,
     importance,
     project: scope.type === 'project' ? scope.name : undefined,
   };

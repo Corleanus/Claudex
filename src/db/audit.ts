@@ -9,6 +9,7 @@
 import type Database from 'better-sqlite3';
 import { redactSensitive } from '../lib/redaction.js';
 import { createLogger } from '../shared/logger.js';
+import { safeJsonParse } from '../shared/safe-json.js';
 
 const log = createLogger('audit');
 
@@ -54,12 +55,20 @@ export function logAudit(
     // Serialize and redact details — ensure valid JSON after truncation
     let detailsStr: string | null = null;
     if (entry.details) {
-      let raw = JSON.stringify(entry.details);
-      raw = redactSensitive(raw);
+      // H3 fix: Cap individual fields BEFORE stringify to prevent expansion
+      const cappedDetails = truncateDeep(entry.details, 500);
+      let raw = JSON.stringify(cappedDetails);
+
+      // If still too long after stringify, aggressively truncate
       if (raw.length > MAX_DETAILS_LENGTH) {
-        // Don't slice raw JSON (produces invalid JSON). Store a safe truncated version.
-        raw = JSON.stringify({ _truncated: true, _preview: raw.slice(0, MAX_DETAILS_LENGTH - 100) });
+        raw = JSON.stringify({
+          _truncated: true,
+          _preview: raw.slice(0, MAX_DETAILS_LENGTH - 100)
+        });
       }
+
+      // H4 fix: Apply redaction to stringified JSON to catch JSON-encoded secrets
+      raw = redactSensitive(raw);
       detailsStr = raw;
     }
 
@@ -79,6 +88,55 @@ export function logAudit(
     // Never crash — audit is best-effort
     log.error('Failed to write audit log entry:', err);
   }
+}
+
+/**
+ * Recursively truncate string fields in an object to prevent JSON expansion.
+ * Arrays and nested objects are truncated to a maximum depth.
+ */
+function truncateDeep(obj: unknown, maxStringLength: number, depth = 0): unknown {
+  const MAX_DEPTH = 10;
+  const MAX_ARRAY_ITEMS = 20; // Reduce from 50 to prevent large arrays
+
+  if (depth > MAX_DEPTH) {
+    return '[MAX_DEPTH_EXCEEDED]';
+  }
+
+  if (typeof obj === 'string') {
+    return obj.length > maxStringLength
+      ? obj.slice(0, maxStringLength) + '...[TRUNCATED]'
+      : obj;
+  }
+
+  if (Array.isArray(obj)) {
+    const truncated = obj
+      .slice(0, MAX_ARRAY_ITEMS)
+      .map(item => truncateDeep(item, maxStringLength, depth + 1));
+
+    if (obj.length > MAX_ARRAY_ITEMS) {
+      // Add marker that array was truncated
+      return [...truncated, `[...${obj.length - MAX_ARRAY_ITEMS} more items]`];
+    }
+    return truncated;
+  }
+
+  if (obj && typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    let keyCount = 0;
+    const MAX_KEYS = 50; // Reduce from 100
+
+    for (const [key, value] of Object.entries(obj)) {
+      if (keyCount >= MAX_KEYS) {
+        result._moreThan50Keys = true;
+        break;
+      }
+      result[key] = truncateDeep(value, maxStringLength, depth + 1);
+      keyCount++;
+    }
+    return result;
+  }
+
+  return obj;
 }
 
 // =============================================================================
@@ -130,7 +188,7 @@ export function getAuditLog(
     return rows.map(row => {
       let details: Record<string, unknown> | undefined;
       if (row.details) {
-        try { details = JSON.parse(row.details); } catch { details = { _raw: row.details }; }
+        details = safeJsonParse<Record<string, unknown>>(row.details, { _raw: row.details });
       }
       return {
         id: row.id,

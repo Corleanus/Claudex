@@ -17,7 +17,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { runHook, logToFile } from './_infrastructure.js';
-import { PATHS, transcriptDir, completionMarkerPath } from '../shared/paths.js';
+import { PATHS, transcriptDir, completionMarkerPath, sessionDir } from '../shared/paths.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { SCHEMAS } from '../shared/types.js';
 import type { SessionEndInput, HookStdin } from '../shared/types.js';
@@ -215,12 +215,16 @@ Session ended without /endsession. This is a fail-safe handoff.
     const { updateSessionStatus } = await import('../db/sessions.js');
 
     const db = getDatabase();
-    try {
-      updateSessionStatus(db, session_id, 'completed', isoTimestamp);
-      sqliteUpdated = true;
-      logToFile('session-end', 'INFO', 'SQLite session status updated to completed');
-    } finally {
-      db.close();
+    if (!db) {
+      logToFile('session-end', 'WARN', 'Database connection failed, skipping session status update');
+    } else {
+      try {
+        updateSessionStatus(db, session_id, 'completed', isoTimestamp);
+        sqliteUpdated = true;
+        logToFile('session-end', 'INFO', 'SQLite session status updated to completed');
+      } finally {
+        db.close();
+      }
     }
   } catch (err) {
     logToFile('session-end', 'WARN', 'Section 5 (SQLite update) failed (soft dependency):', err);
@@ -241,32 +245,38 @@ Session ended without /endsession. This is a fail-safe handoff.
       const { getDatabase } = await import('../db/connection.js');
 
       const retentionDb = getDatabase();
-      try {
-        const retentionResult = enforceRetention(retentionDb, config);
-        retentionRan = true;
-        if (retentionResult.observationsDeleted > 0 || retentionResult.reasoningDeleted > 0) {
-          logToFile('session-end', 'INFO',
-            `Retention cleanup: ${retentionResult.observationsDeleted} observations, ${retentionResult.reasoningDeleted} reasoning chains, ${retentionResult.consensusDeleted} consensus deleted (${retentionResult.durationMs}ms)`);
-        }
-        // Audit the retention action + self-clean old audit entries
+      if (!retentionDb) {
+        logToFile('session-end', 'WARN', 'Database connection failed, skipping retention cleanup');
+      } else {
         try {
-          const { logAudit, cleanOldAuditLogs } = await import('../db/audit.js');
-          logAudit(retentionDb, {
-            timestamp: new Date().toISOString(),
-            timestamp_epoch: Date.now(),
-            session_id,
-            event_type: 'retention_cleanup',
-            actor: 'hook:session-end',
-            details: {
-              observations: retentionResult.observationsDeleted,
-              reasoning: retentionResult.reasoningDeleted,
-              consensus: retentionResult.consensusDeleted,
-            },
-          });
-          cleanOldAuditLogs(retentionDb, 30);
-        } catch { /* audit is best-effort */ }
-      } finally {
-        retentionDb.close();
+          const retentionResult = enforceRetention(retentionDb, config);
+          retentionRan = true;
+          if (retentionResult.observationsDeleted > 0 || retentionResult.reasoningDeleted > 0) {
+            logToFile('session-end', 'INFO',
+              `Retention cleanup: ${retentionResult.observationsDeleted} observations, ${retentionResult.reasoningDeleted} reasoning chains, ${retentionResult.consensusDeleted} consensus deleted (${retentionResult.durationMs}ms)`);
+          }
+          // Audit the retention action + self-clean old audit entries
+          try {
+            const { logAudit, cleanOldAuditLogs } = await import('../db/audit.js');
+            logAudit(retentionDb, {
+              timestamp: new Date().toISOString(),
+              timestamp_epoch: Date.now(),
+              session_id,
+              event_type: 'retention_cleanup',
+              actor: 'hook:session-end',
+              details: {
+                observations: retentionResult.observationsDeleted,
+                reasoning: retentionResult.reasoningDeleted,
+                consensus: retentionResult.consensusDeleted,
+              },
+            });
+            cleanOldAuditLogs(retentionDb, 30);
+          } catch (auditErr) {
+            logToFile('session-end', 'WARN', 'Retention audit logging failed (non-fatal):', auditErr);
+          }
+        } finally {
+          retentionDb.close();
+        }
       }
     }
   } catch (err) {
@@ -287,8 +297,11 @@ Session ended without /endsession. This is a fail-safe handoff.
 
     const config = loadConfig();
     const db = getDatabase();
-    try {
-      if (config.hologram?.enabled) {
+    if (!db) {
+      logToFile('session-end', 'WARN', 'Database connection failed, skipping pressure score capture');
+    } else {
+      try {
+        if (config.hologram?.enabled) {
         try {
           const { HologramClient } = await import('../hologram/client.js');
           const { SidecarManager } = await import('../hologram/launcher.js');
@@ -299,32 +312,33 @@ Session ended without /endsession. This is a fail-safe handoff.
           const client = new HologramClient(launcher, protocol, config);
 
           if (client.isAvailable()) {
-            const response = await client.query('session-end', 0, session_id);
-            const allFiles = [...response.hot, ...response.warm, ...response.cold];
+              const response = await client.query('session-end', 0, session_id);
+              const allFiles = [...response.hot, ...response.warm, ...response.cold];
 
-            for (const file of allFiles) {
-              upsertPressureScore(db, {
-                file_path: file.path,
-                project: scope.type === 'project' ? scope.name : undefined,
-                raw_pressure: file.raw_pressure,
-                temperature: file.temperature,
-                last_accessed_epoch: Date.now(),
-                decay_rate: 0.05,
-              });
+              for (const file of allFiles) {
+                upsertPressureScore(db, {
+                  file_path: file.path,
+                  project: scope.type === 'project' ? scope.name : undefined,
+                  raw_pressure: file.raw_pressure,
+                  temperature: file.temperature,
+                  last_accessed_epoch: Date.now(),
+                  decay_rate: 0.05,
+                });
+              }
+
+              pressureCaptured = true;
+              logToFile('session-end', 'INFO',
+                `Pressure scores captured from hologram: ${allFiles.length} files`);
+            } else {
+              logToFile('session-end', 'DEBUG', 'Hologram not available — skipping pressure capture');
             }
-
-            pressureCaptured = true;
-            logToFile('session-end', 'INFO',
-              `Pressure scores captured from hologram: ${allFiles.length} files`);
-          } else {
-            logToFile('session-end', 'DEBUG', 'Hologram not available — skipping pressure capture');
+          } catch (hologramErr) {
+            logToFile('session-end', 'DEBUG', 'Hologram query for pressure capture failed (non-fatal)', hologramErr);
           }
-        } catch (hologramErr) {
-          logToFile('session-end', 'DEBUG', 'Hologram query for pressure capture failed (non-fatal)', hologramErr);
         }
+      } finally {
+        db.close();
       }
-    } finally {
-      db.close();
     }
   } catch (err) {
     logToFile('session-end', 'WARN', 'Section 6a (pressure capture) failed (non-fatal):', err);
@@ -357,10 +371,10 @@ Session ended without /endsession. This is a fail-safe handoff.
       '',
     ];
 
-    const sessionDir = path.join(PATHS.sessions, session_id);
-    fs.mkdirSync(sessionDir, { recursive: true });
+    const sessionDirectory = sessionDir(session_id);
+    fs.mkdirSync(sessionDirectory, { recursive: true });
 
-    const summaryPath = path.join(sessionDir, 'summary.md');
+    const summaryPath = path.join(sessionDirectory, 'summary.md');
     fs.writeFileSync(summaryPath, summaryLines.join('\n'), 'utf-8');
 
     summaryCaptured = true;

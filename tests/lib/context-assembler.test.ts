@@ -99,28 +99,43 @@ describe('assembleContext', () => {
     expect(result.tokenEstimate).toBe(0);
   });
 
-  it('assembly respects priority order (identity first, recency last)', () => {
+  it('assembly respects priority order (identity first, recent before consensus)', () => {
     const sources = emptySources({
       scope: PROJECT_SCOPE,
       identity: { agent: 'Claudex', user: 'Dev' },
       projectContext: { primer: 'Project primer content', handoff: 'Handoff notes' },
       recentObservations: [makeObservation({ title: 'Recent activity' })],
-      // No hologram, no search — recentObservations should be the fallback
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'Search result' }) })],
+      consensusDecisions: [{
+        session_id: 'sess-001',
+        timestamp: '2023-11-14T22:00:00.000Z',
+        timestamp_epoch: Date.now() - 60000,
+        title: 'Decision',
+        description: 'A consensus decision',
+        status: 'active',
+      }],
     });
 
     const result = assembleContext(sources, { maxTokens: 4000 });
     const md = result.markdown;
 
-    // Identity section should appear before Project section
+    // Verify priority order: identity < project < search < recent < consensus
     const identityIdx = md.indexOf('## Identity');
     const projectIdx = md.indexOf('## Project');
+    const searchIdx = md.indexOf('## Related Observations');
     const recentIdx = md.indexOf('## Recent Activity');
+    const consensusIdx = md.indexOf('## Consensus Decisions');
 
     expect(identityIdx).toBeGreaterThan(-1);
     expect(projectIdx).toBeGreaterThan(-1);
+    expect(searchIdx).toBeGreaterThan(-1);
     expect(recentIdx).toBeGreaterThan(-1);
+    expect(consensusIdx).toBeGreaterThan(-1);
+
     expect(identityIdx).toBeLessThan(projectIdx);
-    expect(projectIdx).toBeLessThan(recentIdx);
+    expect(projectIdx).toBeLessThan(searchIdx);
+    expect(searchIdx).toBeLessThan(recentIdx);
+    expect(recentIdx).toBeLessThan(consensusIdx);
   });
 
   it('token budget: stops adding sections when budget exceeded', () => {
@@ -185,6 +200,40 @@ describe('assembleContext', () => {
 
     const result = assembleContext(sources, { maxTokens: 4000 });
     expect(result.tokenEstimate).toBeLessThanOrEqual(4000);
+  });
+
+  it('recent observations included even when hologram and FTS5 present', () => {
+    // H16 fix: recent observations should be in priority order, not fallback-only
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts' })],
+        warm: [makeScoredFile({ path: '/src/warm.ts', raw_pressure: 0.5, temperature: 'WARM' })],
+        cold: [],
+      },
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'FTS5 result' }) })],
+      recentObservations: [makeObservation({ title: 'Recent work' })],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    // Recent observations should be present even though hologram and FTS5 exist
+    expect(result.markdown).toContain('## Recent Activity');
+    expect(result.markdown).toContain('Recent work');
+    expect(result.sources).toContain('recency');
+  });
+
+  it('token budget accounts for newlines between sections', () => {
+    // H17 fix: newlines should be included in budget calculation
+    const sources = emptySources({
+      identity: { agent: 'Test' },
+      recentObservations: [makeObservation({ title: 'x'.repeat(100) })],
+    });
+
+    // Very tight budget — should account for newlines correctly
+    const result = assembleContext(sources, { maxTokens: 50 });
+
+    // Token estimate should not exceed budget
+    expect(result.tokenEstimate).toBeLessThanOrEqual(50);
   });
 });
 

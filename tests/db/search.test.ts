@@ -247,4 +247,50 @@ describe('searchObservations', () => {
     expect(results.length).toBe(1);
     expect(results[0]!.observation.importance).toBe(5);
   });
+
+  it('finds hyphenated terms like "tree-shaking" (normalizer converts hyphen to space)', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'Build optimization',
+      content: 'Enabled tree-shaking to reduce bundle size',
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Different topic',
+      content: 'Database indexing strategy',
+    }));
+
+    // Query with hyphen should match "tree-shaking" after normalization
+    const results = searchObservations(db, 'tree-shaking');
+    expect(results.length).toBe(1);
+    expect(results[0]!.observation.content).toContain('tree-shaking');
+  });
+
+  it('finds hyphenated terms like "error-handling"', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'Middleware update',
+      content: 'Improved error-handling for async operations',
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Unrelated',
+      content: 'UI component styling',
+    }));
+
+    const results = searchObservations(db, 'error-handling');
+    expect(results.length).toBe(1);
+    expect(results[0]!.observation.content).toContain('error-handling');
+  });
+
+  it('finds hyphenated terms like "pre-commit"', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'CI/CD pipeline',
+      content: 'Added pre-commit hooks for linting',
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Other work',
+      content: 'Updated README',
+    }));
+
+    const results = searchObservations(db, 'pre-commit');
+    expect(results.length).toBe(1);
+    expect(results[0]!.observation.content).toContain('pre-commit');
+  });
 });

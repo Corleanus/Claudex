@@ -10,7 +10,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { PATHS } from '../shared/paths.js';
-import { DatabaseError } from '../shared/errors.js';
 import { createLogger } from '../shared/logger.js';
 import { MigrationRunner } from './migrations.js';
 import { loadConfig } from '../shared/config.js';
@@ -25,11 +24,11 @@ const log = createLogger('database');
  * - Runs all migrations
  *
  * @param dbPath - Path to the database file. Defaults to PATHS.database (~/.claudex/db/claudex.db)
- * @returns Configured Database instance
- * @throws DatabaseError on any failure
+ * @returns Configured Database instance, or null on failure
  */
-export function getDatabase(dbPath?: string): Database.Database {
+export function getDatabase(dbPath?: string): Database.Database | null {
   const resolvedPath = dbPath ?? PATHS.database;
+  let db: Database.Database | undefined;
 
   try {
     // Ensure parent directory exists
@@ -39,7 +38,7 @@ export function getDatabase(dbPath?: string): Database.Database {
       log.info('Created database directory:', dir);
     }
 
-    const db = new Database(resolvedPath);
+    db = new Database(resolvedPath);
 
     // Apply PRAGMAs
     const config = loadConfig();
@@ -60,9 +59,14 @@ export function getDatabase(dbPath?: string): Database.Database {
     log.info('Database ready:', resolvedPath);
     return db;
   } catch (err) {
-    throw new DatabaseError(
-      `Failed to open database at ${resolvedPath}`,
-      err,
-    );
+    log.error(`Failed to open database at ${resolvedPath}:`, err);
+    if (db) {
+      try {
+        db.close();
+      } catch (closeErr) {
+        log.error('Failed to close database handle after error:', closeErr);
+      }
+    }
+    return null;
   }
 }

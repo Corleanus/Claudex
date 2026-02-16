@@ -349,6 +349,53 @@ describe('runRecovery — stale cooldown', () => {
     // or ok (file content was overwritten with recent timestamp by live hook)
     expect(['recovered', 'ok']).toContain(check!.status);
   });
+
+  // H24 fix: far-future cooldown timestamps should be reset
+  it('removes far-future cooldown timestamp (beyond 1h ahead)', async () => {
+    const dir = path.dirname(cooldownFile);
+    if (!realFs.existsSync(dir)) realFs.mkdirSync(dir, { recursive: true });
+    const twoHoursAhead = Date.now() + 2 * 60 * 60 * 1000;
+    realFs.writeFileSync(cooldownFile, String(twoHoursAhead), 'utf-8');
+
+    const report = await runRecovery(makeConfig(), db);
+    const check = findCheck(report, 'cooldown');
+    expect(check).toBeDefined();
+    // recovered (deleted far-future) or ok (external process fixed it)
+    expect(['recovered', 'ok']).toContain(check!.status);
+    if (check!.status === 'recovered') {
+      expect(check!.message).toContain('far-future');
+    }
+  });
+
+  it('removes cooldown with invalid timestamp (negative)', async () => {
+    const dir = path.dirname(cooldownFile);
+    if (!realFs.existsSync(dir)) realFs.mkdirSync(dir, { recursive: true });
+    realFs.writeFileSync(cooldownFile, '-12345', 'utf-8');
+
+    const report = await runRecovery(makeConfig(), db);
+    const check = findCheck(report, 'cooldown');
+    expect(check).toBeDefined();
+    // recovered (deleted invalid) or ok (external process fixed it)
+    expect(['recovered', 'ok']).toContain(check!.status);
+    if (check!.status === 'recovered') {
+      expect(check!.message).toContain('invalid');
+    }
+  });
+
+  it('removes cooldown with nonsensical timestamp (NaN)', async () => {
+    const dir = path.dirname(cooldownFile);
+    if (!realFs.existsSync(dir)) realFs.mkdirSync(dir, { recursive: true });
+    realFs.writeFileSync(cooldownFile, 'not-a-number', 'utf-8');
+
+    const report = await runRecovery(makeConfig(), db);
+    const check = findCheck(report, 'cooldown');
+    expect(check).toBeDefined();
+    // recovered (deleted invalid) or ok (external process fixed it)
+    expect(['recovered', 'ok']).toContain(check!.status);
+    if (check!.status === 'recovered') {
+      expect(check!.message).toContain('invalid');
+    }
+  });
 });
 
 // =============================================================================

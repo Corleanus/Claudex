@@ -159,27 +159,28 @@ describe('checkHealth — database', () => {
     try { realFs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* non-fatal */ }
   });
 
-  it('reports database ok when DB is provided', () => {
-    const report = checkHealth(makeConfig(), db);
+  it('reports database ok when DB is provided', async () => {
+    const report = await checkHealth(makeConfig(), db);
     expect(report.database.ok).toBe(true);
   });
 
-  it('reports database not ok when no DB provided (require fallback fails in tests)', () => {
-    const report = checkHealth(makeConfig());
-    expect(report.database.ok).toBe(false);
-    expect(report.database.observationCount).toBe(0);
-    expect(report.database.sessionCount).toBe(0);
+  it('reports database ok when no DB provided (dynamic import fallback succeeds)', async () => {
+    const report = await checkHealth(makeConfig());
+    // With async dynamic import, the fallback now works in tests
+    expect(report.database.ok).toBe(true);
+    expect(report.database.observationCount).toBeGreaterThanOrEqual(0);
+    expect(report.database.sessionCount).toBeGreaterThanOrEqual(0);
   });
 
-  it('reports observation and session counts', () => {
+  it('reports observation and session counts', async () => {
     seedDb(db, 42, 7);
-    const report = checkHealth(makeConfig(), db);
+    const report = await checkHealth(makeConfig(), db);
     expect(report.database.observationCount).toBe(42);
     expect(report.database.sessionCount).toBe(7);
   });
 
-  it('reports zero counts on empty database', () => {
-    const report = checkHealth(makeConfig(), db);
+  it('reports zero counts on empty database', async () => {
+    const report = await checkHealth(makeConfig(), db);
     expect(report.database.observationCount).toBe(0);
     expect(report.database.sessionCount).toBe(0);
   });
@@ -197,7 +198,7 @@ describe('checkHealth — hologram, wrapper, metrics', () => {
     mockReadFileSync.mockReturnValue('');
   });
 
-  it('reports hologram ok when port file exists and enabled', () => {
+  it('reports hologram ok when port file exists and enabled', async () => {
     mockExistsSync.mockImplementation((p: unknown) => {
       if (typeof p === 'string' && p.includes('hologram.port')) return true;
       return false;
@@ -208,12 +209,12 @@ describe('checkHealth — hologram, wrapper, metrics', () => {
       hologram: { enabled: true, timeout_ms: 2000, health_interval_ms: 30000 },
     });
 
-    const report = checkHealth(config);
+    const report = await checkHealth(config);
     expect(report.hologram.ok).toBe(true);
     expect(report.hologram.port).toBe(9876);
   });
 
-  it('reports hologram not ok when disabled', () => {
+  it('reports hologram not ok when disabled', async () => {
     mockExistsSync.mockImplementation((p: unknown) => {
       if (typeof p === 'string' && p.includes('hologram.port')) return true;
       return false;
@@ -224,70 +225,70 @@ describe('checkHealth — hologram, wrapper, metrics', () => {
       hologram: { enabled: false, timeout_ms: 2000, health_interval_ms: 30000 },
     });
 
-    const report = checkHealth(config);
+    const report = await checkHealth(config);
     expect(report.hologram.ok).toBe(false);
     expect(report.hologram.port).toBe(9876);
   });
 
-  it('reports hologram port as null when port file does not exist', () => {
+  it('reports hologram port as null when port file does not exist', async () => {
     mockExistsSync.mockReturnValue(false);
 
     const config = makeConfig({
       hologram: { enabled: true, timeout_ms: 2000, health_interval_ms: 30000 },
     });
 
-    const report = checkHealth(config);
+    const report = await checkHealth(config);
     expect(report.hologram.ok).toBe(false);
     expect(report.hologram.port).toBeNull();
   });
 
-  it('reports wrapper enabled status from config', () => {
-    const enabledReport = checkHealth(
+  it('reports wrapper enabled status from config', async () => {
+    const enabledReport = await checkHealth(
       makeConfig({ wrapper: { enabled: true, warnThreshold: 0.7, flushThreshold: 0.8, cooldownMs: 30000 } }),
     );
     expect(enabledReport.wrapper.enabled).toBe(true);
 
-    const disabledReport = checkHealth(
+    const disabledReport = await checkHealth(
       makeConfig({ wrapper: { enabled: false, warnThreshold: 0.7, flushThreshold: 0.8, cooldownMs: 30000 } }),
     );
     expect(disabledReport.wrapper.enabled).toBe(false);
   });
 
-  it('reads lastFlushEpoch from cooldown file when it exists', () => {
+  it('reads lastFlushEpoch from cooldown file when it exists', async () => {
     mockExistsSync.mockImplementation((p: unknown) => {
       if (typeof p === 'string' && p.includes('.flush_cooldown')) return true;
       return false;
     });
     mockReadFileSync.mockReturnValue('1707936000000');
 
-    const report = checkHealth(makeConfig());
+    const report = await checkHealth(makeConfig());
     expect(report.wrapper.lastFlushEpoch).toBe(1707936000000);
   });
 
-  it('reports lastFlushEpoch as 0 when cooldown file does not exist', () => {
+  it('reports lastFlushEpoch as 0 when cooldown file does not exist', async () => {
     mockExistsSync.mockReturnValue(false);
 
-    const report = checkHealth(makeConfig());
+    const report = await checkHealth(makeConfig());
     expect(report.wrapper.lastFlushEpoch).toBe(0);
   });
 
-  it('includes metrics in report', () => {
+  it('includes metrics in report', async () => {
     const fakeMetrics: Record<string, MetricEntry> = {
       'db.query': { name: 'db.query', count: 5, totalMs: 100, lastMs: 20, errors: 1 },
     };
     mockGetMetrics.mockReturnValue(fakeMetrics);
 
-    const report = checkHealth(makeConfig());
+    const report = await checkHealth(makeConfig());
     expect(report.metrics).toBe(fakeMetrics);
     expect(report.metrics['db.query']!.count).toBe(5);
   });
 
-  it('handles all failures gracefully — never throws', () => {
+  it('handles all failures gracefully — never throws', async () => {
     mockExistsSync.mockImplementation(() => { throw new Error('FS exploded'); });
     mockGetMetrics.mockReturnValue({});
 
-    expect(() => checkHealth(makeConfig())).not.toThrow();
-    const report = checkHealth(makeConfig());
+    await expect(checkHealth(makeConfig())).resolves.toBeDefined();
+    const report = await checkHealth(makeConfig());
     expect(report.database.ok).toBe(false);
     expect(report.hologram.ok).toBe(false);
     expect(report.wrapper).toBeDefined();

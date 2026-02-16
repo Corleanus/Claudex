@@ -22,14 +22,111 @@ export function loadConfig(): ClaudexConfig {
     const raw = fs.readFileSync(PATHS.config, 'utf-8');
     const fileConfig = JSON.parse(raw) as Partial<ClaudexConfig>;
 
-    return deepMerge(
+    const merged = deepMerge(
       structuredClone(DEFAULT_CONFIG) as unknown as Record<string, unknown>,
       fileConfig as unknown as Record<string, unknown>,
     ) as ClaudexConfig;
+
+    return validateConfig(merged);
   } catch {
     // Corrupt config file — use defaults silently
     return structuredClone(DEFAULT_CONFIG);
   }
+}
+
+/**
+ * Validate and normalize config values.
+ * Invalid values fall back to defaults from DEFAULT_CONFIG.
+ */
+function validateConfig(config: ClaudexConfig): ClaudexConfig {
+  const defaults = DEFAULT_CONFIG;
+
+  // Validate hologram
+  if (config.hologram) {
+    if (typeof config.hologram.enabled !== 'boolean') {
+      config.hologram.enabled = defaults.hologram!.enabled;
+    }
+    if (typeof config.hologram.timeout_ms !== 'number' || config.hologram.timeout_ms < 0) {
+      config.hologram.timeout_ms = defaults.hologram!.timeout_ms;
+    }
+    if (typeof config.hologram.health_interval_ms !== 'number' || config.hologram.health_interval_ms < 0) {
+      config.hologram.health_interval_ms = defaults.hologram!.health_interval_ms;
+    }
+    if (config.hologram.python_path !== undefined && typeof config.hologram.python_path !== 'string') {
+      delete config.hologram.python_path;
+    }
+    if (config.hologram.sidecar_path !== undefined && typeof config.hologram.sidecar_path !== 'string') {
+      delete config.hologram.sidecar_path;
+    }
+  }
+
+  // Validate database
+  if (config.database) {
+    if (typeof config.database.wal_mode !== 'boolean') {
+      config.database.wal_mode = defaults.database!.wal_mode;
+    }
+    if (config.database.path !== undefined && typeof config.database.path !== 'string') {
+      delete config.database.path;
+    }
+  }
+
+  // Validate hooks
+  if (config.hooks) {
+    if (typeof config.hooks.latency_budget_ms !== 'number' || config.hooks.latency_budget_ms < 0) {
+      config.hooks.latency_budget_ms = defaults.hooks!.latency_budget_ms;
+    }
+  }
+
+  // Validate observation
+  if (config.observation) {
+    if (typeof config.observation.enabled !== 'boolean') {
+      config.observation.enabled = defaults.observation!.enabled;
+    }
+    if (typeof config.observation.redact_secrets !== 'boolean') {
+      config.observation.redact_secrets = defaults.observation!.redact_secrets;
+    }
+    if (config.observation.retention_days !== undefined) {
+      if (typeof config.observation.retention_days !== 'number' || config.observation.retention_days <= 0) {
+        config.observation.retention_days = defaults.observation!.retention_days;
+      }
+    }
+  }
+
+  // Validate wrapper
+  if (config.wrapper) {
+    if (typeof config.wrapper.enabled !== 'boolean') {
+      config.wrapper.enabled = defaults.wrapper!.enabled;
+    }
+    if (typeof config.wrapper.warnThreshold !== 'number' || config.wrapper.warnThreshold < 0 || config.wrapper.warnThreshold > 1) {
+      config.wrapper.warnThreshold = defaults.wrapper!.warnThreshold;
+    }
+    if (typeof config.wrapper.flushThreshold !== 'number' || config.wrapper.flushThreshold < 0 || config.wrapper.flushThreshold > 1) {
+      config.wrapper.flushThreshold = defaults.wrapper!.flushThreshold;
+    }
+    if (typeof config.wrapper.cooldownMs !== 'number' || config.wrapper.cooldownMs < 0) {
+      config.wrapper.cooldownMs = defaults.wrapper!.cooldownMs;
+    }
+  }
+
+  // Validate vector
+  if (config.vector) {
+    if (typeof config.vector.enabled !== 'boolean') {
+      config.vector.enabled = defaults.vector!.enabled;
+    }
+    if (!['fts5', 'openai', 'local'].includes(config.vector.provider)) {
+      config.vector.provider = defaults.vector!.provider;
+    }
+    if (config.vector.openai) {
+      if (config.vector.openai.apiKey !== undefined && typeof config.vector.openai.apiKey !== 'string') {
+        delete config.vector.openai.apiKey;
+      }
+      if (config.vector.openai.model !== undefined && typeof config.vector.openai.model !== 'string') {
+        delete config.vector.openai.model;
+      }
+    }
+  }
+
+  return config;
 }
 
 /**

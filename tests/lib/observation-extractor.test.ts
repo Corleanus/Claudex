@@ -404,3 +404,68 @@ describe('observation metadata', () => {
     expect(result!.project).toBeUndefined();
   });
 });
+
+// =============================================================================
+// Path sanitization in files_read/files_modified (C2 fix)
+// =============================================================================
+
+describe('path sanitization in observation fields', () => {
+  it('sanitizes files_read paths to project-relative when in project scope', () => {
+    const result = extractObservation(
+      'Read',
+      { file_path: '/work/my-app/src/index.ts' },
+      { output: 'content' },
+      SESSION_ID,
+      PROJECT_SCOPE,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toBeDefined();
+    expect(result!.files_read![0]).toBe('<project>/src/index.ts');
+    expect(result!.files_read![0]).not.toContain('/work/my-app');
+  });
+
+  it('sanitizes files_modified paths to project-relative when in project scope', () => {
+    const result = extractObservation(
+      'Edit',
+      { file_path: '/work/my-app/src/utils.ts', old_string: 'foo', new_string: 'bar' },
+      undefined,
+      SESSION_ID,
+      PROJECT_SCOPE,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.files_modified).toBeDefined();
+    expect(result!.files_modified![0]).toBe('<project>/src/utils.ts');
+  });
+
+  it('redacts usernames in absolute paths when in global scope', () => {
+    const result = extractObservation(
+      'Read',
+      { file_path: 'C:\\Users\\JohnDoe\\Desktop\\file.txt' },
+      { output: 'content' },
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toBeDefined();
+    expect(result!.files_read![0]).toBe('C:\\Users\\[USER]\\Desktop\\file.txt');
+    expect(result!.files_read![0]).not.toContain('JohnDoe');
+  });
+
+  it('redacts Unix usernames in files_modified', () => {
+    const result = extractObservation(
+      'Write',
+      { file_path: '/home/alice/projects/file.js' },
+      undefined,
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.files_modified).toBeDefined();
+    expect(result!.files_modified![0]).toBe('/home/[USER]/projects/file.js');
+    expect(result!.files_modified![0]).not.toContain('alice');
+  });
+});

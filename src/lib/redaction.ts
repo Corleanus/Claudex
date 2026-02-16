@@ -62,8 +62,11 @@ const ENTROPY_ALLOWLIST: RegExp[] = [
   /^[0-9a-f]{32,}$/i,                                     // SHA hashes (hex-only)
   /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i,        // UUIDs
   /^[A-Za-z]:\\|^\/[a-z]/,                                 // File paths (Windows or Unix)
-  /^https?:\/\//,                                          // URLs
+  /^https?:\/\//,                                          // URLs (http:// or https:// prefixed)
+  /https?:\/\/[^\s]+/,                                     // URLs anywhere in string
   /^[A-Za-z_][A-Za-z0-9_]*$/,                              // Identifiers (camelCase, snake_case)
+  /^[A-Za-z0-9+/]+=*$/,                                    // Base64-encoded data (ends with 0-2 '=')
+  /\.[a-zA-Z]{2,}$/,                                       // File paths with extensions
 ];
 
 function isAllowlisted(match: string): boolean {
@@ -122,17 +125,52 @@ export function redactSensitive(text: string): string {
 }
 
 /**
- * Safety-net for context assembly output (lighter pass — secrets + entropy only).
- * PII in assembled context is likely already redacted at ingestion.
+ * Safety-net for context assembly output (FULL redaction — secrets + PII + entropy).
+ * Even though PII should be redacted at ingestion, the assembly safety-net must catch any leaks.
  */
 export function redactAssemblyOutput(text: string): string {
-  let result = text;
-  for (const pattern of SECRET_PATTERNS) {
-    pattern.lastIndex = 0;
-    result = result.replace(pattern, '[REDACTED]');
+  // Use the full redactSensitive() to ensure PII patterns are caught
+  return redactSensitive(text);
+}
+
+/**
+ * Sanitize file paths to remove usernames and PII.
+ * Converts absolute paths to project-relative where possible.
+ * Example: C:\Users\John\Projects\myapp\src\file.ts -> <project>/src/file.ts
+ */
+export function sanitizePath(path: string, projectRoot?: string): string {
+  if (!path) return path;
+
+  // If we have a project root, make the path relative to it
+  if (projectRoot) {
+    const normalized = path.replace(/\\/g, '/');
+    const rootNormalized = projectRoot.replace(/\\/g, '/');
+    if (normalized.startsWith(rootNormalized)) {
+      const relative = normalized.slice(rootNormalized.length).replace(/^\/+/, '');
+      return `<project>/${relative}`;
+    }
   }
-  result = redactHighEntropy(result);
-  return result;
+
+  // Otherwise, redact username patterns in absolute paths
+  // Windows: C:\Users\USERNAME\... -> C:\Users\[USER]\...
+  let sanitized = path.replace(
+    /([A-Za-z]:\\Users\\)[^\\]+/g,
+    '$1[USER]'
+  );
+
+  // Unix: /home/USERNAME/... -> /home/[USER]/...
+  sanitized = sanitized.replace(
+    /(\/home\/)[^\/]+/g,
+    '$1[USER]'
+  );
+
+  // Unix: /Users/USERNAME/... (macOS) -> /Users/[USER]/...
+  sanitized = sanitized.replace(
+    /(\/Users\/)[^\/]+/g,
+    '$1[USER]'
+  );
+
+  return sanitized;
 }
 
 // Export shannonEntropy for testing

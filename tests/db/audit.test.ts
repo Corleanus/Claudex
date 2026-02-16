@@ -127,6 +127,101 @@ describe('audit', () => {
       expect(raw.details.length).toBeLessThanOrEqual(2000);
     });
 
+    it('H3: truncates individual fields before stringify to prevent expansion', () => {
+      // Create a detail object with multiple long strings that would expand during JSON.stringify
+      const longValue1 = 'a'.repeat(600);
+      const longValue2 = 'b'.repeat(600);
+      const longValue3 = 'c'.repeat(600);
+
+      logAudit(db, makeEntry({
+        details: {
+          field1: longValue1,
+          field2: longValue2,
+          field3: longValue3,
+        },
+      }));
+
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+
+      // Result should be valid JSON
+      expect(() => JSON.parse(raw.details)).not.toThrow();
+
+      // Result should be capped at 2000 chars
+      expect(raw.details.length).toBeLessThanOrEqual(2000);
+
+      // Individual fields should be truncated (each should be <= 500 + truncation marker)
+      const parsed = JSON.parse(raw.details) as Record<string, unknown>;
+      if (typeof parsed.field1 === 'string') {
+        expect(parsed.field1.length).toBeLessThanOrEqual(520); // 500 + "...[TRUNCATED]"
+      }
+    });
+
+    it('H3: handles deeply nested objects without crashing', () => {
+      const deepObject: Record<string, unknown> = { level: 0 };
+      let current = deepObject;
+      for (let i = 1; i < 15; i++) {
+        current.nested = { level: i, data: 'x'.repeat(100) };
+        current = current.nested as Record<string, unknown>;
+      }
+
+      logAudit(db, makeEntry({ details: deepObject }));
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+
+      // Should produce valid JSON and not crash
+      expect(() => JSON.parse(raw.details)).not.toThrow();
+      expect(raw.details.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('H3: handles large arrays', () => {
+      const largeArray = Array.from({ length: 100 }, (_, i) => ({
+        id: i,
+        data: 'x'.repeat(50),
+      }));
+
+      logAudit(db, makeEntry({ details: { items: largeArray } }));
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+
+      expect(() => JSON.parse(raw.details)).not.toThrow();
+      expect(raw.details.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('H4: redacts JSON-encoded secrets in details', () => {
+      // Create an object with a secret that would be JSON-encoded
+      logAudit(db, makeEntry({
+        details: {
+          credentials: {
+            password: 'test_fake_secret_0123456789abcdef0123456789abcdef',
+            apiKey: 'api_key=test_fake_secret_0123456789abcdef0123456789abcdef',
+          },
+          token: 'ghp_test_fake_secret_0123456789abcdef0123456789ab',
+        },
+      }));
+
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+
+      // Secrets should be redacted even in JSON-encoded form
+      expect(raw.details).toContain('[REDACTED]');
+      expect(raw.details).not.toContain('test_fake_secret_0123456789abcdef0123456789abcdef');
+      expect(raw.details).not.toContain('ghp_test_fake_secret_0123456789abcdef0123456789ab');
+    });
+
+    it('H4: redacts nested JSON-encoded secrets', () => {
+      logAudit(db, makeEntry({
+        details: {
+          config: {
+            database: {
+              connection_string: 'postgresql://user:test_fake_secret_0123456789abcdef0123456789abcdef@localhost/db',
+            },
+          },
+        },
+      }));
+
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+      // Should redact the secret (may use [REDACTED] or [REDACTED-PII] depending on pattern match)
+      expect(raw.details).toMatch(/\[REDACTED(-PII)?\]/);
+      expect(raw.details).not.toContain('test_fake_secret_0123456789abcdef0123456789abcdef');
+    });
+
     it('inserts multiple entries', () => {
       logAudit(db, makeEntry({ event_type: 'search' }));
       logAudit(db, makeEntry({ event_type: 'context_assembly' }));
@@ -196,6 +291,38 @@ describe('audit', () => {
       db.close();
       const rows = getAuditLog(db);
       expect(rows).toEqual([]);
+    });
+
+    it('handles malformed JSON in one row without losing other rows', () => {
+      // Insert valid entries via logAudit
+      logAudit(db, makeEntry({ session_id: 'sess-A', details: { valid: 'first' } }));
+      logAudit(db, makeEntry({ session_id: 'sess-B', details: { valid: 'third' } }));
+
+      // Manually inject corrupted JSON into the middle row
+      db.prepare('INSERT INTO audit_log (timestamp, timestamp_epoch, session_id, event_type, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+        new Date().toISOString(),
+        Date.now(),
+        'sess-corrupt',
+        'search',
+        'test',
+        '{"broken": "json"', // malformed JSON - missing closing brace
+        new Date().toISOString()
+      );
+
+      // getAuditLog should return all 3 rows, with the corrupted one using fallback
+      const rows = getAuditLog(db);
+      expect(rows).toHaveLength(3);
+
+      // Find the corrupted row
+      const corruptRow = rows.find(r => r.session_id === 'sess-corrupt');
+      expect(corruptRow).toBeDefined();
+      expect(corruptRow!.details).toEqual({ _raw: '{"broken": "json"' });
+
+      // Valid rows should still have correct data
+      const validRows = rows.filter(r => r.session_id !== 'sess-corrupt');
+      expect(validRows).toHaveLength(2);
+      expect(validRows.some(r => r.details?.valid === 'first')).toBe(true);
+      expect(validRows.some(r => r.details?.valid === 'third')).toBe(true);
     });
   });
 

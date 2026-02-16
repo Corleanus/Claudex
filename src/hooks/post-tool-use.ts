@@ -54,16 +54,20 @@ runHook(HOOK_NAME, async (input) => {
     const { incrementObservationCount } = await import('../db/sessions.js');
 
     const db = getDatabase();
-    try {
-      const result = storeObservation(db, observation);
-      if (result.id !== -1) {
-        incrementObservationCount(db, sessionId);
-        logToFile(HOOK_NAME, 'DEBUG', `Observation stored (id=${result.id}) tool=${toolName}`);
-      } else {
-        logToFile(HOOK_NAME, 'WARN', `storeObservation returned error sentinel for tool=${toolName}`);
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping observation storage (Tier 2 degradation)');
+    } else {
+      try {
+        const result = storeObservation(db, observation);
+        if (result.id !== -1) {
+          incrementObservationCount(db, sessionId);
+          logToFile(HOOK_NAME, 'DEBUG', `Observation stored (id=${result.id}) tool=${toolName}`);
+        } else {
+          logToFile(HOOK_NAME, 'WARN', `storeObservation returned error sentinel for tool=${toolName}`);
+        }
+      } finally {
+        db.close();
       }
-    } finally {
-      db.close();
     }
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'SQLite unavailable, skipping storage (Tier 2 degradation)', err);

@@ -173,6 +173,47 @@ describe('getConsensusBySession', () => {
     const rows = getConsensusBySession(db, 'sess-A');
     expect(rows).toHaveLength(1);
   });
+
+  it('handles malformed JSON in one row without losing other rows', () => {
+    // Insert valid entries
+    insertConsensus(db, makeDecision({ session_id: 'sess-test', title: 'First', tags: ['tag-A'] }));
+    insertConsensus(db, makeDecision({ session_id: 'sess-test', title: 'Third', files_affected: ['file.ts'] }));
+
+    // Manually inject corrupted JSON into tags field
+    db.prepare(`
+      INSERT INTO consensus_decisions (
+        session_id, timestamp, timestamp_epoch, title, description,
+        status, tags, importance, created_at, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'sess-test',
+      new Date().toISOString(),
+      Date.now(),
+      'Corrupted',
+      'test description',
+      'proposed',
+      '["incomplete', // malformed JSON
+      4,
+      new Date().toISOString(),
+      Date.now()
+    );
+
+    // Should return all 3 rows, with corrupted one using fallback
+    const rows = getConsensusBySession(db, 'sess-test');
+    expect(rows).toHaveLength(3);
+
+    // Find the corrupted row
+    const corruptRow = rows.find(r => r.title === 'Corrupted');
+    expect(corruptRow).toBeDefined();
+    expect(corruptRow!.tags).toEqual([]); // fallback to empty array
+
+    // Valid rows should still have correct data
+    const firstRow = rows.find(r => r.title === 'First');
+    expect(firstRow!.tags).toEqual(['tag-A']);
+
+    const thirdRow = rows.find(r => r.title === 'Third');
+    expect(thirdRow!.files_affected).toEqual(['file.ts']);
+  });
 });
 
 describe('getRecentConsensus', () => {

@@ -40,19 +40,22 @@ const COOLDOWN_FILE = path.join(CLAUDEX_HOME, 'db', '.flush_cooldown');
  * Otherwise, opens a connection via getDatabase() and closes after.
  * Never throws — returns ok:false with zero counts on any failure.
  */
-function checkDatabase(db?: import('better-sqlite3').Database): HealthReport['database'] {
+async function checkDatabase(db?: import('better-sqlite3').Database | null): Promise<HealthReport['database']> {
   try {
     let ownedDb = false;
-    let conn = db;
+    let conn: import('better-sqlite3').Database | undefined | null = db;
 
     if (!conn) {
       // Dynamic import to avoid hard dependency at module load time
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { getDatabase } = require('../db/connection.js') as {
-        getDatabase: (dbPath?: string) => import('better-sqlite3').Database;
-      };
+      const { getDatabase } = await import('../db/connection.js');
       conn = getDatabase();
       ownedDb = true;
+    }
+
+    // conn could still be null if getDatabase() returned null
+    if (!conn) {
+      log.warn('Database connection is null');
+      return { ok: false, observationCount: 0, sessionCount: 0 };
     }
 
     try {
@@ -144,9 +147,9 @@ function checkWrapper(config: ClaudexConfig): HealthReport['wrapper'] {
  * Run a full system health check across database, hologram, wrapper, and metrics.
  * Never throws — each subsystem check is independently wrapped.
  */
-export function checkHealth(config: ClaudexConfig, db?: import('better-sqlite3').Database): HealthReport {
+export async function checkHealth(config: ClaudexConfig, db?: import('better-sqlite3').Database | null): Promise<HealthReport> {
   return {
-    database: checkDatabase(db),
+    database: await checkDatabase(db),
     hologram: checkHologram(config),
     wrapper: checkWrapper(config),
     metrics: getMetrics(),

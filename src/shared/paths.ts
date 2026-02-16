@@ -11,6 +11,17 @@ import * as os from 'node:os';
 /** ~/.claudex/ — Claudex global root */
 export const CLAUDEX_HOME = path.join(os.homedir(), '.claudex');
 
+/**
+ * Sanitize session_id to prevent path traversal attacks.
+ * Strips path separators and limits to alphanumeric, hyphens, and underscores.
+ * @param sessionId - Raw session_id from input
+ * @returns Sanitized session_id safe for filesystem paths
+ */
+function sanitizeSessionId(sessionId: string): string {
+  // Remove path separators and limit to safe characters
+  return sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
 /** All Claudex runtime paths */
 export const PATHS = {
   // Root
@@ -65,19 +76,26 @@ export function dailyMemoryPath(date: string | Date): string {
  * Get the transcript directory for a session.
  */
 export function transcriptDir(sessionId: string): string {
-  return path.join(PATHS.transcripts, sessionId);
+  return path.join(PATHS.transcripts, sanitizeSessionId(sessionId));
 }
 
 /**
  * Get the completion marker path for a session.
  */
 export function completionMarkerPath(sessionId: string): string {
-  return path.join(PATHS.sessions, `.completed-${sessionId}`);
+  return path.join(PATHS.sessions, `.completed-${sanitizeSessionId(sessionId)}`);
 }
 
 /**
  * Get the session log path (global scope).
  */
 export function globalSessionLogPath(sessionId: string): string {
-  return path.join(PATHS.sessions, `${sessionId}.md`);
+  return path.join(PATHS.sessions, `${sanitizeSessionId(sessionId)}.md`);
+}
+
+/**
+ * Get the session directory path.
+ */
+export function sessionDir(sessionId: string): string {
+  return path.join(PATHS.sessions, sanitizeSessionId(sessionId));
 }

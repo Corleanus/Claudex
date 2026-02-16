@@ -33,7 +33,9 @@ beforeEach(() => {
 
 describe('normalizePath', () => {
   it('converts backslashes to forward slashes', () => {
-    expect(normalizePath('C:\\Users\\Dev\\project')).toBe('c:/users/dev/project');
+    expect(normalizePath('C:\\Users\\Dev\\project')).toBe(
+      process.platform === 'win32' ? 'c:/users/dev/project' : 'C:/Users/Dev/project'
+    );
   });
 
   it('strips trailing slashes', () => {
@@ -41,12 +43,30 @@ describe('normalizePath', () => {
     expect(normalizePath('/home/user/project///')).toBe('/home/user/project');
   });
 
-  it('lowercases the entire path', () => {
-    expect(normalizePath('/Home/USER/Project')).toBe('/home/user/project');
+  it('lowercases the entire path on Windows only', () => {
+    const input = '/Home/USER/Project';
+    const result = normalizePath(input);
+    if (process.platform === 'win32') {
+      expect(result).toBe('/home/user/project');
+    } else {
+      expect(result).toBe('/Home/USER/Project');
+    }
   });
 
   it('handles mixed separators', () => {
-    expect(normalizePath('C:\\Users/Dev\\project/')).toBe('c:/users/dev/project');
+    expect(normalizePath('C:\\Users/Dev\\project/')).toBe(
+      process.platform === 'win32' ? 'c:/users/dev/project' : 'C:/Users/Dev/project'
+    );
+  });
+
+  it('preserves case on Unix-like systems', () => {
+    const input = '/home/User/MyProject';
+    const result = normalizePath(input);
+    if (process.platform === 'win32') {
+      expect(result).toBe('/home/user/myproject');
+    } else {
+      expect(result).toBe('/home/User/MyProject');
+    }
   });
 });
 

@@ -10,10 +10,10 @@
  * 3. HOT files (pressure >= 0.851)
  * 4. Flow Reasoning (reasoning chains)
  * 5. Relevant observations (FTS5 top-ranked)
- * 6. Consensus Decisions
- * 7. Session continuity (post-compaction)
- * 8. WARM files (pressure >= 0.426)
- * 9. Recent observations (fallback)
+ * 6. Recent observations (temporal context)
+ * 7. Consensus Decisions
+ * 8. Session continuity (post-compaction)
+ * 9. WARM files (pressure >= 0.426)
  *
  * Never throws — returns empty AssembledContext on error.
  */
@@ -176,10 +176,19 @@ export function assembleContext(
     const header = '# Context (auto-injected by Claudex)\n\n';
     let assembled = header;
 
+    // Track sections that were skipped due to budget constraints
+    const skipped: Array<{ section: string; source?: string }> = [];
+
     function tryAppend(section: string, source?: string): boolean {
       if (!section) return false;
-      if (estimateTokens(assembled + section) > config.maxTokens) return false;
-      assembled += section + '\n';
+      // Account for the newline we'll add after the section
+      const withNewline = section + '\n';
+      if (estimateTokens(assembled + withNewline) > config.maxTokens) {
+        // Track this section as skipped for potential post-redaction reclaim
+        skipped.push({ section, source });
+        return false;
+      }
+      assembled += withNewline;
       if (source && !contributedSources.includes(source)) {
         contributedSources.push(source);
       }
@@ -211,24 +220,24 @@ export function assembleContext(
       tryAppend(buildSearchSection(sources.searchResults), 'fts5');
     }
 
-    // 6. Consensus Decisions
+    // 6. Recent observations (temporal context — what just happened)
+    if (hasRecent) {
+      tryAppend(buildRecentObservationsSection(sources.recentObservations), 'recency');
+    }
+
+    // 7. Consensus Decisions
     if (hasConsensus) {
       tryAppend(buildConsensusSection(sources.consensusDecisions!), 'consensus');
     }
 
-    // 7. Post-compaction continuity
+    // 8. Post-compaction continuity
     if (sources.postCompaction) {
       tryAppend(buildPostCompactionSection(), 'session');
     }
 
-    // 8. WARM files
+    // 9. WARM files
     if (hasHologram && sources.hologram!.warm.length > 0) {
       tryAppend(buildWarmSection(sources.hologram!.warm), 'hologram');
-    }
-
-    // 9. Fallback: recent observations (only if no hologram AND no FTS5)
-    if (!hasHologram && !hasSearch && hasRecent) {
-      tryAppend(buildRecentObservationsSection(sources.recentObservations), 'recency');
     }
 
     // If only the header was added (nothing fit), return empty
@@ -236,9 +245,30 @@ export function assembleContext(
       return { markdown: '', tokenEstimate: 0, sources: [] };
     }
 
-    const rawMarkdown = assembled.trimEnd() + '\n';
+    let rawMarkdown = assembled.trimEnd() + '\n';
     // Safety-net: redact any secrets/high-entropy that slipped through ingestion
-    const markdown = redactAssemblyOutput(rawMarkdown);
+    let markdown = redactAssemblyOutput(rawMarkdown);
+
+    // Post-redaction budget reclaim: If redaction freed up space and we have
+    // skipped sections, try to append them in the order they were skipped
+    // (which respects priority order)
+    if (skipped.length > 0 && estimateTokens(markdown) < config.maxTokens) {
+      let tempAssembled = markdown.trimEnd();
+
+      for (const { section, source } of skipped) {
+        const withNewline = '\n' + section + '\n';
+        if (estimateTokens(tempAssembled + withNewline) <= config.maxTokens) {
+          tempAssembled += withNewline;
+          if (source && !contributedSources.includes(source)) {
+            contributedSources.push(source);
+          }
+        }
+      }
+
+      // Re-redact in case the newly added sections contained anything sensitive
+      markdown = redactAssemblyOutput(tempAssembled + '\n');
+    }
+
     return {
       markdown,
       tokenEstimate: estimateTokens(markdown),

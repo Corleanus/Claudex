@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3';
 import type { ConsensusDecision, ConsensusStatus } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
+import { safeJsonParse } from '../shared/safe-json.js';
 
 const log = createLogger('consensus');
 
@@ -47,8 +48,8 @@ function rowToConsensusDecision(row: ConsensusRow): ConsensusDecision {
     codex_position: row.codex_position ?? undefined,
     human_verdict: row.human_verdict ?? undefined,
     status: row.status as ConsensusStatus,
-    tags: row.tags ? JSON.parse(row.tags) : undefined,
-    files_affected: row.files_affected ? JSON.parse(row.files_affected) : undefined,
+    tags: row.tags ? safeJsonParse<string[]>(row.tags, []) : undefined,
+    files_affected: row.files_affected ? safeJsonParse<string[]>(row.files_affected, []) : undefined,
     importance: row.importance,
     created_at: row.created_at,
     created_at_epoch: row.created_at_epoch,
@@ -158,32 +159,51 @@ export function getConsensusBySession(db: Database.Database, sessionId: string):
 /**
  * Get the most recent consensus decisions, optionally filtered by project.
  * Ordered by timestamp_epoch DESC.
+ *
+ * @param project - undefined: all records, string: specific project, null: global-scope only (WHERE project IS NULL)
  */
-export function getRecentConsensus(db: Database.Database, limit: number, project?: string): ConsensusDecision[] {
+export function getRecentConsensus(db: Database.Database, limit: number, project?: string | null): ConsensusDecision[] {
   const startMs = Date.now();
   try {
-    const sql = project
-      ? `SELECT id, session_id, project, timestamp, timestamp_epoch,
-                title, description,
-                claude_position, codex_position, human_verdict,
-                status, tags, files_affected,
-                importance, created_at, created_at_epoch
-         FROM consensus_decisions
-         WHERE project = ?
-         ORDER BY timestamp_epoch DESC
-         LIMIT ?`
-      : `SELECT id, session_id, project, timestamp, timestamp_epoch,
-                title, description,
-                claude_position, codex_position, human_verdict,
-                status, tags, files_affected,
-                importance, created_at, created_at_epoch
-         FROM consensus_decisions
-         ORDER BY timestamp_epoch DESC
-         LIMIT ?`;
+    let sql: string;
+    let rows: ConsensusRow[];
 
-    const rows = project
-      ? db.prepare(sql).all(project, limit) as ConsensusRow[]
-      : db.prepare(sql).all(limit) as ConsensusRow[];
+    if (project === null) {
+      // Global scope: only records with project IS NULL
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    title, description,
+                    claude_position, codex_position, human_verdict,
+                    status, tags, files_affected,
+                    importance, created_at, created_at_epoch
+             FROM consensus_decisions
+             WHERE project IS NULL
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(limit) as ConsensusRow[];
+    } else if (project !== undefined) {
+      // Specific project
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    title, description,
+                    claude_position, codex_position, human_verdict,
+                    status, tags, files_affected,
+                    importance, created_at, created_at_epoch
+             FROM consensus_decisions
+             WHERE project = ?
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(project, limit) as ConsensusRow[];
+    } else {
+      // All records (no filter)
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    title, description,
+                    claude_position, codex_position, human_verdict,
+                    status, tags, files_affected,
+                    importance, created_at, created_at_epoch
+             FROM consensus_decisions
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(limit) as ConsensusRow[];
+    }
 
     recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToConsensusDecision);

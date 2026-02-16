@@ -21,14 +21,30 @@ export class MigrationRunner {
   /**
    * Run all migrations in order. Safe to call multiple times —
    * each migration checks schema_versions before applying.
+   * Each migration runs inside a transaction for atomicity.
    */
   run(): void {
     this.ensureSchemaVersionsTable();
-    migration_1(this);
-    migration_2(this);
-    migration_3(this);
-    migration_4(this);
-    migration_5(this);
+    this.runInTransaction(() => migration_1(this));
+    this.runInTransaction(() => migration_2(this));
+    this.runInTransaction(() => migration_3(this));
+    this.runInTransaction(() => migration_4(this));
+    this.runInTransaction(() => migration_5(this));
+  }
+
+  /**
+   * Run a migration callback inside a transaction.
+   * If the migration throws, the transaction is rolled back.
+   */
+  private runInTransaction(fn: () => void): void {
+    this.db.exec('BEGIN');
+    try {
+      fn();
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   /**

@@ -123,6 +123,47 @@ describe('getReasoningBySession', () => {
     expect(rows[1]!.title).toBe('Second');
     expect(rows[2]!.title).toBe('Third');
   });
+
+  it('handles malformed JSON in one row without losing other rows', () => {
+    // Insert valid entries
+    insertReasoning(db, makeChain({ session_id: 'sess-test', title: 'First', decisions: ['decide-A'] }));
+    insertReasoning(db, makeChain({ session_id: 'sess-test', title: 'Third', files_involved: ['file.ts'] }));
+
+    // Manually inject corrupted JSON into decisions field
+    db.prepare(`
+      INSERT INTO reasoning_chains (
+        session_id, timestamp, timestamp_epoch, trigger, title, reasoning,
+        decisions, importance, created_at, created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'sess-test',
+      new Date().toISOString(),
+      Date.now(),
+      'pre_compact',
+      'Corrupted',
+      'reasoning text',
+      '{"broken": ', // malformed JSON
+      3,
+      new Date().toISOString(),
+      Date.now()
+    );
+
+    // Should return all 3 rows, with corrupted one using fallback
+    const rows = getReasoningBySession(db, 'sess-test');
+    expect(rows).toHaveLength(3);
+
+    // Find the corrupted row
+    const corruptRow = rows.find(r => r.title === 'Corrupted');
+    expect(corruptRow).toBeDefined();
+    expect(corruptRow!.decisions).toEqual([]); // fallback to empty array
+
+    // Valid rows should still have correct data
+    const firstRow = rows.find(r => r.title === 'First');
+    expect(firstRow!.decisions).toEqual(['decide-A']);
+
+    const thirdRow = rows.find(r => r.title === 'Third');
+    expect(thirdRow!.files_involved).toEqual(['file.ts']);
+  });
 });
 
 describe('getRecentReasoning', () => {

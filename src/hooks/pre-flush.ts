@@ -70,28 +70,34 @@ runHook(HOOK_NAME, async (input: HookStdin) => {
 
   // Execute flush
   const scope = detectScope(input.cwd);
-  const db = getDatabase();
 
   try {
-    const project = scope.type === 'project' ? scope.name : undefined;
-    const pressureScores = getPressureScores(db, project);
+    const db = getDatabase();
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping pressure score retrieval');
+      return {};
+    }
+    try {
+      const project = scope.type === 'project' ? scope.name : undefined;
+      const pressureScores = getPressureScores(db, project);
 
-    // Note: reasoningText is NOT provided here by design.
-    // Pre-flush fires BEFORE compaction — reasoning/Flow hasn't been generated yet.
-    // Reasoning capture is handled by the pre-compact hook instead.
-    const result = await executeFlush({
-      db,
-      sessionId: input.session_id,
-      scope,
-      pressureScores,
-      hologramRescore: true,
-    });
+      // Note: reasoningText is NOT provided here by design.
+      // Pre-flush fires BEFORE compaction — reasoning/Flow hasn't been generated yet.
+      // Reasoning capture is handled by the pre-compact hook instead.
+      const result = await executeFlush({
+        db,
+        sessionId: input.session_id,
+        scope,
+        pressureScores,
+        hologramRescore: true,
+      });
 
-    logToFile(HOOK_NAME, 'INFO', `Flush complete: reasoning=${result.reasoningCaptured}, pressure=${result.pressureScoresFlushed}, mirrors=${result.mirrorFilesWritten}, hologram=${result.hologramRescored}, duration=${result.durationMs}ms`);
+      logToFile(HOOK_NAME, 'INFO', `Flush complete: reasoning=${result.reasoningCaptured}, pressure=${result.pressureScoresFlushed}, mirrors=${result.mirrorFilesWritten}, hologram=${result.hologramRescored}, duration=${result.durationMs}ms`);
+    } finally {
+      db.close();
+    }
   } catch (err) {
-    logToFile(HOOK_NAME, 'ERROR', 'Flush execution failed (non-fatal):', err);
-  } finally {
-    db.close();
+    logToFile(HOOK_NAME, 'ERROR', 'DB operation failed (non-fatal):', err);
   }
 
   return {};

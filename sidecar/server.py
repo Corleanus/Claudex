@@ -59,6 +59,13 @@ def _handle_ping(req: Request) -> Response:
 
 async def _handle_query(req: Request) -> Response:
     """Process a hologram context query via Session.turn()."""
+    # H27: Validate request structure before reading payload
+    if "id" not in req:
+        return _error_response("unknown", "Missing 'id' field")
+
+    if "type" not in req:
+        return _error_response(req["id"], "Missing 'type' field")
+
     payload = req.get("payload", {})
     prompt = payload.get("prompt", "")
     claude_dir = payload.get("claude_dir", "")
@@ -199,6 +206,13 @@ class SidecarServer:
                 await writer.drain()
                 return
 
+            # H26: Validate that parsed JSON is a dict
+            if not isinstance(req, dict):
+                resp = {"id": "unknown", "type": "error", "payload": {"error": "invalid request format", "code": "BAD_REQUEST"}}
+                writer.write((json.dumps(resp) + "\n").encode("utf-8"))
+                await writer.drain()
+                return
+
             start = time.monotonic()
             resp = await route_request(req)
             elapsed_ms = round((time.monotonic() - start) * 1000, 1)
@@ -214,8 +228,15 @@ class SidecarServer:
 
         except asyncio.TimeoutError:
             logger.warning("Connection from %s timed out reading request", peer)
-        except Exception:
+        except Exception as e:
+            # H28: Catch-all handler sends error response instead of leaving client hanging
             logger.exception("Error handling connection from %s", peer)
+            try:
+                resp = _error_response("unknown", f"Internal server error: {e}")
+                writer.write((json.dumps(resp) + "\n").encode("utf-8"))
+                await writer.drain()
+            except Exception:
+                logger.exception("Failed to send error response")
         finally:
             try:
                 writer.close()

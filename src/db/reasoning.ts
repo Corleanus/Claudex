@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3';
 import type { ReasoningChain, ReasoningTrigger } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
+import { safeJsonParse } from '../shared/safe-json.js';
 
 const log = createLogger('reasoning');
 
@@ -39,8 +40,8 @@ function rowToReasoningChain(row: ReasoningRow): ReasoningChain {
     trigger: row.trigger as ReasoningTrigger,
     title: row.title,
     reasoning: row.reasoning,
-    decisions: row.decisions ? JSON.parse(row.decisions) : undefined,
-    files_involved: row.files_involved ? JSON.parse(row.files_involved) : undefined,
+    decisions: row.decisions ? safeJsonParse<string[]>(row.decisions, []) : undefined,
+    files_involved: row.files_involved ? safeJsonParse<string[]>(row.files_involved, []) : undefined,
     importance: row.importance,
     created_at: row.created_at,
     created_at_epoch: row.created_at_epoch,
@@ -121,30 +122,48 @@ export function getReasoningBySession(db: Database.Database, sessionId: string):
 /**
  * Get the most recent reasoning chains, optionally filtered by project.
  * Ordered by timestamp_epoch DESC.
+ *
+ * @param project - undefined: all records, string: specific project, null: global-scope only (WHERE project IS NULL)
  */
-export function getRecentReasoning(db: Database.Database, limit: number, project?: string): ReasoningChain[] {
+export function getRecentReasoning(db: Database.Database, limit: number, project?: string | null): ReasoningChain[] {
   const startMs = Date.now();
   try {
-    const sql = project
-      ? `SELECT id, session_id, project, timestamp, timestamp_epoch,
-                trigger, title, reasoning,
-                decisions, files_involved,
-                importance, created_at, created_at_epoch
-         FROM reasoning_chains
-         WHERE project = ?
-         ORDER BY timestamp_epoch DESC
-         LIMIT ?`
-      : `SELECT id, session_id, project, timestamp, timestamp_epoch,
-                trigger, title, reasoning,
-                decisions, files_involved,
-                importance, created_at, created_at_epoch
-         FROM reasoning_chains
-         ORDER BY timestamp_epoch DESC
-         LIMIT ?`;
+    let sql: string;
+    let rows: ReasoningRow[];
 
-    const rows = project
-      ? db.prepare(sql).all(project, limit) as ReasoningRow[]
-      : db.prepare(sql).all(limit) as ReasoningRow[];
+    if (project === null) {
+      // Global scope: only records with project IS NULL
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    trigger, title, reasoning,
+                    decisions, files_involved,
+                    importance, created_at, created_at_epoch
+             FROM reasoning_chains
+             WHERE project IS NULL
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(limit) as ReasoningRow[];
+    } else if (project !== undefined) {
+      // Specific project
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    trigger, title, reasoning,
+                    decisions, files_involved,
+                    importance, created_at, created_at_epoch
+             FROM reasoning_chains
+             WHERE project = ?
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(project, limit) as ReasoningRow[];
+    } else {
+      // All records (no filter)
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    trigger, title, reasoning,
+                    decisions, files_involved,
+                    importance, created_at, created_at_epoch
+             FROM reasoning_chains
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(limit) as ReasoningRow[];
+    }
 
     recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToReasoningChain);

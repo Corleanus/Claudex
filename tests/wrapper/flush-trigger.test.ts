@@ -218,14 +218,14 @@ describe('executeFlush', () => {
     const scores: PressureScore[] = [
       {
         file_path: '/src/main.ts',
-        project: '__global__',
+        project: 'test-project',
         raw_pressure: 0.85,
         temperature: 'HOT',
         decay_rate: 0.05,
       },
       {
         file_path: '/src/utils.ts',
-        project: '__global__',
+        project: 'test-project',
         raw_pressure: 0.45,
         temperature: 'WARM',
         decay_rate: 0.05,
@@ -274,7 +274,7 @@ describe('executeFlush', () => {
     const scores: PressureScore[] = [
       {
         file_path: '/src/app.ts',
-        project: '__global__',
+        project: 'test-project',
         raw_pressure: 0.9,
         temperature: 'HOT',
         decay_rate: 0.05,
@@ -301,21 +301,21 @@ describe('executeFlush', () => {
     const scores: PressureScore[] = [
       {
         file_path: '/src/a.ts',
-        project: '__global__',
+        project: 'test-project',
         raw_pressure: 0.7,
         temperature: 'HOT',
         decay_rate: 0.05,
       },
       {
         file_path: '/src/b.ts',
-        project: '__global__',
+        project: 'test-project',
         raw_pressure: 0.3,
         temperature: 'WARM',
         decay_rate: 0.05,
       },
       {
         file_path: '/src/c.ts',
-        project: '__global__',
+        project: 'test-project',
         raw_pressure: 0.1,
         temperature: 'COLD',
         decay_rate: 0.05,
@@ -354,7 +354,7 @@ describe('executeFlush', () => {
     const scores: PressureScore[] = [
       {
         file_path: '/src/still-works.ts',
-        project: '__global__',
+        project: 'test-project',
         raw_pressure: 0.5,
         temperature: 'WARM',
         decay_rate: 0.05,

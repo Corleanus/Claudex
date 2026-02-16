@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   redactSensitive,
   redactAssemblyOutput,
+  sanitizePath,
   _shannonEntropy as shannonEntropy,
 } from '../../src/lib/redaction.js';
 
@@ -128,8 +129,8 @@ describe('redactSensitive — PII patterns', () => {
 
 describe('redactSensitive — entropy detection', () => {
   it('redacts high-entropy random strings (>= 4.5 bits, >= 20 chars)', () => {
-    // Random base64-like string with high entropy — includes + and / to break identifier allowlist
-    const randomStr = 'aB3d+5fG7/J9kL1mN3pQ5rS7tU9vW1x';
+    // Random string with high entropy — includes _ and - which are in HIGH_ENTROPY_PATTERN but NOT valid base64
+    const randomStr = 'aB3d_5fG7-J9kL1mN3pQ5rS7tU9vW1xYz';
     const input = `Value is ${randomStr} here`;
     const result = redactSensitive(input);
     expect(result).toContain('[REDACTED-ENTROPY]');
@@ -191,6 +192,37 @@ describe('redactSensitive — entropy allowlist', () => {
     const input = `Function: ${ident}`;
     expect(redactSensitive(input)).toBe(input);
   });
+
+  // H23 fix: URL/path fragments should not be redacted
+  it('does NOT redact URLs with https:// prefix', () => {
+    const url = 'https://api.example.com/v1/users/abc123def456ghi789jkl';
+    const input = `Fetching from ${url}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('does NOT redact URLs with http:// prefix', () => {
+    const url = 'http://localhost:3000/api/test/abc123def456ghi789';
+    const input = `Local API: ${url}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('does NOT redact file paths with extensions', () => {
+    const path = 'C:\\Users\\Test\\Projects\\myapp\\src\\components\\LongComponentName.tsx';
+    const input = `File: ${path}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('does NOT redact Unix file paths with extensions', () => {
+    const path = '/home/user/projects/myapp/src/lib/VeryLongUtilityFunctionName.ts';
+    const input = `Source: ${path}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('does NOT redact base64-encoded legitimate content', () => {
+    const base64 = 'SGVsbG8gV29ybGQhIFRoaXMgaXMgYSB0ZXN0IHN0cmluZyB3aXRoIGJhc2U2NCBlbmNvZGluZw==';
+    const input = `Data: ${base64}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
 });
 
 // =============================================================================
@@ -205,17 +237,24 @@ describe('redactAssemblyOutput', () => {
   });
 
   it('redacts high-entropy strings in assembly output', () => {
-    const randomStr = 'aB3d+5fG7/J9kL1mN3pQ5rS7tU9vW1x';
+    const randomStr = 'aB3d_5fG7-J9kL1mN3pQ5rS7tU9vW1xYz';
     const result = redactAssemblyOutput(`Value is ${randomStr} here`);
     expect(result).toContain('[REDACTED-ENTROPY]');
   });
 
-  it('does NOT redact PII in assembly output (lighter pass)', () => {
+  it('redacts PII in assembly output (FULL redaction safety-net)', () => {
     const input = 'Contact: user@example.com';
     const result = redactAssemblyOutput(input);
-    // Assembly safety-net does NOT apply PII patterns
-    expect(result).not.toContain('[REDACTED-PII]');
-    expect(result).toContain('user@example.com');
+    // Assembly safety-net NOW applies PII patterns (C1 fix)
+    expect(result).toContain('[REDACTED-PII]');
+    expect(result).not.toContain('user@example.com');
+  });
+
+  it('redacts phone numbers in assembly output', () => {
+    const input = 'Call me at (555) 123-4567';
+    const result = redactAssemblyOutput(input);
+    expect(result).toContain('[REDACTED-PII]');
+    expect(result).not.toContain('(555) 123-4567');
   });
 
   it('preserves normal text in assembly output', () => {
@@ -257,5 +296,66 @@ describe('redactSensitive — combined patterns', () => {
     expect(result).not.toContain('mysecretkey123');
     expect(result).not.toContain('test@example.com');
     expect(result).not.toContain('203.0.113.1');
+  });
+});
+
+// =============================================================================
+// Path sanitization (C2 fix)
+// =============================================================================
+
+describe('sanitizePath', () => {
+  it('converts absolute Windows path to project-relative', () => {
+    const result = sanitizePath(
+      'C:\\Users\\John\\Projects\\myapp\\src\\file.ts',
+      'C:\\Users\\John\\Projects\\myapp'
+    );
+    expect(result).toBe('<project>/src/file.ts');
+  });
+
+  it('converts absolute Unix path to project-relative', () => {
+    const result = sanitizePath(
+      '/home/john/projects/myapp/src/file.ts',
+      '/home/john/projects/myapp'
+    );
+    expect(result).toBe('<project>/src/file.ts');
+  });
+
+  it('converts absolute macOS path to project-relative', () => {
+    const result = sanitizePath(
+      '/Users/john/projects/myapp/src/file.ts',
+      '/Users/john/projects/myapp'
+    );
+    expect(result).toBe('<project>/src/file.ts');
+  });
+
+  it('redacts Windows username when no project root given', () => {
+    const result = sanitizePath('C:\\Users\\John\\Desktop\\file.txt');
+    expect(result).toBe('C:\\Users\\[USER]\\Desktop\\file.txt');
+    expect(result).not.toContain('John');
+  });
+
+  it('redacts Unix /home username when no project root given', () => {
+    const result = sanitizePath('/home/john/Desktop/file.txt');
+    expect(result).toBe('/home/[USER]/Desktop/file.txt');
+    expect(result).not.toContain('john');
+  });
+
+  it('redacts macOS /Users username when no project root given', () => {
+    const result = sanitizePath('/Users/jane/Documents/file.txt');
+    expect(result).toBe('/Users/[USER]/Documents/file.txt');
+    expect(result).not.toContain('jane');
+  });
+
+  it('handles empty or null paths gracefully', () => {
+    expect(sanitizePath('')).toBe('');
+  });
+
+  it('handles paths outside project root', () => {
+    const result = sanitizePath(
+      'C:\\Users\\John\\OtherProject\\file.ts',
+      'C:\\Users\\John\\Projects\\myapp'
+    );
+    // Falls back to username redaction
+    expect(result).toBe('C:\\Users\\[USER]\\OtherProject\\file.ts');
   });
 });

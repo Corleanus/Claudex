@@ -9,11 +9,15 @@ import type Database from 'better-sqlite3';
 import type { PressureScore, TemperatureLevel } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
+import { ensureEpochMs } from '../shared/epoch.js';
 
 const log = createLogger('pressure');
 
 /** Sentinel value for global scope (no project). Avoids NULL in UNIQUE index. */
 const GLOBAL_PROJECT_SENTINEL = '__global__';
+
+/** Reserved project name that conflicts with the sentinel. Must be rejected or mapped. */
+const RESERVED_PROJECT_NAME = '__global__';
 
 /** Row shape returned by SQLite before hydration */
 interface PressureRow {
@@ -52,6 +56,13 @@ export function upsertPressureScore(
 ): void {
   const startMs = Date.now();
   try {
+    // Guard against reserved project name collision
+    if (score.project === RESERVED_PROJECT_NAME) {
+      log.warn(`Project name "${RESERVED_PROJECT_NAME}" is reserved and conflicts with internal sentinel. Skipping upsert for file: ${score.file_path}`);
+      recordMetric('db.insert', Date.now() - startMs);
+      return;
+    }
+
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
 
@@ -66,7 +77,7 @@ export function upsertPressureScore(
       score.project ?? GLOBAL_PROJECT_SENTINEL,
       score.raw_pressure,
       score.temperature,
-      score.last_accessed_epoch ?? null,
+      score.last_accessed_epoch !== undefined ? ensureEpochMs(score.last_accessed_epoch) : null,
       score.decay_rate,
       now,
       nowEpoch,

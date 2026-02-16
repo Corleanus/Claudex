@@ -121,6 +121,20 @@ describe('upsertPressureScore', () => {
     expect(alpha[0]!.raw_pressure).toBe(0.3);
     expect(beta[0]!.raw_pressure).toBe(0.7);
   });
+
+  it('rejects project name "__global__" to avoid sentinel collision', () => {
+    // Attempt to insert with reserved project name
+    upsertPressureScore(db, makeScore({
+      file_path: 'src/reserved.ts',
+      project: '__global__',
+      raw_pressure: 0.8
+    }));
+
+    // Should NOT create a row because the project name is reserved
+    const rows = getPressureScores(db, '__global__');
+    // Only the sentinel-based entries (project: undefined) should exist, not user-provided '__global__'
+    expect(rows).toHaveLength(0);
+  });
 });
 
 describe('getPressureScores', () => {
@@ -191,6 +205,44 @@ describe('getWarmFiles', () => {
   it('returns empty when no WARM files exist', () => {
     upsertPressureScore(db, makeScore({ file_path: 'hot.ts', project: 'p', temperature: 'HOT' }));
     expect(getWarmFiles(db, 'p')).toEqual([]);
+  });
+});
+
+describe('epoch validation', () => {
+  it('converts seconds to milliseconds for last_accessed_epoch', () => {
+    // Epoch for 2021-01-01 in seconds
+    const secondsEpoch = 1609459200;
+    upsertPressureScore(db, makeScore({
+      file_path: 'test.ts',
+      project: 'p',
+      last_accessed_epoch: secondsEpoch,
+    }));
+
+    const rows = getPressureScores(db, 'p');
+    // Should be stored as milliseconds
+    expect(rows[0]!.last_accessed_epoch).toBe(1609459200000);
+  });
+
+  it('keeps milliseconds unchanged for last_accessed_epoch', () => {
+    const msEpoch = 1609459200000;
+    upsertPressureScore(db, makeScore({
+      file_path: 'test.ts',
+      project: 'p',
+      last_accessed_epoch: msEpoch,
+    }));
+
+    const rows = getPressureScores(db, 'p');
+    expect(rows[0]!.last_accessed_epoch).toBe(msEpoch);
+  });
+
+  it('handles undefined last_accessed_epoch', () => {
+    upsertPressureScore(db, makeScore({
+      file_path: 'test.ts',
+      project: 'p',
+    }));
+
+    const rows = getPressureScores(db, 'p');
+    expect(rows[0]!.last_accessed_epoch).toBeUndefined();
   });
 });
 

@@ -9,6 +9,8 @@ import type Database from 'better-sqlite3';
 import type { Observation } from '../shared/types.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
+import { safeJsonParse } from '../shared/safe-json.js';
+import { ensureEpochMs } from '../shared/epoch.js';
 
 const log = createLogger('observations');
 
@@ -35,7 +37,7 @@ export function storeObservation(db: Database.Database, obs: Observation): { id:
       obs.session_id,
       obs.project ?? null,
       obs.timestamp,
-      obs.timestamp_epoch,
+      ensureEpochMs(obs.timestamp_epoch),
       obs.tool_name,
       obs.category,
       obs.title,
@@ -85,9 +87,9 @@ function rowToObservation(row: ObservationRow): Observation {
     category: row.category as Observation['category'],
     title: row.title,
     content: row.content ?? '',
-    facts: row.facts ? JSON.parse(row.facts) : undefined,
-    files_read: row.files_read ? JSON.parse(row.files_read) : undefined,
-    files_modified: row.files_modified ? JSON.parse(row.files_modified) : undefined,
+    facts: row.facts ? safeJsonParse<string[]>(row.facts, []) : undefined,
+    files_read: row.files_read ? safeJsonParse<string[]>(row.files_read, []) : undefined,
+    files_modified: row.files_modified ? safeJsonParse<string[]>(row.files_modified, []) : undefined,
     importance: row.importance,
   };
 }
@@ -118,28 +120,45 @@ export function getObservationsBySession(db: Database.Database, sessionId: strin
 
 /**
  * Get the most recent observations, optionally filtered by project.
+ *
+ * @param project - undefined: all records, string: specific project, null: global-scope only (WHERE project IS NULL)
  */
-export function getRecentObservations(db: Database.Database, limit: number, project?: string): Observation[] {
+export function getRecentObservations(db: Database.Database, limit: number, project?: string | null): Observation[] {
   const startMs = Date.now();
   try {
-    const sql = project
-      ? `SELECT id, session_id, project, timestamp, timestamp_epoch,
-                tool_name, category, title, content,
-                facts, files_read, files_modified, importance
-         FROM observations
-         WHERE project = ?
-         ORDER BY timestamp_epoch DESC
-         LIMIT ?`
-      : `SELECT id, session_id, project, timestamp, timestamp_epoch,
-                tool_name, category, title, content,
-                facts, files_read, files_modified, importance
-         FROM observations
-         ORDER BY timestamp_epoch DESC
-         LIMIT ?`;
+    let sql: string;
+    let rows: ObservationRow[];
 
-    const rows = project
-      ? db.prepare(sql).all(project, limit) as ObservationRow[]
-      : db.prepare(sql).all(limit) as ObservationRow[];
+    if (project === null) {
+      // Global scope: only records with project IS NULL
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    tool_name, category, title, content,
+                    facts, files_read, files_modified, importance
+             FROM observations
+             WHERE project IS NULL
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(limit) as ObservationRow[];
+    } else if (project !== undefined) {
+      // Specific project
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    tool_name, category, title, content,
+                    facts, files_read, files_modified, importance
+             FROM observations
+             WHERE project = ?
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(project, limit) as ObservationRow[];
+    } else {
+      // All records (no filter)
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    tool_name, category, title, content,
+                    facts, files_read, files_modified, importance
+             FROM observations
+             ORDER BY timestamp_epoch DESC
+             LIMIT ?`;
+      rows = db.prepare(sql).all(limit) as ObservationRow[];
+    }
 
     recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToObservation);
@@ -159,7 +178,7 @@ export function deleteOldObservations(db: Database.Database, olderThanEpoch: num
   try {
     const result = db.prepare(
       'DELETE FROM observations WHERE timestamp_epoch < ?'
-    ).run(olderThanEpoch);
+    ).run(ensureEpochMs(olderThanEpoch));
 
     recordMetric('db.query', Date.now() - startMs);
     return result.changes;

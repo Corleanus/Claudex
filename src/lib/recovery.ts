@@ -48,6 +48,7 @@ const COOLDOWN_FILE = path.join(CLAUDEX_HOME, 'db', '.flush_cooldown');
 /** Stale thresholds (conservative) */
 const STALE_PORT_FILE_MS = 24 * 60 * 60 * 1000;    // 24 hours
 const STALE_COOLDOWN_MS = 60 * 60 * 1000;           // 1 hour
+const MAX_COOLDOWN_DURATION_MS = 60 * 60 * 1000;    // 1 hour max cooldown duration
 const ORPHAN_SESSION_MS = 12 * 60 * 60 * 1000;      // 12 hours
 const TCP_PING_TIMEOUT_MS = 1000;                     // 1 second
 
@@ -160,6 +161,7 @@ async function checkStaleSidecar(): Promise<RecoveryCheck> {
 /**
  * Check 3: Stale cooldown file (>1h old).
  * Cooldown prevents rapid re-flushing, but a stale one blocks all flushes.
+ * Also validates cooldown timestamps aren't far-future (from bugs/clock skew).
  */
 function checkStaleCooldown(): RecoveryCheck {
   if (!fs.existsSync(COOLDOWN_FILE)) {
@@ -169,18 +171,41 @@ function checkStaleCooldown(): RecoveryCheck {
   try {
     const content = fs.readFileSync(COOLDOWN_FILE, 'utf-8').trim();
     const lastFlush = parseInt(content, 10);
-    const ageMs = Date.now() - lastFlush;
 
-    if (ageMs <= STALE_COOLDOWN_MS) {
-      return { name: 'cooldown', status: 'ok', message: 'Cooldown is recent' };
+    // Validate timestamp is reasonable (not negative, not nonsensical)
+    if (!Number.isFinite(lastFlush) || lastFlush < 0) {
+      fs.unlinkSync(COOLDOWN_FILE);
+      return {
+        name: 'cooldown',
+        status: 'recovered',
+        message: 'Removed cooldown with invalid timestamp',
+      };
     }
 
-    fs.unlinkSync(COOLDOWN_FILE);
-    return {
-      name: 'cooldown',
-      status: 'recovered',
-      message: `Removed stale cooldown (${Math.round(ageMs / 60000)}min old)`,
-    };
+    const now = Date.now();
+    const ageMs = now - lastFlush;
+
+    // If timestamp is far-future (beyond max cooldown duration), reset it
+    if (ageMs < -MAX_COOLDOWN_DURATION_MS) {
+      fs.unlinkSync(COOLDOWN_FILE);
+      return {
+        name: 'cooldown',
+        status: 'recovered',
+        message: `Removed far-future cooldown (${Math.abs(Math.round(ageMs / 60000))}min ahead)`,
+      };
+    }
+
+    // Normal stale check (past timestamp, older than 1h)
+    if (ageMs > STALE_COOLDOWN_MS) {
+      fs.unlinkSync(COOLDOWN_FILE);
+      return {
+        name: 'cooldown',
+        status: 'recovered',
+        message: `Removed stale cooldown (${Math.round(ageMs / 60000)}min old)`,
+      };
+    }
+
+    return { name: 'cooldown', status: 'ok', message: 'Cooldown is recent' };
   } catch {
     return { name: 'cooldown', status: 'warning', message: 'Could not check cooldown file' };
   }

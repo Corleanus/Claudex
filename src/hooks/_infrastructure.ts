@@ -17,7 +17,7 @@ import * as path from 'node:path';
 import { loadConfig } from '../shared/config.js';
 import { recordMetric, getMetrics } from '../shared/metrics.js';
 import { PATHS } from '../shared/paths.js';
-import { detectVersion, migrateInput, stampOutput, validateInput } from '../shared/hook-schema.js';
+import { detectVersion, migrateInput, stampOutput, validateInput, CURRENT_SCHEMA_VERSION } from '../shared/hook-schema.js';
 import type { HookStdin, HookStdout } from '../shared/types.js';
 
 /** Read JSON from stdin (piped by Claude Code). */
@@ -55,7 +55,8 @@ export async function runHook(
     // Schema versioning: detect, migrate, validate
     const version = detectVersion(rawInput as unknown as Record<string, unknown>);
     const input = migrateInput(rawInput as unknown as Record<string, unknown>, version) as unknown as HookStdin;
-    const validation = validateInput(hookName, input as unknown as Record<string, unknown>, version);
+    // Validate against CURRENT version (post-migration), not the detected version
+    const validation = validateInput(hookName, input as unknown as Record<string, unknown>, CURRENT_SCHEMA_VERSION);
     if (!validation.valid) {
       logToFile(hookName, 'WARN', `Input validation warnings: ${validation.errors.join(', ')}`);
     }

@@ -15,10 +15,12 @@ const log = createLogger('scope-detector');
 
 /**
  * Normalize a filesystem path for comparison.
- * Converts backslashes to forward slashes, strips trailing slashes, lowercases.
+ * Converts backslashes to forward slashes, strips trailing slashes.
+ * Lowercases only on Windows (case-insensitive filesystem).
  */
 export function normalizePath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const normalized = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 /**

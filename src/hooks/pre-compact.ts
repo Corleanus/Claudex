@@ -125,6 +125,10 @@ runHook('pre-compact', async (input: HookStdin) => {
 
     // 2. Open DB
     const db = getDatabase();
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping reasoning capture');
+      return {};
+    }
 
     try {
       // 3. Read transcript content

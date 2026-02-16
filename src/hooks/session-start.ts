@@ -120,21 +120,25 @@ async function registerInSqlite(scope: Scope, sessionId: string, cwd: string): P
     const { createSession } = await import('../db/sessions.js');
 
     const db = getDatabase();
-    try {
-      const result = createSession(db, {
-        session_id: sessionId,
-        scope: scopeToString(scope),
-        project: scopeToProject(scope) ?? undefined,
-        cwd,
-      });
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping session creation');
+    } else {
+      try {
+        const result = createSession(db, {
+          session_id: sessionId,
+          scope: scopeToString(scope),
+          project: scopeToProject(scope) ?? undefined,
+          cwd,
+        });
 
-      if (result.id === -1) {
-        logToFile(HOOK_NAME, 'WARN', 'SQLite createSession returned error sentinel');
-      } else {
-        logToFile(HOOK_NAME, 'INFO', `Session registered in SQLite (rowid=${result.id})`);
+        if (result.id === -1) {
+          logToFile(HOOK_NAME, 'WARN', 'SQLite createSession returned error sentinel');
+        } else {
+          logToFile(HOOK_NAME, 'INFO', `Session registered in SQLite (rowid=${result.id})`);
+        }
+      } finally {
+        db.close();
       }
-    } finally {
-      db.close();
     }
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'SQLite unavailable, skipping DB registration (Tier 2 degradation)', err);
@@ -204,18 +208,22 @@ runHook(HOOK_NAME, async (input) => {
 
     const config = loadConfig();
     const db = getDatabase();
-    try {
-      // Run recovery first — cleans up stale state before health check
-      const recovery = await runRecovery(config, db);
-      if (recovery.actionsPerformed.length > 0) {
-        logToFile(HOOK_NAME, 'INFO', `Recovery: ${recovery.actionsPerformed.join(', ')}`);
-      }
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping recovery and health check');
+    } else {
+      try {
+        // Run recovery first — cleans up stale state before health check
+        const recovery = await runRecovery(config, db);
+        if (recovery.actionsPerformed.length > 0) {
+          logToFile(HOOK_NAME, 'INFO', `Recovery: ${recovery.actionsPerformed.join(', ')}`);
+        }
 
-      const health = checkHealth(config, db);
-      health.recovery = recovery;
-      logToFile(HOOK_NAME, 'INFO', `System health: ${JSON.stringify(health)}`);
-    } finally {
-      db.close();
+        const health = await checkHealth(config, db);
+        health.recovery = recovery;
+        logToFile(HOOK_NAME, 'INFO', `System health: ${JSON.stringify(health)}`);
+      } finally {
+        db.close();
+      }
     }
   } catch (healthErr) {
     logToFile(HOOK_NAME, 'WARN', 'Health check / recovery failed (non-fatal)', healthErr);
@@ -237,12 +245,18 @@ runHook(HOOK_NAME, async (input) => {
     const { loadConfig } = await import('../shared/config.js');
 
     const db = getDatabase();
-    try {
-      // Query previous session state
-      const observations = getRecentObservations(db, 20, project ?? undefined);
-      const reasoningChains = getRecentReasoning(db, 5, project ?? undefined);
-      const consensusDecisions = getRecentConsensus(db, 5, project ?? undefined);
-      const pressureScores = getPressureScores(db, project ?? undefined);
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping context restoration');
+    } else {
+      try {
+        // Query previous session state scoped appropriately:
+        // - Project scope: query that project's data
+        // - Global scope (project === null): query global-only data (WHERE project IS NULL or '__global__' sentinel)
+        const observations = getRecentObservations(db, 20, project);
+        const reasoningChains = getRecentReasoning(db, 5, project);
+        const consensusDecisions = getRecentConsensus(db, 5, project);
+        // Pressure scores use '__global__' sentinel instead of NULL due to UNIQUE constraint
+        const pressureScores = getPressureScores(db, project ?? '__global__');
 
       logToFile(HOOK_NAME, 'DEBUG',
         `DB restoration data: observations=${observations.length} reasoning=${reasoningChains.length} consensus=${consensusDecisions.length} pressure=${pressureScores.length}`);
@@ -363,8 +377,9 @@ runHook(HOOK_NAME, async (input) => {
       } else {
         logToFile(HOOK_NAME, 'INFO', 'Context restoration: no restorable context found');
       }
-    } finally {
-      db.close();
+      } finally {
+        db.close();
+      }
     }
   } catch (restorationErr) {
     logToFile(HOOK_NAME, 'WARN', 'Context restoration failed (non-fatal, continuing without restoration)', restorationErr);
@@ -375,21 +390,25 @@ runHook(HOOK_NAME, async (input) => {
     const { getDatabase: getAuditDb } = await import('../db/connection.js');
     const { logAudit } = await import('../db/audit.js');
     const auditDb = getAuditDb();
-    try {
-      const auditNow = new Date();
-      logAudit(auditDb, {
-        timestamp: auditNow.toISOString(),
-        timestamp_epoch: auditNow.getTime(),
-        session_id: sessionId,
-        event_type: 'context_assembly',
-        actor: 'hook:session-start',
-        details: {
-          restored: !!additionalContext,
-          source,
-        },
-      });
-    } finally {
-      auditDb.close();
+    if (!auditDb) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping audit logging');
+    } else {
+      try {
+        const auditNow = new Date();
+        logAudit(auditDb, {
+          timestamp: auditNow.toISOString(),
+          timestamp_epoch: auditNow.getTime(),
+          session_id: sessionId,
+          event_type: 'context_assembly',
+          actor: 'hook:session-start',
+          details: {
+            restored: !!additionalContext,
+            source,
+          },
+        });
+      } finally {
+        auditDb.close();
+      }
     }
   } catch (auditErr) {
     logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);

@@ -13,6 +13,7 @@ import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { loadConfig } from '../shared/config.js';
 import { assembleContext } from '../lib/context-assembler.js';
+import { normalizeFts5Query } from '../shared/fts5-utils.js';
 import type { UserPromptSubmitInput, HologramResponse, SearchResult, Observation, Scope } from '../shared/types.js';
 
 const HOOK_NAME = 'user-prompt-submit';
@@ -55,10 +56,11 @@ async function queryHologram(
 
     // Open DB for fallback tier — but don't let DB failure block hologram query
     let db: import('better-sqlite3').Database | undefined;
-    try {
-      db = getDatabase();
-    } catch (dbErr) {
-      logToFile(HOOK_NAME, 'WARN', 'DB unavailable for fallback tier, continuing without', dbErr);
+    const dbOrNull = getDatabase();
+    if (dbOrNull) {
+      db = dbOrNull;
+    } else {
+      logToFile(HOOK_NAME, 'WARN', 'DB unavailable for fallback tier, continuing without');
     }
 
     try {
@@ -118,7 +120,10 @@ function extractKeywords(prompt: string): string {
 
   // Deduplicate and take top 5 keywords
   const unique = [...new Set(words)].slice(0, 5);
-  return unique.join(' ');
+  const keywords = unique.join(' ');
+
+  // Normalize for FTS5 (strips hyphens and other special chars)
+  return normalizeFts5Query(keywords);
 }
 
 /**
@@ -137,6 +142,10 @@ function queryFts5(promptText: string, scope: Scope): SearchResult[] {
     const { searchObservations } = require('../db/search.js') as typeof import('../db/search.js');
 
     const db = getDatabase();
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping FTS5');
+      return [];
+    }
     try {
       const project = scope.type === 'project' ? scope.name : undefined;
       const results = searchObservations(db, keywords, {
@@ -165,6 +174,10 @@ function getRecent(scope: Scope): Observation[] {
     const { getRecentObservations } = require('../db/observations.js') as typeof import('../db/observations.js');
 
     const db = getDatabase();
+    if (!db) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping recent observations');
+      return [];
+    }
     try {
       const project = scope.type === 'project' ? scope.name : undefined;
       const recent = getRecentObservations(db, 5, project);
@@ -219,34 +232,38 @@ runHook(HOOK_NAME, async (input) => {
       const { upsertPressureScore } = await import('../db/pressure.js');
 
       const db = getDatabase();
-      try {
-        const project = scope.type === 'project' ? scope.name : '__global__';
-        const nowEpoch = Date.now();
+      if (!db) {
+        logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping pressure score persistence');
+      } else {
+        try {
+          const project = scope.type === 'project' ? scope.name : '__global__';
+          const nowEpoch = Date.now();
 
-        const entries: Array<{ list: typeof hologramResult.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
-          { list: hologramResult.hot, temp: 'HOT', pressure: 0.9 },
-          { list: hologramResult.warm, temp: 'WARM', pressure: 0.5 },
-          { list: hologramResult.cold, temp: 'COLD', pressure: 0.1 },
-        ];
+          const entries: Array<{ list: typeof hologramResult.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
+            { list: hologramResult.hot, temp: 'HOT', pressure: 0.9 },
+            { list: hologramResult.warm, temp: 'WARM', pressure: 0.5 },
+            { list: hologramResult.cold, temp: 'COLD', pressure: 0.1 },
+          ];
 
-        let persisted = 0;
-        for (const { list, temp, pressure } of entries) {
-          for (const file of list) {
-            upsertPressureScore(db, {
-              file_path: file.path,
-              project,
-              raw_pressure: file.raw_pressure ?? pressure,
-              temperature: temp,
-              last_accessed_epoch: nowEpoch,
-              decay_rate: 0.05,
-            });
-            persisted++;
+          let persisted = 0;
+          for (const { list, temp, pressure } of entries) {
+            for (const file of list) {
+              upsertPressureScore(db, {
+                file_path: file.path,
+                project,
+                raw_pressure: file.raw_pressure ?? pressure,
+                temperature: temp,
+                last_accessed_epoch: nowEpoch,
+                decay_rate: 0.05,
+              });
+              persisted++;
+            }
           }
-        }
 
-        logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} pressure scores to DB`);
-      } finally {
-        db.close();
+          logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} pressure scores to DB`);
+        } finally {
+          db.close();
+        }
       }
     } catch (err) {
       logToFile(HOOK_NAME, 'WARN', 'Failed to persist hologram pressure scores (non-fatal)', err);
@@ -275,22 +292,26 @@ runHook(HOOK_NAME, async (input) => {
     const { getDatabase: getAuditDb } = await import('../db/connection.js');
     const { logAudit } = await import('../db/audit.js');
     const auditDb = getAuditDb();
-    try {
-      const now = new Date();
-      logAudit(auditDb, {
-        timestamp: now.toISOString(),
-        timestamp_epoch: now.getTime(),
-        session_id: sessionId,
-        event_type: 'context_assembly',
-        actor: 'hook:user-prompt-submit',
-        details: {
-          sources: assembled.sources,
-          tokenEstimate: assembled.tokenEstimate,
-          durationMs: elapsedMs,
-        },
-      });
-    } finally {
-      auditDb.close();
+    if (!auditDb) {
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping audit logging');
+    } else {
+      try {
+        const now = new Date();
+        logAudit(auditDb, {
+          timestamp: now.toISOString(),
+          timestamp_epoch: now.getTime(),
+          session_id: sessionId,
+          event_type: 'context_assembly',
+          actor: 'hook:user-prompt-submit',
+          details: {
+            sources: assembled.sources,
+            tokenEstimate: assembled.tokenEstimate,
+            durationMs: elapsedMs,
+          },
+        });
+      } finally {
+        auditDb.close();
+      }
     }
   } catch (auditErr) {
     logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);

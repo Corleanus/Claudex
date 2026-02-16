@@ -8,7 +8,7 @@
  * Port coordination via port file; PID tracking via PID file.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execSync, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -35,6 +35,46 @@ function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify if a PID belongs to a Python sidecar process.
+ * Returns true if the process command line contains 'python' and 'sidecar',
+ * false if the PID is stale/reused or can't be verified.
+ */
+function isPythonSidecar(pid: number): boolean {
+  try {
+    if (process.platform === 'win32') {
+      // Windows: use wmic to get command line
+      const output = execSync(`wmic process where ProcessId=${pid} get CommandLine`, {
+        encoding: 'utf-8',
+        timeout: 2000,
+        windowsHide: true,
+      }).toString();
+
+      // Check if command line contains python and sidecar indicators
+      const lowerOutput = output.toLowerCase();
+      return lowerOutput.includes('python') && lowerOutput.includes('sidecar');
+    } else {
+      // Unix: read /proc/PID/cmdline or use ps
+      try {
+        const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
+        const lowerCmdline = cmdline.toLowerCase();
+        return lowerCmdline.includes('python') && lowerCmdline.includes('sidecar');
+      } catch {
+        // Fallback to ps if /proc not available (macOS)
+        const output = execSync(`ps -p ${pid} -o command=`, {
+          encoding: 'utf-8',
+          timeout: 2000,
+        }).toString();
+        const lowerOutput = output.toLowerCase();
+        return lowerOutput.includes('python') && lowerOutput.includes('sidecar');
+      }
+    }
+  } catch {
+    // Command failed or timed out — can't verify, assume not ours
     return false;
   }
 }
@@ -154,12 +194,18 @@ export class SidecarManager {
           }
         }
 
-        // Process alive but no valid port — kill and restart
-        log.warn('Sidecar process alive but no valid port, killing', { pid: existingPid });
-        try {
-          process.kill(existingPid);
-        } catch {
-          // Already dead by the time we tried
+        // Process alive but no valid port — verify it's our sidecar before killing
+        if (isPythonSidecar(existingPid)) {
+          log.warn('Sidecar process alive but no valid port, killing', { pid: existingPid });
+          try {
+            process.kill(existingPid);
+          } catch {
+            // Already dead by the time we tried
+          }
+        } else {
+          log.warn('Stale PID file points to non-sidecar process, discarding PID file', {
+            pid: existingPid,
+          });
         }
         safeUnlink(PATHS.hologramPid);
       } else {
@@ -253,10 +299,21 @@ export class SidecarManager {
 
     // Handle unexpected exit during startup
     let exitedDuringStartup = false;
+    const errorState = { error: null as Error | null };
+
     const onExit = () => {
       exitedDuringStartup = true;
     };
+
+    const onError = (err: Error) => {
+      errorState.error = err;
+      log.error('Sidecar spawn failed', { error: err.message });
+      safeUnlink(PATHS.hologramPid);
+      safeUnlink(PATHS.hologramPort);
+    };
+
     this.proc.once('exit', onExit);
+    this.proc.once('error', onError);
 
     // Poll for port file
     const portAppeared = await waitForFile(
@@ -266,6 +323,14 @@ export class SidecarManager {
     );
 
     this.proc.removeListener('exit', onExit);
+    this.proc.removeListener('error', onError);
+
+    if (errorState.error !== null) {
+      this.proc = null;
+      throw new HologramUnavailableError(
+        `Failed to spawn sidecar: ${errorState.error.message} (check Python path: ${pythonPath})`,
+      );
+    }
 
     if (exitedDuringStartup) {
       safeUnlink(PATHS.hologramPid);
@@ -315,6 +380,15 @@ export class SidecarManager {
 
     if (!isProcessAlive(pid)) {
       log.info('Sidecar process already dead, cleaning up files');
+      safeUnlink(PATHS.hologramPid);
+      safeUnlink(PATHS.hologramPort);
+      this.proc = null;
+      return;
+    }
+
+    // Verify this is actually our sidecar before killing
+    if (!isPythonSidecar(pid)) {
+      log.warn('PID file points to non-sidecar process, discarding stale PID file', { pid });
       safeUnlink(PATHS.hologramPid);
       safeUnlink(PATHS.hologramPort);
       this.proc = null;

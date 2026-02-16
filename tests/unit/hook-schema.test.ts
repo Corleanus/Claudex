@@ -204,8 +204,8 @@ describe('round-trip', () => {
     const migrated = migrateInput(rawInput, version);
     expect(migrated.schema_version).toBe(2);
 
-    // 3. Validate
-    const validation = validateInput('session-start', migrated, version);
+    // 3. Validate against CURRENT version (post-migration), not detected version
+    const validation = validateInput('session-start', migrated, CURRENT_SCHEMA_VERSION);
     expect(validation.valid).toBe(true);
 
     // 4. Stamp output
@@ -243,5 +243,29 @@ describe('round-trip', () => {
     const errorOutput = stampOutput({});
     expect(errorOutput.schema_version).toBe(CURRENT_SCHEMA_VERSION);
     expect(Object.keys(errorOutput)).toEqual(['schema_version']);
+  });
+
+  it('validates against CURRENT version after migration, not detected version', () => {
+    // Regression test for H1: ensure v2 validation rules apply after migration
+    const v1Input = {
+      session_id: 'test-session',
+      hook_event_name: 'SessionStart',
+      cwd: '/tmp',
+    };
+
+    const detectedVersion = detectVersion(v1Input);
+    expect(detectedVersion).toBe(1);
+
+    const migrated = migrateInput(v1Input, detectedVersion);
+    expect(migrated.schema_version).toBe(2);
+
+    // Validate against CURRENT version (2), not detected version (1)
+    // This ensures any v2-specific validation rules are applied
+    const validation = validateInput('session-start', migrated, CURRENT_SCHEMA_VERSION);
+    expect(validation.valid).toBe(true);
+
+    // Validating against old version would skip v2 rules (the bug we're fixing)
+    const wrongValidation = validateInput('session-start', migrated, detectedVersion);
+    expect(wrongValidation.valid).toBe(true); // Still passes, but v2 rules were skipped
   });
 });

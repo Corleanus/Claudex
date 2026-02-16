@@ -13,6 +13,7 @@ import type { Observation, ObservationCategory, SearchResult } from '../shared/t
 import type { MigrationRunner } from './migrations.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
+import { normalizeFts5Query } from '../shared/fts5-utils.js';
 
 const log = createLogger('search');
 
@@ -22,6 +23,7 @@ const log = createLogger('search');
 
 /**
  * Migration 2: Create FTS5 virtual table for observations and triggers to keep it in sync.
+ * Runs inside a transaction to ensure atomicity.
  */
 export function migration_2(runner: MigrationRunner): void {
   if (runner.hasVersion(2)) {
@@ -70,6 +72,7 @@ export function migration_2(runner: MigrationRunner): void {
 /**
  * Migration 4: Create FTS5 virtual tables for reasoning_chains and consensus_decisions
  * with auto-sync triggers. Follows the same pattern as migration_2.
+ * Runs inside a transaction to ensure atomicity.
  */
 export function migration_4(runner: MigrationRunner): void {
   if (runner.hasVersion(4)) {
@@ -224,8 +227,9 @@ export function searchObservations(
       LIMIT ?
     `;
 
+    const normalizedQuery = normalizeFts5Query(trimmed);
     const rows = db.prepare(sql).all(
-      trimmed,
+      normalizedQuery,
       project, project,
       category, category,
       minImportance,
@@ -321,8 +325,9 @@ export function searchReasoning(
       LIMIT ?
     `;
 
+    const normalizedQuery = normalizeFts5Query(trimmed);
     const rows = db.prepare(sql).all(
-      trimmed,
+      normalizedQuery,
       project, project,
       limit,
     ) as ReasoningSearchRow[];
@@ -415,8 +420,9 @@ export function searchConsensus(
       LIMIT ?
     `;
 
+    const normalizedQuery = normalizeFts5Query(trimmed);
     const rows = db.prepare(sql).all(
-      trimmed,
+      normalizedQuery,
       project, project,
       limit,
     ) as ConsensusSearchRow[];

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import { assessUtilization, shouldFlush, shouldWarn } from '../../src/wrapper/context-monitor.js';
 import { isCooldownActive, resetCooldown, executeFlush } from '../../src/wrapper/flush-trigger.js';
 
@@ -11,6 +11,9 @@ vi.mock('../../src/shared/logger.js', () => ({
     error: vi.fn(),
   }),
 }));
+
+// Store original process.exit
+const originalExit = process.exit;
 
 // =============================================================================
 // Constants
@@ -135,6 +138,27 @@ describe('Pre-flush hook logic integration', () => {
       expect(result.level).toBe('normal');
       expect(result.utilization).toBe(0);
       expect(shouldFlush(result)).toBe(false);
+    });
+  });
+
+  describe('DB error handling in executeFlush', () => {
+    it('executeFlush handles DB errors gracefully', async () => {
+      // Create a mock DB that will cause errors
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+
+      // Close it immediately to cause subsequent operations to fail
+      db.close();
+
+      // executeFlush should catch errors and not throw
+      await expect(
+        executeFlush({
+          db,
+          sessionId: 'test-session',
+          scope: { type: 'global', name: 'global', root: '/' },
+          hologramRescore: false,
+        })
+      ).resolves.toBeDefined();
     });
   });
 });
