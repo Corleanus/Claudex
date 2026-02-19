@@ -39,18 +39,38 @@ export class HologramClient {
    *
    * Lazy-starts the sidecar if not running. Throws on unavailable sidecar
    * (WP-08 degradation layer catches this).
+   *
+   * @param projectDir - Optional absolute path to project root for project-scoped file injection.
+   * @param boostFiles - Optional file paths to boost post-compaction (from checkpoint_state.active_files).
    */
-  async query(prompt: string, turnNumber: number, sessionId: string): Promise<HologramResponse> {
+  async query(
+    prompt: string,
+    turnNumber: number,
+    sessionId: string,
+    projectDir?: string,
+    boostFiles?: string[],
+  ): Promise<HologramResponse> {
     const startMs = Date.now();
     const port = await this.ensureSidecar();
 
-    const request = buildRequest('query', this.buildPayload({
+    const extra: Record<string, unknown> = {
       prompt,
       session_state: {
         turn_number: turnNumber,
         session_id: sessionId,
       },
-    }));
+    };
+
+    if (projectDir) {
+      extra.project_dir = projectDir;
+      extra.project_config = this.getProjectConfig();
+    }
+
+    if (boostFiles && boostFiles.length > 0) {
+      extra.boost_files = boostFiles;
+    }
+
+    const request = buildRequest('query', this.buildPayload(extra));
 
     const response = await this.protocol.send(port, request);
 
@@ -181,6 +201,23 @@ export class HologramClient {
     return {
       claude_dir: this.resolveClaudeDir(),
       ...extra,
+    };
+  }
+
+  /**
+   * Read project file patterns from config with sensible defaults.
+   * Passed in the sidecar payload so the sidecar doesn't need its own config parser.
+   */
+  private getProjectConfig(): { patterns: string[]; exclude: string[]; max_files: number } {
+    const holo = this.config.hologram;
+    return {
+      patterns: holo?.project_patterns ?? ['*.md', '*.ts', '*.py', '**/*.md', '**/*.ts', '**/*.py'],
+      exclude: holo?.project_exclude ?? [
+        'node_modules/**', '.git/**', 'dist/**', 'build/**', 'coverage/**',
+        '**/*.test.ts', '**/*.spec.ts', '**/*.test.tsx', '**/*.spec.tsx',
+        '**/test_*.py', '**/*_test.py', '**/tests/**',
+      ],
+      max_files: holo?.project_max_files ?? 200,
     };
   }
 

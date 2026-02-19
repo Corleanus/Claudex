@@ -40,6 +40,7 @@ async function queryHologram(
   recentFiles: string[],
   scope: Scope,
   db: import('better-sqlite3').Database | null,
+  boostFiles?: string[],
 ): Promise<HologramResponse | null> {
   try {
     const config = loadConfig();
@@ -64,7 +65,8 @@ async function queryHologram(
     }
 
     const project = scope.type === 'project' ? scope.name : undefined;
-    const result = await resilient.queryWithFallback(promptText, 0, sessionId, recentFiles, db ?? undefined, project);
+    const projectDir = scope.type === 'project' ? scope.path : undefined;
+    const result = await resilient.queryWithFallback(promptText, 0, sessionId, recentFiles, db ?? undefined, project, projectDir, boostFiles);
 
     logToFile(HOOK_NAME, 'DEBUG', `Hologram query complete, source=${result.source}`);
     return result;
@@ -218,9 +220,34 @@ runHook(HOOK_NAME, async (input) => {
     // 5. Get recent observations early — needed for both context AND hologram fallback
     const recentObservations = getRecent(scope, db);
 
+    // 5.5. Feature 3 — Post-compact active file bridge
+    let boostFiles: string[] | undefined;
+    if (db) {
+      try {
+        const { getCheckpointState, updateBoostState } = await import('../db/checkpoint.js');
+        const cpState = getCheckpointState(db, sessionId);
+        if (cpState?.active_files?.length) {
+          const STALENESS_MS = 30 * 60 * 1000; // 30 minutes
+          const MAX_BOOST_TURNS = 3;
+          const isRecent = (Date.now() - cpState.last_epoch) < STALENESS_MS;
+          const turnsRemaining = !cpState.boost_applied_at
+            || (cpState.boost_turn_count ?? 0) < MAX_BOOST_TURNS;
+
+          if (isRecent && turnsRemaining) {
+            boostFiles = cpState.active_files;
+            const newCount = (cpState.boost_turn_count ?? 0) + 1;
+            updateBoostState(db, sessionId, cpState.boost_applied_at ?? Date.now(), newCount);
+            logToFile(HOOK_NAME, 'DEBUG', `Post-compact boost: ${boostFiles.length} files, turn ${newCount}/${MAX_BOOST_TURNS}`);
+          }
+        }
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Post-compact boost query failed (non-fatal)', err);
+      }
+    }
+
     // 6. Query hologram sidecar (with degradation fallback using recent file paths)
     const recentFiles = extractRecentFiles(recentObservations);
-    const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope, db);
+    const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope, db, boostFiles);
 
     // 6.5. Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
     if (hologramResult && db) {

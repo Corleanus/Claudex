@@ -11,14 +11,182 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { runHook, logToFile } from './_infrastructure.js';
-import { transcriptDir } from '../shared/paths.js';
+import { transcriptDir, completionMarkerPath, findCurrentSessionLog, dailyMemoryPath, PATHS } from '../shared/paths.js';
 import type { PreCompactInput } from '../shared/types.js';
 import type { HookStdin } from '../shared/types.js';
 import type { ReasoningChain } from '../shared/types.js';
+import type { Scope } from '../shared/types.js';
 import { SCHEMAS } from '../shared/types.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { getDatabase } from '../db/connection.js';
 import { insertReasoning } from '../db/reasoning.js';
+import { getCheckpointState, upsertCheckpointState } from '../db/checkpoint.js';
+import { getObservationsSince } from '../db/observations.js';
+import type Database from 'better-sqlite3';
+
+/**
+ * Extract unique file paths from observations' files_read + files_modified.
+ * Returns deduplicated list, max 10 entries.
+ */
+function extractActiveFiles(observations: Array<{ files_read?: string[]; files_modified?: string[] }>): string[] {
+  const seen = new Set<string>();
+  for (const obs of observations) {
+    if (obs.files_read) for (const f of obs.files_read) seen.add(f);
+    if (obs.files_modified) for (const f of obs.files_modified) seen.add(f);
+  }
+  return Array.from(seen).slice(0, 10);
+}
+
+/**
+ * Write compact checkpoint data to session log, handoff, and daily memory.
+ * Each write is independent — one failure does not block others.
+ */
+function writeCompactCheckpoint(
+  sessionId: string,
+  scope: Scope,
+  db: Database.Database,
+  trigger: string,
+  _cwd: string,
+): void {
+  const HOOK_NAME = 'pre-compact';
+  const nowMs = Date.now();
+  const timeStr = new Date(nowMs).toISOString().split('T')[1]!.replace(/\.\d+Z$/, '');
+
+  // Check completion marker + delta — skip if completed and no new observations
+  const hasCompletionMarker = fs.existsSync(completionMarkerPath(sessionId));
+  const checkpointState = getCheckpointState(db, sessionId);
+  const lastEpoch = checkpointState?.last_epoch ?? 0;
+
+  // Query for observations since last checkpoint
+  const project = scope.type === 'project' ? scope.name : null;
+  const newObservations = getObservationsSince(db, lastEpoch, project);
+
+  if (hasCompletionMarker && newObservations.length === 0) {
+    logToFile(HOOK_NAME, 'DEBUG', 'Completion marker exists and no new observations — skipping checkpoint writes');
+    return;
+  }
+
+  const activeFiles = extractActiveFiles(newObservations);
+  const scopeStr = scope.type === 'project' ? `project:${scope.name}` : 'global';
+  const checkpointContent = [
+    '',
+    `## Compact Checkpoint — ${timeStr}`,
+    '',
+    `- **Trigger**: ${trigger}`,
+    `- **Session**: ${sessionId}`,
+    `- **Scope**: ${scopeStr}`,
+    `- **Observations since last checkpoint**: ${newObservations.length}`,
+    `- **Files touched**: ${activeFiles.length > 0 ? activeFiles.join(', ') : 'none'}`,
+    '',
+  ].join('\n');
+
+  let anyWriteSucceeded = false;
+
+  // 1a. Session log write
+  try {
+    let sessionsDir: string;
+    if (scope.type === 'project') {
+      sessionsDir = path.join(scope.path, 'context', 'sessions');
+    } else {
+      sessionsDir = PATHS.sessions;
+    }
+
+    const existingLog = findCurrentSessionLog(sessionId, sessionsDir);
+
+    if (existingLog) {
+      // Append checkpoint to existing session log
+      fs.appendFileSync(existingLog, checkpointContent, 'utf-8');
+      logToFile(HOOK_NAME, 'DEBUG', `Checkpoint appended to session log: ${existingLog}`);
+    } else {
+      // Create standalone checkpoint file
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const today = new Date(nowMs).toISOString().split('T')[0]!;
+
+      let compactNum = 1;
+      if (scope.type === 'project') {
+        // Find next compact number
+        try {
+          const existing = fs.readdirSync(sessionsDir);
+          const pattern = new RegExp(`^${today}_compact-(\\d+)\\.md$`);
+          for (const f of existing) {
+            const m = f.match(pattern);
+            if (m) compactNum = Math.max(compactNum, parseInt(m[1]!, 10) + 1);
+          }
+        } catch { /* ignore */ }
+        const newPath = path.join(sessionsDir, `${today}_compact-${compactNum}.md`);
+        fs.writeFileSync(newPath, checkpointContent.trimStart(), 'utf-8');
+        logToFile(HOOK_NAME, 'DEBUG', `Checkpoint session log created: ${newPath}`);
+      } else {
+        // Global scope: <session_id>_compact-1.md
+        try {
+          const existing = fs.readdirSync(sessionsDir);
+          const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+          const pattern = new RegExp(`^${safeId}_compact-(\\d+)\\.md$`);
+          for (const f of existing) {
+            const m = f.match(pattern);
+            if (m) compactNum = Math.max(compactNum, parseInt(m[1]!, 10) + 1);
+          }
+        } catch { /* ignore */ }
+        const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+        const newPath = path.join(sessionsDir, `${safeId}_compact-${compactNum}.md`);
+        fs.writeFileSync(newPath, checkpointContent.trimStart(), 'utf-8');
+        logToFile(HOOK_NAME, 'DEBUG', `Checkpoint session log created: ${newPath}`);
+      }
+    }
+    anyWriteSucceeded = true;
+  } catch (err) {
+    logToFile(HOOK_NAME, 'WARN', 'Checkpoint session log write failed (non-fatal):', err);
+  }
+
+  // 1b. Handoff state update (project scope only)
+  try {
+    if (scope.type === 'project') {
+      const activeMdPath = path.join(scope.path, 'context', 'handoffs', 'ACTIVE.md');
+      if (fs.existsSync(activeMdPath)) {
+        const handoffSection = [
+          '',
+          `## Compact Checkpoint — ${timeStr}`,
+          `- Observations: ${newObservations.length} since last checkpoint`,
+          `- Files touched: ${activeFiles.length > 0 ? activeFiles.join(', ') : 'none'}`,
+          '',
+        ].join('\n');
+        fs.appendFileSync(activeMdPath, handoffSection, 'utf-8');
+        logToFile(HOOK_NAME, 'DEBUG', `Checkpoint appended to ACTIVE.md: ${activeMdPath}`);
+        anyWriteSucceeded = true;
+      }
+    }
+  } catch (err) {
+    logToFile(HOOK_NAME, 'WARN', 'Checkpoint ACTIVE.md write failed (non-fatal):', err);
+  }
+
+  // 1c. Daily memory append
+  try {
+    if (newObservations.length > 0) {
+      const today = new Date(nowMs).toISOString().split('T')[0]!;
+      const dailyPath = dailyMemoryPath(today);
+      const dailyDir = path.dirname(dailyPath);
+      fs.mkdirSync(dailyDir, { recursive: true });
+
+      const dailyEntry = fs.existsSync(dailyPath)
+        ? `\n### Compact Checkpoint — ${timeStr} (${scopeStr})\n- ${newObservations.length} observations captured since last checkpoint\n`
+        : `# Daily Log — ${today}\n\n### Compact Checkpoint — ${timeStr} (${scopeStr})\n- ${newObservations.length} observations captured since last checkpoint\n`;
+
+      fs.appendFileSync(dailyPath, dailyEntry, 'utf-8');
+      logToFile(HOOK_NAME, 'DEBUG', `Checkpoint appended to daily memory: ${dailyPath}`);
+      anyWriteSucceeded = true;
+    }
+  } catch (err) {
+    logToFile(HOOK_NAME, 'WARN', 'Checkpoint daily memory write failed (non-fatal):', err);
+  }
+
+  // Only advance checkpoint_state if at least one write succeeded (Codex finding #1)
+  if (anyWriteSucceeded) {
+    upsertCheckpointState(db, sessionId, nowMs, activeFiles);
+    logToFile(HOOK_NAME, 'DEBUG', `Checkpoint state updated: last_epoch=${nowMs}, active_files=${activeFiles.length}`);
+  } else {
+    logToFile(HOOK_NAME, 'WARN', 'All checkpoint writes failed — not advancing last_epoch');
+  }
+}
 
 runHook('pre-compact', async (input: HookStdin) => {
   const { session_id, transcript_path } = input;
@@ -201,6 +369,15 @@ runHook('pre-compact', async (input: HookStdin) => {
 
       fs.writeFileSync(mirrorPath, mirrorContent, 'utf-8');
       logToFile(HOOK_NAME, 'DEBUG', `Reasoning flat-file mirror written: ${mirrorPath}`);
+
+      // =====================================================================
+      // Compact checkpoint writes — session log, handoff, daily memory
+      // =====================================================================
+      try {
+        writeCompactCheckpoint(session_id, scope, db, trigger, input.cwd);
+      } catch (cpErr) {
+        logToFile(HOOK_NAME, 'ERROR', 'Compact checkpoint writes failed (non-fatal):', cpErr);
+      }
     } finally {
       // 7. Close DB
       db.close();

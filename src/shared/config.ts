@@ -58,6 +58,17 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
     if (config.hologram.sidecar_path !== undefined && typeof config.hologram.sidecar_path !== 'string') {
       delete config.hologram.sidecar_path;
     }
+    if (config.hologram.project_patterns !== undefined && !Array.isArray(config.hologram.project_patterns)) {
+      config.hologram.project_patterns = defaults.hologram!.project_patterns;
+    }
+    if (config.hologram.project_exclude !== undefined && !Array.isArray(config.hologram.project_exclude)) {
+      config.hologram.project_exclude = defaults.hologram!.project_exclude;
+    }
+    if (config.hologram.project_max_files !== undefined) {
+      if (typeof config.hologram.project_max_files !== 'number' || config.hologram.project_max_files < 0) {
+        config.hologram.project_max_files = defaults.hologram!.project_max_files;
+      }
+    }
   }
 
   // Validate database

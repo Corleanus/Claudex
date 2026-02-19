@@ -8,11 +8,14 @@ request, gets routed, and receives one response before the connection closes.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import inspect
 import json
 import logging
 import os
+import pathlib
 import time
+from collections import OrderedDict
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("claudex.sidecar")
@@ -31,28 +34,199 @@ def _get_session_class():
         _Session = Session
     return _Session
 
-# Module-level session cache (persists across requests within same sidecar process)
-_session_cache: dict[str, object] = {}
-_session_locks: dict[str, asyncio.Lock] = {}
+# Module-level session cache keyed by (claude_dir, project_dir) — LRU, max 3
+_MAX_CACHED_SESSIONS = 3
+_session_cache: OrderedDict[tuple[str, str], object] = OrderedDict()
+_session_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-def _canonical_dir(claude_dir: str) -> str:
-    """Normalize claude_dir to a canonical path to prevent lock/cache aliasing."""
-    return os.path.realpath(os.path.expanduser(claude_dir))
+# Mtime cache for incremental project file scanning: (project_dir) -> {path: mtime}
+_mtime_cache: dict[str, dict[str, float]] = {}
+# Content cache: (project_dir) -> {path: content}
+_content_cache: dict[str, dict[str, str]] = {}
 
-def _get_session(claude_dir: str):
-    """Get or create a cached Session for the given claude_dir."""
-    canonical = _canonical_dir(claude_dir)
-    if canonical not in _session_cache:
-        SessionCls = _get_session_class()
-        _session_cache[canonical] = SessionCls(canonical)
-    return _session_cache[canonical]
+def _canonical_dir(path: str) -> str:
+    """Normalize a directory path to canonical form to prevent aliasing."""
+    if not path:
+        return ""
+    return os.path.realpath(os.path.expanduser(path))
 
-def _get_lock(claude_dir: str) -> asyncio.Lock:
+def _cache_key(claude_dir: str, project_dir: str) -> tuple[str, str]:
+    """Compute the session cache key from claude_dir and project_dir."""
+    return (_canonical_dir(claude_dir), _canonical_dir(project_dir))
+
+def _get_session(claude_dir: str, project_dir: str = ""):
+    """Get or create a cached Session for the given (claude_dir, project_dir).
+
+    Uses LRU eviction — oldest session is dropped when cache exceeds _MAX_CACHED_SESSIONS.
+    """
+    key = _cache_key(claude_dir, project_dir)
+    if key in _session_cache:
+        _session_cache.move_to_end(key)
+        return _session_cache[key]
+
+    SessionCls = _get_session_class()
+    session = SessionCls(key[0])  # Session is always rooted at claude_dir
+    _session_cache[key] = session
+    _session_cache.move_to_end(key)
+
+    # LRU eviction
+    while len(_session_cache) > _MAX_CACHED_SESSIONS:
+        evicted_key, _ = _session_cache.popitem(last=False)
+        _session_locks.pop(evicted_key, None)
+        logger.debug("Evicted session cache entry: %s", evicted_key)
+
+    return session
+
+def _get_lock(claude_dir: str, project_dir: str = "") -> asyncio.Lock:
     """Get or create a per-session asyncio lock to serialize turn()+save()."""
-    canonical = _canonical_dir(claude_dir)
-    if canonical not in _session_locks:
-        _session_locks[canonical] = asyncio.Lock()
-    return _session_locks[canonical]
+    key = _cache_key(claude_dir, project_dir)
+    if key not in _session_locks:
+        _session_locks[key] = asyncio.Lock()
+    return _session_locks[key]
+
+
+# Default project file patterns
+_DEFAULT_PATTERNS = ["*.md", "*.ts", "*.py", "**/*.md", "**/*.ts", "**/*.py"]
+_DEFAULT_EXCLUDES = [
+    "node_modules/**", ".git/**", "dist/**", "build/**", "coverage/**",
+    "**/*.test.ts", "**/*.spec.ts", "**/*.test.tsx", "**/*.spec.tsx",
+    "**/test_*.py", "**/*_test.py", "**/tests/**",
+]
+_DEFAULT_MAX_FILES = 200
+
+
+def _matches_any(rel_path: str, patterns: list[str]) -> bool:
+    """Check if a relative path matches any of the given glob patterns."""
+    rel_posix = pathlib.PurePosixPath(rel_path).as_posix()
+    for pattern in patterns:
+        if fnmatch.fnmatch(rel_posix, pattern):
+            return True
+        # Also check just the filename for non-recursive patterns
+        if "/" not in pattern and fnmatch.fnmatch(pathlib.PurePosixPath(rel_path).name, pattern):
+            return True
+    return False
+
+
+def _scan_project_files(project_dir: str, config: dict) -> dict[str, str]:
+    """Scan project directory for files matching configured patterns.
+
+    Runs OUTSIDE the session lock (I/O heavy, no session mutation).
+    Uses mtime caching to skip re-reads of unchanged files.
+
+    Returns dict mapping 'project:<relative_path>' keys to file content.
+    """
+    patterns = config.get("patterns", _DEFAULT_PATTERNS)
+    excludes = config.get("exclude", _DEFAULT_EXCLUDES)
+    max_files = config.get("max_files", _DEFAULT_MAX_FILES)
+
+    canonical_proj = _canonical_dir(project_dir)
+    proj_path = pathlib.Path(canonical_proj)
+
+    # Get previous mtime/content caches for this project
+    prev_mtimes = _mtime_cache.get(canonical_proj, {})
+    prev_contents = _content_cache.get(canonical_proj, {})
+
+    new_mtimes: dict[str, float] = {}
+    result: dict[str, str] = {}
+    file_count = 0
+
+    try:
+        for root, dirs, files in os.walk(canonical_proj):
+            root_path = pathlib.Path(root)
+            rel_root = root_path.relative_to(proj_path).as_posix()
+            if rel_root == ".":
+                rel_root = ""
+
+            # Prune excluded directories early
+            dirs[:] = [
+                d for d in dirs
+                if not _matches_any(
+                    (rel_root + "/" + d if rel_root else d) + "/dummy",
+                    excludes,
+                )
+                # Always skip hidden dirs and common large dirs
+                and not d.startswith(".")
+                and d not in ("node_modules", "__pycache__", ".git")
+            ]
+
+            for fname in files:
+                if file_count >= max_files:
+                    break
+
+                rel_file = (rel_root + "/" + fname) if rel_root else fname
+
+                # Check include patterns
+                if not _matches_any(rel_file, patterns):
+                    continue
+                # Check exclude patterns
+                if _matches_any(rel_file, excludes):
+                    continue
+
+                full_path = os.path.join(root, fname)
+                key = f"project:{rel_file}"
+
+                try:
+                    mtime = os.path.getmtime(full_path)
+                except OSError:
+                    continue
+
+                new_mtimes[key] = mtime
+
+                # Use cached content if mtime unchanged
+                if key in prev_mtimes and prev_mtimes[key] == mtime and key in prev_contents:
+                    result[key] = prev_contents[key]
+                else:
+                    try:
+                        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                            content = f.read()
+                        result[key] = content
+                    except OSError:
+                        continue
+
+                file_count += 1
+
+            if file_count >= max_files:
+                break
+    except OSError as e:
+        logger.warning("Error scanning project directory %s: %s", project_dir, e)
+
+    # Update caches
+    _mtime_cache[canonical_proj] = new_mtimes
+    _content_cache[canonical_proj] = result
+
+    logger.debug("Scanned %d project files from %s", len(result), project_dir)
+    return result
+
+
+def _inject_project_files(session: object, project_files: dict[str, str]) -> None:
+    """Inject project files into a hologram Session.
+
+    Runs INSIDE the session lock (mutates session state).
+    Tracks newly-added files and bootstraps them to WARM pressure.
+    """
+    newly_added: list[str] = []
+    content_changed = False
+
+    for key, content in project_files.items():
+        if key not in session.system.files:
+            session.system.add_file(key, content, rebuild_dag=False)
+            newly_added.append(key)
+        elif session.system.files[key].content != content:
+            session.system.update_file(key, content)
+            content_changed = True
+
+    # Only rebuild DAG if files were actually added or changed (Codex finding #2)
+    if newly_added or content_changed:
+        session.system._rebuild_dag()
+
+    # Bootstrap ONLY newly-added files to WARM (Codex CRITICAL #3: once, not every query)
+    for key in newly_added:
+        f = session.system.files[key]
+        f.raw_pressure = 0.45       # Above WARM threshold (0.426)
+        f.pressure_bucket = 22      # Solidly in WARM range (>=20 is WARM)
+
+    if newly_added:
+        logger.debug("Injected %d new project files (bootstrapped to WARM)", len(newly_added))
 
 
 def _error_response(request_id: str, message: str) -> Response:
@@ -75,16 +249,40 @@ async def _handle_query(req: Request) -> Response:
     payload = req.get("payload", {})
     prompt = payload.get("prompt", "")
     claude_dir = payload.get("claude_dir", "")
+    project_dir = payload.get("project_dir", "")
+    project_config = payload.get("project_config", {})
+    boost_files = payload.get("boost_files", [])
 
     if not claude_dir:
         claude_dir = os.path.expanduser("~/.claude")
 
-    logger.debug("Query received (prompt length: %d chars, claude_dir: %s)", len(prompt), claude_dir)
+    logger.debug(
+        "Query received (prompt length: %d chars, claude_dir: %s, project_dir: %s)",
+        len(prompt), claude_dir, project_dir or "(global)",
+    )
 
     try:
-        lock = _get_lock(claude_dir)
+        # Step 1: Scan project files OUTSIDE lock (I/O heavy, no session mutation)
+        project_files: dict[str, str] = {}
+        if project_dir and os.path.isdir(project_dir):
+            project_files = _scan_project_files(project_dir, project_config)
+
+        # Step 2: Lock, inject, boost, query
+        lock = _get_lock(claude_dir, project_dir)
         async with lock:
-            session = _get_session(claude_dir)
+            session = _get_session(claude_dir, project_dir)
+
+            if project_files:
+                _inject_project_files(session, project_files)
+
+            # Apply boost for post-compact active files
+            for bf in boost_files:
+                key = f"project:{bf}" if not bf.startswith("project:") else bf
+                if key in session.system.files:
+                    f = session.system.files[key]
+                    f.raw_pressure = max(f.raw_pressure, 0.6)
+                    f.pressure_bucket = max(f.pressure_bucket, 30)
+
             result = await asyncio.to_thread(session.turn, prompt)
             await asyncio.to_thread(session.save)
 

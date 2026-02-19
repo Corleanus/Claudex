@@ -5,6 +5,7 @@
  * Never hardcode / or \ — always use these constants.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
@@ -98,4 +99,73 @@ export function globalSessionLogPath(sessionId: string): string {
  */
 export function sessionDir(sessionId: string): string {
   return path.join(PATHS.sessions, sanitizeSessionId(sessionId));
+}
+
+/**
+ * Find an existing session log file by matching session_id in YAML frontmatter.
+ *
+ * Search order:
+ * 1. Scan .md files in the sessions directory for YAML frontmatter with matching session_id
+ * 2. Fall back to date-pattern matching (YYYY-MM-DD_session-N.md)
+ * 3. Return null if nothing found
+ *
+ * @param sessionId - The session_id to match
+ * @param sessionsDir - The directory to scan (project context/sessions/ or ~/.claudex/sessions/)
+ * @returns Absolute path to the matching session log, or null
+ */
+export function findCurrentSessionLog(sessionId: string, sessionsDir: string): string | null {
+  try {
+    if (!fs.existsSync(sessionsDir)) return null;
+
+    const entries = fs.readdirSync(sessionsDir);
+    const mdFiles = entries.filter(e => e.endsWith('.md'));
+
+    // Pass 1: Check YAML frontmatter for session_id match
+    for (const file of mdFiles) {
+      const filePath = path.join(sessionsDir, file);
+      try {
+        // Read only the first 512 bytes — frontmatter is always at the top
+        const fd = fs.openSync(filePath, 'r');
+        const buf = Buffer.alloc(512);
+        const bytesRead = fs.readSync(fd, buf, 0, 512, 0);
+        fs.closeSync(fd);
+
+        const head = buf.toString('utf-8', 0, bytesRead);
+        // Match YAML frontmatter: starts with ---, has session_id: <id>, ends with ---
+        const fmMatch = head.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        if (fmMatch) {
+          const fm = fmMatch[1]!;
+          const sidMatch = fm.match(/^session_id:\s*(.+)$/m);
+          if (sidMatch && sidMatch[1]!.trim() === sessionId) {
+            return filePath;
+          }
+        }
+      } catch {
+        // Skip unreadable files
+      }
+    }
+
+    // Pass 2: Date pattern fallback — look for today's date pattern
+    const today = new Date().toISOString().split('T')[0]!; // YYYY-MM-DD
+    const datePattern = new RegExp(`^${today.replace(/-/g, '-')}_session-\\d+\\.md$`);
+    for (const file of mdFiles) {
+      if (datePattern.test(file)) {
+        return path.join(sessionsDir, file);
+      }
+    }
+
+    // Pass 3: Also check subdirectories (session-end writes to sessions/<session_id>/summary.md)
+    const safeId = sanitizeSessionId(sessionId);
+    const subDir = path.join(sessionsDir, safeId);
+    if (fs.existsSync(subDir)) {
+      const summaryPath = path.join(subDir, 'summary.md');
+      if (fs.existsSync(summaryPath)) {
+        return summaryPath;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }

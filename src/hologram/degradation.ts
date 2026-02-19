@@ -49,6 +49,8 @@ export class ResilientHologramClient {
    *
    * @param db - Optional database handle. When provided, enables DB pressure fallback tier.
    * @param project - Optional project name for scoping DB queries.
+   * @param projectDir - Optional absolute project root path for sidecar project file injection.
+   * @param boostFiles - Optional file paths to boost post-compaction.
    */
   async queryWithFallback(
     prompt: string,
@@ -57,10 +59,12 @@ export class ResilientHologramClient {
     recentFiles: string[],
     db?: Database.Database,
     project?: string,
+    projectDir?: string,
+    boostFiles?: string[],
   ): Promise<ContextSuggestion> {
     // First attempt
     try {
-      const response = await this.client.query(prompt, turnNumber, sessionId);
+      const response = await this.client.query(prompt, turnNumber, sessionId, projectDir, boostFiles);
       return { source: 'hologram', ...response };
     } catch (firstError) {
       log.warn('Hologram query failed, retrying once', firstError);
@@ -68,7 +72,7 @@ export class ResilientHologramClient {
 
     // Single retry — sidecar may have just recovered
     try {
-      const response = await this.client.query(prompt, turnNumber, sessionId);
+      const response = await this.client.query(prompt, turnNumber, sessionId, projectDir, boostFiles);
       return { source: 'hologram', ...response };
     } catch (retryError) {
       log.error(

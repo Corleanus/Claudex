@@ -12,6 +12,7 @@ import { migration_1 } from './schema.js';
 import { migration_2, migration_4 } from './search.js';
 import { migration_3 } from './schema-phase2.js';
 import { migration_5 } from './schema-phase3.js';
+import { migration_6 } from './schema-phase10.js';
 
 const log = createLogger('migrations');
 
@@ -30,6 +31,7 @@ export class MigrationRunner {
     this.runInTransaction(() => migration_3(this));
     this.runInTransaction(() => migration_4(this));
     this.runInTransaction(() => migration_5(this));
+    this.runInTransaction(() => migration_6(this));
   }
 
   /**

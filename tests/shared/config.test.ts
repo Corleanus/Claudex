@@ -216,6 +216,13 @@ describe('loadConfig', () => {
         health_interval_ms: 60000,
         python_path: '/usr/bin/python3',
         sidecar_path: '/opt/sidecar',
+        project_patterns: ['**/*.md', '**/*.ts', '**/*.py'],
+        project_exclude: [
+          'node_modules/**', '.git/**', 'dist/**', 'build/**', 'coverage/**',
+          '**/*.test.ts', '**/*.spec.ts', '**/*.test.tsx', '**/*.spec.tsx',
+          '**/test_*.py', '**/*_test.py', '**/tests/**',
+        ],
+        project_max_files: 200,
       },
       database: {
         path: '/custom/db.sqlite',

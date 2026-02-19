@@ -170,6 +170,59 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
 }
 
 /**
+ * Get observations since a given epoch, optionally filtered by project.
+ *
+ * @param epochMs - Only return observations with timestamp_epoch > this value (milliseconds)
+ * @param project - undefined: all records, string: specific project, null: global-scope only (WHERE project IS NULL)
+ */
+export function getObservationsSince(db: Database.Database, epochMs: number, project?: string | null): Observation[] {
+  const startMs = Date.now();
+  try {
+    let sql: string;
+    let rows: ObservationRow[];
+
+    if (project === null) {
+      // Global scope: only records with project IS NULL
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    tool_name, category, title, content,
+                    facts, files_read, files_modified, importance
+             FROM observations
+             WHERE timestamp_epoch > ? AND project IS NULL
+             ORDER BY timestamp_epoch DESC
+             LIMIT 50`;
+      rows = db.prepare(sql).all(ensureEpochMs(epochMs)) as ObservationRow[];
+    } else if (project !== undefined) {
+      // Specific project
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    tool_name, category, title, content,
+                    facts, files_read, files_modified, importance
+             FROM observations
+             WHERE timestamp_epoch > ? AND project = ?
+             ORDER BY timestamp_epoch DESC
+             LIMIT 50`;
+      rows = db.prepare(sql).all(ensureEpochMs(epochMs), project) as ObservationRow[];
+    } else {
+      // All records (no project filter)
+      sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
+                    tool_name, category, title, content,
+                    facts, files_read, files_modified, importance
+             FROM observations
+             WHERE timestamp_epoch > ?
+             ORDER BY timestamp_epoch DESC
+             LIMIT 50`;
+      rows = db.prepare(sql).all(ensureEpochMs(epochMs)) as ObservationRow[];
+    }
+
+    recordMetric('db.query', Date.now() - startMs);
+    return rows.map(rowToObservation);
+  } catch (err) {
+    recordMetric('db.query', Date.now() - startMs, true);
+    log.error('Failed to get observations since epoch:', err);
+    return [];
+  }
+}
+
+/**
  * Delete observations older than the given epoch timestamp.
  * Returns the number of deleted rows, or 0 on error.
  */

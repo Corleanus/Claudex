@@ -126,6 +126,18 @@ export interface SessionRecord {
 }
 
 // =============================================================================
+// Checkpoint State
+// =============================================================================
+
+export interface CheckpointState {
+  session_id: string;
+  last_epoch: number;
+  active_files: string[];
+  boost_applied_at?: number;
+  boost_turn_count?: number;
+}
+
+// =============================================================================
 // Search
 // =============================================================================
 
@@ -240,6 +252,13 @@ export interface SidecarRequest {
       turn_number: number;
       session_id: string;
     };
+    project_dir?: string;
+    project_config?: {
+      patterns: string[];
+      exclude: string[];
+      max_files: number;
+    };
+    boost_files?: string[];
   };
 }
 
@@ -289,6 +308,9 @@ export interface ClaudexConfig {
     sidecar_path?: string;
     timeout_ms: number;
     health_interval_ms: number;
+    project_patterns?: string[];
+    project_exclude?: string[];
+    project_max_files?: number;
   };
   database?: {
     path?: string;
@@ -321,6 +343,13 @@ export const DEFAULT_CONFIG: ClaudexConfig = {
     enabled: true,
     timeout_ms: 2000,
     health_interval_ms: 30000,
+    project_patterns: ['*.md', '*.ts', '*.py', '**/*.md', '**/*.ts', '**/*.py'],
+    project_exclude: [
+      'node_modules/**', '.git/**', 'dist/**', 'build/**', 'coverage/**',
+      '**/*.test.ts', '**/*.spec.ts', '**/*.test.tsx', '**/*.spec.tsx',
+      '**/test_*.py', '**/*_test.py', '**/tests/**',
+    ],
+    project_max_files: 200,
   },
   database: {
     wal_mode: true,
