@@ -67,18 +67,22 @@ export class ResilientHologramClient {
       const response = await this.client.query(prompt, turnNumber, sessionId, projectDir, boostFiles);
       return { source: 'hologram', ...response };
     } catch (firstError) {
-      log.warn('Hologram query failed, retrying once', firstError);
+      log.warn('Hologram query failed on first attempt', firstError);
     }
 
-    // Single retry — sidecar may have just recovered
-    try {
-      const response = await this.client.query(prompt, turnNumber, sessionId, projectDir, boostFiles);
-      return { source: 'hologram', ...response };
-    } catch (retryError) {
-      log.error(
-        `Hologram sidecar unavailable after retry (timeout: ${this.timeoutMs}ms)`,
-        retryError,
-      );
+    // Single retry — but only if sidecar is still reachable (avoids double lazy-start timeout)
+    if (this.client.isAvailable()) {
+      try {
+        const response = await this.client.query(prompt, turnNumber, sessionId, projectDir, boostFiles);
+        return { source: 'hologram', ...response };
+      } catch (retryError) {
+        log.error(
+          `Hologram sidecar unavailable after retry (timeout: ${this.timeoutMs}ms)`,
+          retryError,
+        );
+      }
+    } else {
+      log.info('Sidecar confirmed unavailable after first failure, skipping retry');
     }
 
     // DB pressure fallback — try persisted scores before recency

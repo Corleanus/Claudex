@@ -102,6 +102,7 @@ describe('ResilientHologramClient', () => {
 
   it('returns hologram source after retry on first failure', async () => {
     const mockClient = makeMockClient();
+    (mockClient as any).isAvailable.mockReturnValue(true);
     mockClient.query
       .mockRejectedValueOnce(new HologramUnavailableError('first fail'))
       .mockResolvedValueOnce(successResponse);
@@ -115,8 +116,24 @@ describe('ResilientHologramClient', () => {
     expect(mockClient.query).toHaveBeenCalledTimes(2);
   });
 
+  it('skips retry and falls to fallback when sidecar is confirmed dead', async () => {
+    const mockClient = makeMockClient();
+    mockClient.query
+      .mockRejectedValueOnce(new HologramUnavailableError('sidecar dead'));
+    // isAvailable returns false (default) — sidecar confirmed dead
+
+    const resilient = new ResilientHologramClient(mockClient, config);
+    const result = await resilient.queryWithFallback(
+      'test prompt', 1, 'sess-1', ['recent.ts'],
+    );
+
+    expect(result.source).toBe('recency-fallback');
+    expect(mockClient.query).toHaveBeenCalledTimes(1); // No retry!
+  });
+
   it('falls back to db-pressure when hologram fails both tries and DB has scores', async () => {
     const mockClient = makeMockClient();
+    (mockClient as any).isAvailable.mockReturnValue(true);
     mockClient.query
       .mockRejectedValueOnce(new HologramUnavailableError('fail 1'))
       .mockRejectedValueOnce(new HologramUnavailableError('fail 2'));
@@ -150,6 +167,7 @@ describe('ResilientHologramClient', () => {
 
   it('falls back to recency-fallback when hologram fails and DB has no scores', async () => {
     const mockClient = makeMockClient();
+    (mockClient as any).isAvailable.mockReturnValue(true);
     mockClient.query
       .mockRejectedValueOnce(new HologramUnavailableError('fail 1'))
       .mockRejectedValueOnce(new HologramUnavailableError('fail 2'));
@@ -168,6 +186,7 @@ describe('ResilientHologramClient', () => {
 
   it('falls back to recency-fallback when hologram fails and no DB provided', async () => {
     const mockClient = makeMockClient();
+    (mockClient as any).isAvailable.mockReturnValue(true);
     mockClient.query
       .mockRejectedValueOnce(new HologramUnavailableError('fail 1'))
       .mockRejectedValueOnce(new HologramUnavailableError('fail 2'));
@@ -185,6 +204,7 @@ describe('ResilientHologramClient', () => {
 
   it('db-pressure maps HOT and WARM files to ScoredFile format', async () => {
     const mockClient = makeMockClient();
+    (mockClient as any).isAvailable.mockReturnValue(true);
     mockClient.query
       .mockRejectedValueOnce(new HologramUnavailableError('fail 1'))
       .mockRejectedValueOnce(new HologramUnavailableError('fail 2'));
@@ -228,6 +248,7 @@ describe('ResilientHologramClient', () => {
 
   it('recency-fallback assigns WARM temperature with neutral pressure', async () => {
     const mockClient = makeMockClient();
+    (mockClient as any).isAvailable.mockReturnValue(true);
     mockClient.query
       .mockRejectedValueOnce(new HologramUnavailableError('fail'))
       .mockRejectedValueOnce(new HologramUnavailableError('fail'));

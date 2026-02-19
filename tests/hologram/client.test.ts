@@ -255,6 +255,7 @@ describe('ResilientHologramClient — projectDir + boostFiles threading', () => 
 
   it('threads projectDir through on retry', async () => {
     const mockClient = makeMockClient();
+    (mockClient as any).isAvailable.mockReturnValue(true);
     mockClient.query
       .mockRejectedValueOnce(new HologramUnavailableError('first fail'))
       .mockResolvedValueOnce(successResponse);

@@ -209,14 +209,17 @@ Session ended without /endsession. This is a fail-safe handoff.
         };
 
         if (Array.isArray(indexData.sessions)) {
-          const entry = indexData.sessions.find(
+          const matchingEntries = indexData.sessions.filter(
             (s) => s.id === session_id || s.session_id === session_id,
           );
 
-          if (entry) {
-            entry.status = 'completed';
-            entry.ended_at = isoTimestamp;
-            entry.ended_by = completionMarkerFound ? 'endsession' : 'hook_failsafe';
+          if (matchingEntries.length > 0) {
+            const endedBy = completionMarkerFound ? 'endsession' : 'hook_failsafe';
+            for (const entry of matchingEntries) {
+              entry.status = 'completed';
+              entry.ended_at = isoTimestamp;
+              entry.ended_by = endedBy;
+            }
 
             // Atomic write: temp file + rename
             const tmpPath = indexPath + `.tmp.${process.pid}`;
@@ -224,7 +227,7 @@ Session ended without /endsession. This is a fail-safe handoff.
             fs.renameSync(tmpPath, indexPath);
             sessionIndexUpdated = true;
             logToFile('session-end', 'INFO',
-              `Session index updated: status=completed, ended_by=${entry.ended_by as string}`);
+              `Session index updated: ${matchingEntries.length} entries closed, ended_by=${endedBy}`);
           } else {
             logToFile('session-end', 'WARN',
               `Session ${session_id} not found in index.json`);
