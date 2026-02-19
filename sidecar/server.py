@@ -40,9 +40,10 @@ _session_cache: OrderedDict[tuple[str, str], object] = OrderedDict()
 _session_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 # Mtime cache for incremental project file scanning: (project_dir) -> {path: mtime}
-_mtime_cache: dict[str, dict[str, float]] = {}
+_MAX_CACHE_PROJECTS = 10
+_mtime_cache: OrderedDict[str, dict[str, float]] = OrderedDict()
 # Content cache: (project_dir) -> {path: content}
-_content_cache: dict[str, dict[str, str]] = {}
+_content_cache: OrderedDict[str, dict[str, str]] = OrderedDict()
 
 def _canonical_dir(path: str) -> str:
     """Normalize a directory path to canonical form to prevent aliasing."""
@@ -190,9 +191,15 @@ def _scan_project_files(project_dir: str, config: dict) -> dict[str, str]:
     except OSError as e:
         logger.warning("Error scanning project directory %s: %s", project_dir, e)
 
-    # Update caches
+    # Update caches (LRU: move to end, trim oldest if over cap)
     _mtime_cache[canonical_proj] = new_mtimes
+    _mtime_cache.move_to_end(canonical_proj)
     _content_cache[canonical_proj] = result
+    _content_cache.move_to_end(canonical_proj)
+    while len(_mtime_cache) > _MAX_CACHE_PROJECTS:
+        _mtime_cache.popitem(last=False)
+    while len(_content_cache) > _MAX_CACHE_PROJECTS:
+        _content_cache.popitem(last=False)
 
     logger.debug("Scanned %d project files from %s", len(result), project_dir)
     return result

@@ -26,7 +26,10 @@ function rowToCheckpointState(row: CheckpointRow): CheckpointState {
   return {
     session_id: row.session_id,
     last_epoch: row.last_epoch,
-    active_files: row.active_files ? safeJsonParse<string[]>(row.active_files, []) : [],
+    active_files: (() => {
+      const parsed = safeJsonParse<unknown>(row.active_files ?? '', []);
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+    })(),
     boost_applied_at: row.boost_applied_at ?? undefined,
     boost_turn_count: row.boost_turn_count ?? undefined,
   };

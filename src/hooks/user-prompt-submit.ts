@@ -17,7 +17,8 @@ import { loadConfig } from '../shared/config.js';
 import { assembleContext } from '../lib/context-assembler.js';
 import { normalizeFts5Query } from '../shared/fts5-utils.js';
 import { getDatabase } from '../db/connection.js';
-import type { UserPromptSubmitInput, HologramResponse, SearchResult, Observation, Scope } from '../shared/types.js';
+import type { UserPromptSubmitInput, SearchResult, Observation, Scope } from '../shared/types.js';
+import type { ContextSuggestion } from '../hologram/degradation.js';
 
 const HOOK_NAME = 'user-prompt-submit';
 const SHORT_PROMPT_THRESHOLD = 10;
@@ -41,7 +42,7 @@ async function queryHologram(
   scope: Scope,
   db: import('better-sqlite3').Database | null,
   boostFiles?: string[],
-): Promise<HologramResponse | null> {
+): Promise<ContextSuggestion | null> {
   try {
     const config = loadConfig();
 
@@ -222,9 +223,11 @@ runHook(HOOK_NAME, async (input) => {
 
     // 5.5. Feature 3 — Post-compact active file bridge
     let boostFiles: string[] | undefined;
+    let boostNewCount = 0;
+    let boostAppliedAt = 0;
     if (db) {
       try {
-        const { getCheckpointState, updateBoostState } = await import('../db/checkpoint.js');
+        const { getCheckpointState } = await import('../db/checkpoint.js');
         const cpState = getCheckpointState(db, sessionId);
         if (cpState?.active_files?.length) {
           const STALENESS_MS = 30 * 60 * 1000; // 30 minutes
@@ -235,9 +238,9 @@ runHook(HOOK_NAME, async (input) => {
 
           if (isRecent && turnsRemaining) {
             boostFiles = cpState.active_files;
-            const newCount = (cpState.boost_turn_count ?? 0) + 1;
-            updateBoostState(db, sessionId, cpState.boost_applied_at ?? Date.now(), newCount);
-            logToFile(HOOK_NAME, 'DEBUG', `Post-compact boost: ${boostFiles.length} files, turn ${newCount}/${MAX_BOOST_TURNS}`);
+            boostNewCount = (cpState.boost_turn_count ?? 0) + 1;
+            boostAppliedAt = cpState.boost_applied_at ?? Date.now();
+            logToFile(HOOK_NAME, 'DEBUG', `Post-compact boost: ${boostFiles.length} files, turn ${boostNewCount}/${MAX_BOOST_TURNS} (pending sidecar result)`);
           }
         }
       } catch (err) {
@@ -248,6 +251,17 @@ runHook(HOOK_NAME, async (input) => {
     // 6. Query hologram sidecar (with degradation fallback using recent file paths)
     const recentFiles = extractRecentFiles(recentObservations);
     const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope, db, boostFiles);
+
+    // 6.1. Commit boost turn only after real sidecar success (not fallback sources)
+    if (hologramResult?.source === 'hologram' && boostFiles && db) {
+      try {
+        const { updateBoostState } = await import('../db/checkpoint.js');
+        updateBoostState(db, sessionId, boostAppliedAt, boostNewCount);
+        logToFile(HOOK_NAME, 'DEBUG', `Post-compact boost committed: turn ${boostNewCount}`);
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Post-compact boost state update failed (non-fatal)', err);
+      }
+    }
 
     // 6.5. Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
     if (hologramResult && db) {

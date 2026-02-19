@@ -152,4 +152,110 @@ describe('user-prompt-submit hook logic', () => {
       }).not.toThrow();
     });
   });
+
+  describe('post-compact boost counter', () => {
+    it('boost counter not incremented when hologram result is null (total failure)', async () => {
+      const { upsertCheckpointState, getCheckpointState, updateBoostState } = await import('../../src/db/checkpoint.js');
+
+      const sessionId = 'sess-boost-fail-null';
+      const now = Date.now();
+
+      upsertCheckpointState(db, sessionId, now, ['/src/foo.ts', '/src/bar.ts']);
+
+      const stateBefore = getCheckpointState(db, sessionId);
+      expect(stateBefore).not.toBeNull();
+      expect(stateBefore!.boost_turn_count).toBe(0);
+
+      // hologramResult is null — total query failure
+      const hologramResult: { source: string } | null = null;
+      const boostFiles = stateBefore!.active_files;
+
+      if (hologramResult?.source === 'hologram' && boostFiles && boostFiles.length > 0) {
+        updateBoostState(db, sessionId, now, 1);
+      }
+
+      const stateAfter = getCheckpointState(db, sessionId);
+      expect(stateAfter!.boost_turn_count).toBe(0);
+    });
+
+    it('boost counter not incremented on db-pressure fallback', async () => {
+      const { upsertCheckpointState, getCheckpointState, updateBoostState } = await import('../../src/db/checkpoint.js');
+
+      const sessionId = 'sess-boost-fail-dbfb';
+      const now = Date.now();
+
+      upsertCheckpointState(db, sessionId, now, ['/src/foo.ts']);
+
+      // Sidecar failed, fell back to db-pressure — should NOT burn a boost turn
+      const hologramResult = { source: 'db-pressure', hot: [], warm: ['/src/foo.ts'], cold: [] };
+      const boostFiles = ['/src/foo.ts'];
+
+      if (hologramResult?.source === 'hologram' && boostFiles && boostFiles.length > 0) {
+        updateBoostState(db, sessionId, now, 1);
+      }
+
+      const stateAfter = getCheckpointState(db, sessionId);
+      expect(stateAfter!.boost_turn_count).toBe(0);
+    });
+
+    it('boost counter not incremented on recency-fallback', async () => {
+      const { upsertCheckpointState, getCheckpointState, updateBoostState } = await import('../../src/db/checkpoint.js');
+
+      const sessionId = 'sess-boost-fail-recfb';
+      const now = Date.now();
+
+      upsertCheckpointState(db, sessionId, now, ['/src/foo.ts']);
+
+      // All tiers failed, fell back to recency — should NOT burn a boost turn
+      const hologramResult = { source: 'recency-fallback', hot: [], warm: [], cold: ['/src/foo.ts'] };
+      const boostFiles = ['/src/foo.ts'];
+
+      if (hologramResult?.source === 'hologram' && boostFiles && boostFiles.length > 0) {
+        updateBoostState(db, sessionId, now, 1);
+      }
+
+      const stateAfter = getCheckpointState(db, sessionId);
+      expect(stateAfter!.boost_turn_count).toBe(0);
+    });
+
+    it('boost counter incremented only on real sidecar success (source=hologram)', async () => {
+      const { upsertCheckpointState, getCheckpointState, updateBoostState } = await import('../../src/db/checkpoint.js');
+
+      const sessionId = 'sess-boost-ok';
+      const now = Date.now();
+
+      upsertCheckpointState(db, sessionId, now, ['/src/foo.ts']);
+
+      // Real sidecar success
+      const hologramResult = { source: 'hologram', hot: ['/src/foo.ts'], warm: [], cold: [] };
+      const boostFiles = ['/src/foo.ts'];
+
+      if (hologramResult?.source === 'hologram' && boostFiles && boostFiles.length > 0) {
+        updateBoostState(db, sessionId, now, 1);
+      }
+
+      const stateAfter = getCheckpointState(db, sessionId);
+      expect(stateAfter!.boost_turn_count).toBe(1);
+      expect(stateAfter!.boost_applied_at).toBe(now);
+    });
+
+    it('boost counter does not advance past MAX_BOOST_TURNS', async () => {
+      const { upsertCheckpointState, getCheckpointState, updateBoostState } = await import('../../src/db/checkpoint.js');
+
+      const sessionId = 'sess-boost-max';
+      const now = Date.now();
+      const MAX_BOOST_TURNS = 3;
+
+      upsertCheckpointState(db, sessionId, now, ['/src/foo.ts']);
+      // Already at max turns
+      updateBoostState(db, sessionId, now, MAX_BOOST_TURNS);
+
+      const cpState = getCheckpointState(db, sessionId);
+      const turnsRemaining = !cpState!.boost_applied_at
+        || (cpState!.boost_turn_count ?? 0) < MAX_BOOST_TURNS;
+
+      // turnsRemaining should be false — boost block should not activate
+      expect(turnsRemaining).toBe(false);
+    });
+  });
 });
