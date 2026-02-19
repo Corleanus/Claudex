@@ -59,11 +59,12 @@ runHook('pre-compact', async (input: HookStdin) => {
     return {};
   }
 
-  // Timestamp with hyphens (filesystem-safe)
+  // Timestamp with hyphens (filesystem-safe), includes millis for uniqueness
   const now = new Date();
   const ts = now.toISOString()
     .replace(/:/g, '-')     // HH:mm:ss → HH-mm-ss
-    .replace(/\.\d{3}Z$/, ''); // strip millis + Z
+    .replace('.', '-')      // .123Z → -123Z
+    .replace('Z', '');      // strip trailing Z
 
   const filename = `${ts}-precompact-${trigger}.jsonl`;
   const destPath = path.join(destDir, filename);
@@ -168,7 +169,8 @@ runHook('pre-compact', async (input: HookStdin) => {
       // 6. Write flat-file mirror
       const safeTsForFile = chainTimestamp
         .replace(/:/g, '-')
-        .replace(/\.\d{3}Z$/, '');
+        .replace('.', '-')
+        .replace('Z', '');
 
       let reasoningDir: string;
       if (scope.type === 'project') {

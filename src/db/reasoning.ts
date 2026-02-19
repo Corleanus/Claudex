@@ -13,6 +13,8 @@ import { safeJsonParse } from '../shared/safe-json.js';
 
 const log = createLogger('reasoning');
 
+const VALID_TRIGGERS: readonly string[] = ['pre_compact', 'manual', 'session_end'] as const;
+
 /** Row shape returned by SQLite before hydration */
 interface ReasoningRow {
   id: number;
@@ -37,7 +39,9 @@ function rowToReasoningChain(row: ReasoningRow): ReasoningChain {
     project: row.project ?? undefined,
     timestamp: row.timestamp,
     timestamp_epoch: row.timestamp_epoch,
-    trigger: row.trigger as ReasoningTrigger,
+    trigger: VALID_TRIGGERS.includes(row.trigger)
+      ? (row.trigger as ReasoningTrigger)
+      : (() => { log.warn(`Unknown reasoning trigger '${row.trigger}', falling back to 'manual'`); return 'manual' as ReasoningTrigger; })(),
     title: row.title,
     reasoning: row.reasoning,
     decisions: row.decisions ? safeJsonParse<string[]>(row.decisions, []) : undefined,

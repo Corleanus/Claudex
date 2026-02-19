@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import { loadConfig } from '../shared/config.js';
 import { recordMetric, getMetrics } from '../shared/metrics.js';
 import { PATHS } from '../shared/paths.js';
+import { redactSensitive } from '../lib/redaction.js';
 import { detectVersion, migrateInput, stampOutput, validateInput, CURRENT_SCHEMA_VERSION } from '../shared/hook-schema.js';
 import type { HookStdin, HookStdout } from '../shared/types.js';
 
@@ -146,7 +147,8 @@ export function logToFile(hookName: string, level: string, ...args: unknown[]): 
       })
       .join(' ');
 
-    fs.appendFileSync(logPath, `[${timestamp}] [${level}] ${message}\n`);
+    const sanitized = redactSensitive(message);
+    fs.appendFileSync(logPath, `[${timestamp}] [${level}] ${sanitized}\n`);
   } catch {
     // Logging must never throw. Swallow silently.
   }

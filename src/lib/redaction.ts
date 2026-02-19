@@ -14,7 +14,7 @@ const SECRET_PATTERNS: RegExp[] = [
   /(?:api[_-]?key|token|secret|password|credential)[s]?\s*[:=]\s*['"]?[^\s'"]+/gi,
   /(?:sk|pk|ak|rk)[-_][a-zA-Z0-9]{20,}/g,
   /(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}/g,
-  /(?:eyJ)[A-Za-z0-9_-]+\.(?:eyJ)[A-Za-z0-9_-]+/g,
+  /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
   /(?:AKIA|ASIA)[A-Z0-9]{16}/g,
 ];
 

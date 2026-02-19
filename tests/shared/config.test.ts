@@ -108,16 +108,28 @@ describe('loadConfig', () => {
     expect(config.hooks?.latency_budget_ms).toBe(DEFAULT_CONFIG.hooks!.latency_budget_ms);
   });
 
-  it('validates retention_days must be positive', () => {
+  it('validates retention_days rejects negative values', () => {
     const invalidConfig = {
       observation: {
-        retention_days: 0,  // invalid: must be > 0
+        retention_days: -5,  // invalid: must be >= 0
       },
     };
     fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify(invalidConfig), 'utf-8');
 
     const config = loadConfig();
     expect(config.observation?.retention_days).toBe(DEFAULT_CONFIG.observation!.retention_days);
+  });
+
+  it('allows retention_days=0 (purge everything immediately)', () => {
+    const zeroConfig = {
+      observation: {
+        retention_days: 0,  // valid: means purge everything
+      },
+    };
+    fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify(zeroConfig), 'utf-8');
+
+    const config = loadConfig();
+    expect(config.observation?.retention_days).toBe(0);
   });
 
   it('validates wrapper thresholds must be between 0 and 1', () => {

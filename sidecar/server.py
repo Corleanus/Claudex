@@ -35,18 +35,24 @@ def _get_session_class():
 _session_cache: dict[str, object] = {}
 _session_locks: dict[str, asyncio.Lock] = {}
 
+def _canonical_dir(claude_dir: str) -> str:
+    """Normalize claude_dir to a canonical path to prevent lock/cache aliasing."""
+    return os.path.realpath(os.path.expanduser(claude_dir))
+
 def _get_session(claude_dir: str):
     """Get or create a cached Session for the given claude_dir."""
-    if claude_dir not in _session_cache:
+    canonical = _canonical_dir(claude_dir)
+    if canonical not in _session_cache:
         SessionCls = _get_session_class()
-        _session_cache[claude_dir] = SessionCls(claude_dir)
-    return _session_cache[claude_dir]
+        _session_cache[canonical] = SessionCls(canonical)
+    return _session_cache[canonical]
 
 def _get_lock(claude_dir: str) -> asyncio.Lock:
     """Get or create a per-session asyncio lock to serialize turn()+save()."""
-    if claude_dir not in _session_locks:
-        _session_locks[claude_dir] = asyncio.Lock()
-    return _session_locks[claude_dir]
+    canonical = _canonical_dir(claude_dir)
+    if canonical not in _session_locks:
+        _session_locks[canonical] = asyncio.Lock()
+    return _session_locks[canonical]
 
 
 def _error_response(request_id: str, message: str) -> Response:

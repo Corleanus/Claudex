@@ -28,11 +28,19 @@ describe('redactSensitive — secret patterns', () => {
     expect(result).not.toContain('ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
   });
 
-  it('redacts JWT tokens', () => {
-    const jwt = 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature';
+  it('redacts JWT tokens (full 3-segment)', () => {
+    const jwt = 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
     const result = redactSensitive(jwt);
     expect(result).toContain('[REDACTED]');
-    expect(result).not.toContain('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0');
+    // Entire JWT including signature must be redacted
+    expect(result).not.toContain('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9');
+    expect(result).not.toContain('dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U');
+  });
+
+  it('redacts JWT signature segment (not just header.payload)', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.Sfl_K4eK8tkq9X6Wc1pM';
+    const result = redactSensitive(jwt);
+    expect(result).toBe('[REDACTED]');
   });
 
   it('redacts AWS credentials', () => {

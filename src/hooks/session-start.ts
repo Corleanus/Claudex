@@ -75,8 +75,59 @@ function bootstrapDirectories(): void {
   }
 }
 
+/** Stale lock threshold in milliseconds. */
+const LOCK_STALE_MS = 5000;
+
+/**
+ * Acquire a file lock for index.json using an exclusive-create lock file.
+ * Returns a release function. If the lock cannot be acquired, returns null.
+ */
+function acquireIndexLock(): (() => void) | null {
+  const lockPath = PATHS.sessionIndex + '.lock';
+  const maxRetries = 3;
+  const retryDelay = 50; // ms
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Exclusive create — fails if file already exists
+      const fd = fs.openSync(lockPath, 'wx');
+      fs.writeSync(fd, String(Date.now()));
+      fs.closeSync(fd);
+      return () => {
+        try { fs.unlinkSync(lockPath); } catch { /* already removed */ }
+      };
+    } catch {
+      // Lock file exists — check if stale
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+          // Stale lock — remove and retry
+          try { fs.unlinkSync(lockPath); } catch { /* race with another cleanup */ }
+          continue;
+        }
+      } catch {
+        // Lock file disappeared between open and stat — retry
+        continue;
+      }
+
+      // Lock is held and not stale — wait briefly before retry
+      if (attempt < maxRetries - 1) {
+        const start = Date.now();
+        while (Date.now() - start < retryDelay) { /* busy wait */ }
+      }
+    }
+  }
+
+  return null;
+}
+
 /** Step 3: Register session in index.json (append-only, v1 compatible). */
 function registerInIndex(entry: SessionIndexEntry): void {
+  const releaseLock = acquireIndexLock();
+  if (!releaseLock) {
+    logToFile(HOOK_NAME, 'WARN', 'Could not acquire index.json lock, proceeding without lock');
+  }
+
   try {
     let index: SessionIndex;
 
@@ -107,9 +158,15 @@ function registerInIndex(entry: SessionIndexEntry): void {
     }
 
     index.sessions.push(entry);
-    fs.writeFileSync(PATHS.sessionIndex, JSON.stringify(index, null, 2), 'utf-8');
+
+    // Atomic write: write to PID-unique temp file, then rename to prevent corruption
+    const tmpPath = PATHS.sessionIndex + `.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(index, null, 2), 'utf-8');
+    fs.renameSync(tmpPath, PATHS.sessionIndex);
   } catch (err) {
     logToFile(HOOK_NAME, 'ERROR', 'Failed to register session in index.json', err);
+  } finally {
+    if (releaseLock) releaseLock();
   }
 }
 

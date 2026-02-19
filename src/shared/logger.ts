@@ -9,6 +9,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { PATHS } from './paths.js';
+import { redactSensitive } from '../lib/redaction.js';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -43,7 +44,8 @@ export function createLogger(name: string) {
         })
         .join(' ');
 
-      fs.appendFileSync(logPath, `[${timestamp}] [${level}] ${message}\n`);
+      const sanitized = redactSensitive(message);
+      fs.appendFileSync(logPath, `[${timestamp}] [${level}] ${sanitized}\n`);
     } catch {
       // Logging must never throw. Swallow silently.
     }

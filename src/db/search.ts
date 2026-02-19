@@ -14,8 +14,14 @@ import type { MigrationRunner } from './migrations.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
 import { normalizeFts5Query } from '../shared/fts5-utils.js';
+import { safeJsonParse } from '../shared/safe-json.js';
 
 const log = createLogger('search');
+
+const VALID_CATEGORIES: readonly string[] = [
+  'decision', 'discovery', 'bugfix', 'feature',
+  'refactor', 'change', 'error', 'configuration',
+] as const;
 
 // =============================================================================
 // Migration 2: FTS5 virtual table + auto-sync triggers
@@ -167,12 +173,14 @@ function rowToObservation(row: SearchRow): Observation {
     timestamp: row.timestamp,
     timestamp_epoch: row.timestamp_epoch,
     tool_name: row.tool_name,
-    category: row.category as ObservationCategory,
+    category: VALID_CATEGORIES.includes(row.category)
+      ? (row.category as ObservationCategory)
+      : (() => { log.warn(`Unknown observation category '${row.category}', falling back to 'change'`); return 'change' as ObservationCategory; })(),
     title: row.title,
     content: row.content ?? '',
-    facts: row.facts ? JSON.parse(row.facts) : undefined,
-    files_read: row.files_read ? JSON.parse(row.files_read) : undefined,
-    files_modified: row.files_modified ? JSON.parse(row.files_modified) : undefined,
+    facts: row.facts ? safeJsonParse<string[]>(row.facts, []) : undefined,
+    files_read: row.files_read ? safeJsonParse<string[]>(row.files_read, []) : undefined,
+    files_modified: row.files_modified ? safeJsonParse<string[]>(row.files_modified, []) : undefined,
     importance: row.importance,
   };
 }
@@ -285,8 +293,8 @@ function reasoningRowToSearchResult(row: ReasoningSearchRow): SearchResult {
     category: 'decision',
     title: row.title,
     content: row.reasoning,
-    facts: row.decisions ? JSON.parse(row.decisions) : undefined,
-    files_read: row.files_involved ? JSON.parse(row.files_involved) : undefined,
+    facts: row.decisions ? safeJsonParse<string[]>(row.decisions, []) : undefined,
+    files_read: row.files_involved ? safeJsonParse<string[]>(row.files_involved, []) : undefined,
     importance: row.importance,
   };
   return { observation, rank: row.rank, snippet: row.snippet ?? '' };
@@ -379,8 +387,8 @@ function consensusRowToSearchResult(row: ConsensusSearchRow): SearchResult {
     category: 'decision',
     title: row.title,
     content: row.description,
-    facts: row.tags ? JSON.parse(row.tags) : undefined,
-    files_modified: row.files_affected ? JSON.parse(row.files_affected) : undefined,
+    facts: row.tags ? safeJsonParse<string[]>(row.tags, []) : undefined,
+    files_modified: row.files_affected ? safeJsonParse<string[]>(row.files_affected, []) : undefined,
     importance: row.importance,
   };
   return { observation, rank: row.rank, snippet: row.snippet ?? '' };

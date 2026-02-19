@@ -61,6 +61,7 @@ def _setup_logging() -> None:
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
     root = logging.getLogger("claudex.sidecar")
+    root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(logging.INFO)
 

@@ -29,10 +29,11 @@ runHook('session-end', async (input: HookStdin) => {
   const now = new Date();
   const isoTimestamp = now.toISOString();
 
-  // Filesystem-safe timestamp: YYYY-MM-DDTHH-mm-ss
+  // Filesystem-safe timestamp: YYYY-MM-DDTHH-mm-ss-SSS
   const fsTimestamp = isoTimestamp
     .replace(/:/g, '-')
-    .replace(/\.\d{3}Z$/, '');
+    .replace('.', '-')
+    .replace('Z', '');
 
   // Detect scope
   const scope = detectScope(cwd);
@@ -120,11 +121,12 @@ runHook('session-end', async (input: HookStdin) => {
       const handoffsDir = path.join(scope.path, 'context', 'handoffs');
       fs.mkdirSync(handoffsDir, { recursive: true });
 
-      // Timestamp for filename: YYYY-MM-DD_HH-mm-ss
+      // Timestamp for filename: YYYY-MM-DD_HH-mm-ss-SSS
       const fileTimestamp = now.toISOString()
         .replace(/T/, '_')
         .replace(/:/g, '-')
-        .replace(/\.\d{3}Z$/, '');
+        .replace('.', '-')
+        .replace('Z', '');
 
       // Always write auto_handoff_*.md — ACTIVE.md is reserved for explicit /handoff only
       const targetPath = path.join(handoffsDir, `auto_handoff_${fileTimestamp}.md`);
@@ -165,40 +167,73 @@ Session ended without /endsession. This is a fail-safe handoff.
   }
 
   // =========================================================================
-  // Section 4: Session index update
+  // Section 4: Session index update (with file lock + atomic write)
   // =========================================================================
   try {
     const indexPath = PATHS.sessionIndex;
 
     if (fs.existsSync(indexPath)) {
-      const raw = fs.readFileSync(indexPath, 'utf-8');
-      const indexData = JSON.parse(raw) as {
-        schema?: string;
-        version?: number;
-        sessions?: Array<Record<string, unknown>>;
-      };
-
-      if (Array.isArray(indexData.sessions)) {
-        // Find first matching session entry (Select-Object -First 1 equivalent)
-        const entry = indexData.sessions.find(
-          (s) => s.id === session_id || s.session_id === session_id,
-        );
-
-        if (entry) {
-          entry.status = 'completed';
-          entry.ended_at = isoTimestamp;
-          entry.ended_by = completionMarkerFound ? 'endsession' : 'hook_failsafe';
-
-          fs.writeFileSync(indexPath, JSON.stringify(indexData, null, 2) + '\n');
-          sessionIndexUpdated = true;
-          logToFile('session-end', 'INFO',
-            `Session index updated: status=completed, ended_by=${entry.ended_by as string}`);
-        } else {
-          logToFile('session-end', 'WARN',
-            `Session ${session_id} not found in index.json`);
+      // Acquire file lock (same pattern as session-start)
+      const lockPath = indexPath + '.lock';
+      let releaseLock: (() => void) | null = null;
+      try {
+        const fd = fs.openSync(lockPath, 'wx');
+        fs.writeSync(fd, String(Date.now()));
+        fs.closeSync(fd);
+        releaseLock = () => { try { fs.unlinkSync(lockPath); } catch { /* already removed */ } };
+      } catch {
+        // Check for stale lock (>5s)
+        try {
+          const stat = fs.statSync(lockPath);
+          if (Date.now() - stat.mtimeMs > 5000) {
+            try { fs.unlinkSync(lockPath); } catch { /* race */ }
+            try {
+              const fd = fs.openSync(lockPath, 'wx');
+              fs.writeSync(fd, String(Date.now()));
+              fs.closeSync(fd);
+              releaseLock = () => { try { fs.unlinkSync(lockPath); } catch { /* already removed */ } };
+            } catch { /* still contended */ }
+          }
+        } catch { /* lock file gone, proceed */ }
+        if (!releaseLock) {
+          logToFile('session-end', 'WARN', 'Could not acquire index.json lock, proceeding without lock');
         }
-      } else {
-        logToFile('session-end', 'WARN', 'index.json sessions field is not an array');
+      }
+
+      try {
+        const raw = fs.readFileSync(indexPath, 'utf-8');
+        const indexData = JSON.parse(raw) as {
+          schema?: string;
+          version?: number;
+          sessions?: Array<Record<string, unknown>>;
+        };
+
+        if (Array.isArray(indexData.sessions)) {
+          const entry = indexData.sessions.find(
+            (s) => s.id === session_id || s.session_id === session_id,
+          );
+
+          if (entry) {
+            entry.status = 'completed';
+            entry.ended_at = isoTimestamp;
+            entry.ended_by = completionMarkerFound ? 'endsession' : 'hook_failsafe';
+
+            // Atomic write: temp file + rename
+            const tmpPath = indexPath + `.tmp.${process.pid}`;
+            fs.writeFileSync(tmpPath, JSON.stringify(indexData, null, 2) + '\n');
+            fs.renameSync(tmpPath, indexPath);
+            sessionIndexUpdated = true;
+            logToFile('session-end', 'INFO',
+              `Session index updated: status=completed, ended_by=${entry.ended_by as string}`);
+          } else {
+            logToFile('session-end', 'WARN',
+              `Session ${session_id} not found in index.json`);
+          }
+        } else {
+          logToFile('session-end', 'WARN', 'index.json sessions field is not an array');
+        }
+      } finally {
+        if (releaseLock) releaseLock();
       }
     } else {
       logToFile('session-end', 'WARN', `index.json does not exist: ${indexPath}`);

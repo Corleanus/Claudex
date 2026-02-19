@@ -169,7 +169,7 @@ export function getAuditLog(
 
     sql += ' ORDER BY timestamp_epoch DESC';
 
-    if (options?.limit) {
+    if (options?.limit != null) {
       sql += ' LIMIT ?';
       params.push(options.limit);
     }

@@ -137,8 +137,8 @@ export function mirrorReasoning(chain: ReasoningChain, scope: Scope): void {
   try {
     const ts = chain.timestamp
       .replace(/:/g, '-')
-      .replace(/\.\d{3}Z?$/, '')
-      .replace(/Z$/, '');
+      .replace('.', '-')
+      .replace('Z', '');
     const filename = `${ts}-${sanitizeFilename(chain.title)}.md`;
 
     const dir =
@@ -203,8 +203,8 @@ export function mirrorConsensus(decision: ConsensusDecision, scope: Scope): void
   try {
     const ts = decision.timestamp
       .replace(/:/g, '-')
-      .replace(/\.\d{3}Z?$/, '')
-      .replace(/Z$/, '');
+      .replace('.', '-')
+      .replace('Z', '');
     const filename = `${ts}-${sanitizeFilename(decision.title)}.md`;
 
     const dir =

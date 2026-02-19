@@ -86,7 +86,7 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
       config.observation.redact_secrets = defaults.observation!.redact_secrets;
     }
     if (config.observation.retention_days !== undefined) {
-      if (typeof config.observation.retention_days !== 'number' || config.observation.retention_days <= 0) {
+      if (typeof config.observation.retention_days !== 'number' || config.observation.retention_days < 0) {
         config.observation.retention_days = defaults.observation!.retention_days;
       }
     }

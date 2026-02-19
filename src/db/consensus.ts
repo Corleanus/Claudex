@@ -47,7 +47,9 @@ function rowToConsensusDecision(row: ConsensusRow): ConsensusDecision {
     claude_position: row.claude_position ?? undefined,
     codex_position: row.codex_position ?? undefined,
     human_verdict: row.human_verdict ?? undefined,
-    status: row.status as ConsensusStatus,
+    status: validStatuses.includes(row.status as ConsensusStatus)
+      ? (row.status as ConsensusStatus)
+      : (() => { log.warn(`Unknown consensus status '${row.status}', falling back to 'proposed'`); return 'proposed' as ConsensusStatus; })(),
     tags: row.tags ? safeJsonParse<string[]>(row.tags, []) : undefined,
     files_affected: row.files_affected ? safeJsonParse<string[]>(row.files_affected, []) : undefined,
     importance: row.importance,

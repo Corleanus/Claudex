@@ -7,6 +7,8 @@
  *
  * NEVER throws — exits 0 always. Each subsystem has independent error handling.
  * Short prompts (< 10 chars) skip heavy injection entirely.
+ *
+ * Database is opened ONCE per hook invocation and shared across all subsystems.
  */
 
 import { runHook, logToFile } from './_infrastructure.js';
@@ -14,6 +16,7 @@ import { detectScope } from '../shared/scope-detector.js';
 import { loadConfig } from '../shared/config.js';
 import { assembleContext } from '../lib/context-assembler.js';
 import { normalizeFts5Query } from '../shared/fts5-utils.js';
+import { getDatabase } from '../db/connection.js';
 import type { UserPromptSubmitInput, HologramResponse, SearchResult, Observation, Scope } from '../shared/types.js';
 
 const HOOK_NAME = 'user-prompt-submit';
@@ -28,12 +31,15 @@ const CONTEXT_TOKEN_BUDGET = 4000;
  * Query the hologram sidecar for pressure-scored file context.
  * Uses ResilientHologramClient for automatic retry + recency fallback.
  * Returns null if hologram is disabled or entirely unavailable.
+ *
+ * @param db - Shared database handle for fallback tier (caller manages lifecycle)
  */
 async function queryHologram(
   promptText: string,
   sessionId: string,
   recentFiles: string[],
   scope: Scope,
+  db: import('better-sqlite3').Database | null,
 ): Promise<HologramResponse | null> {
   try {
     const config = loadConfig();
@@ -47,31 +53,21 @@ async function queryHologram(
     const { ProtocolHandler } = await import('../hologram/protocol.js');
     const { HologramClient } = await import('../hologram/client.js');
     const { ResilientHologramClient } = await import('../hologram/degradation.js');
-    const { getDatabase } = await import('../db/connection.js');
 
     const launcher = new SidecarManager();
     const protocol = new ProtocolHandler(config.hologram?.timeout_ms ?? 2000);
     const client = new HologramClient(launcher, protocol, config);
     const resilient = new ResilientHologramClient(client, config);
 
-    // Open DB for fallback tier — but don't let DB failure block hologram query
-    let db: import('better-sqlite3').Database | undefined;
-    const dbOrNull = getDatabase();
-    if (dbOrNull) {
-      db = dbOrNull;
-    } else {
+    if (!db) {
       logToFile(HOOK_NAME, 'WARN', 'DB unavailable for fallback tier, continuing without');
     }
 
-    try {
-      const project = scope.type === 'project' ? scope.name : undefined;
-      const result = await resilient.queryWithFallback(promptText, 0, sessionId, recentFiles, db, project);
+    const project = scope.type === 'project' ? scope.name : undefined;
+    const result = await resilient.queryWithFallback(promptText, 0, sessionId, recentFiles, db ?? undefined, project);
 
-      logToFile(HOOK_NAME, 'DEBUG', `Hologram query complete, source=${result.source}`);
-      return result;
-    } finally {
-      db?.close();
-    }
+    logToFile(HOOK_NAME, 'DEBUG', `Hologram query complete, source=${result.source}`);
+    return result;
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'Hologram query failed entirely', err);
     return null;
@@ -129,8 +125,10 @@ function extractKeywords(prompt: string): string {
 /**
  * Query FTS5 search for observations matching prompt keywords.
  * Returns empty array if database is unavailable or query fails.
+ *
+ * @param db - Shared database handle (caller manages lifecycle)
  */
-function queryFts5(promptText: string, scope: Scope): SearchResult[] {
+function queryFts5(promptText: string, scope: Scope, db: import('better-sqlite3').Database | null): SearchResult[] {
   try {
     const keywords = extractKeywords(promptText);
     if (!keywords) {
@@ -138,26 +136,21 @@ function queryFts5(promptText: string, scope: Scope): SearchResult[] {
       return [];
     }
 
-    const { getDatabase } = require('../db/connection.js') as typeof import('../db/connection.js');
-    const { searchObservations } = require('../db/search.js') as typeof import('../db/search.js');
-
-    const db = getDatabase();
     if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping FTS5');
+      logToFile(HOOK_NAME, 'WARN', 'Database unavailable, skipping FTS5');
       return [];
     }
-    try {
-      const project = scope.type === 'project' ? scope.name : undefined;
-      const results = searchObservations(db, keywords, {
-        project,
-        limit: 5,
-        minImportance: 2,
-      });
-      logToFile(HOOK_NAME, 'DEBUG', `FTS5 search returned ${results.length} results for "${keywords}"`);
-      return results;
-    } finally {
-      db.close();
-    }
+
+    const { searchObservations } = require('../db/search.js') as typeof import('../db/search.js');
+
+    const project = scope.type === 'project' ? scope.name : undefined;
+    const results = searchObservations(db, keywords, {
+      project,
+      limit: 5,
+      minImportance: 2,
+    });
+    logToFile(HOOK_NAME, 'DEBUG', `FTS5 search returned ${results.length} results for "${keywords}"`);
+    return results;
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'FTS5 search failed, skipping', err);
     return [];
@@ -167,25 +160,22 @@ function queryFts5(promptText: string, scope: Scope): SearchResult[] {
 /**
  * Get recent observations as fallback context.
  * Returns empty array if database is unavailable.
+ *
+ * @param db - Shared database handle (caller manages lifecycle)
  */
-function getRecent(scope: Scope): Observation[] {
+function getRecent(scope: Scope, db: import('better-sqlite3').Database | null): Observation[] {
   try {
-    const { getDatabase } = require('../db/connection.js') as typeof import('../db/connection.js');
-    const { getRecentObservations } = require('../db/observations.js') as typeof import('../db/observations.js');
-
-    const db = getDatabase();
     if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping recent observations');
+      logToFile(HOOK_NAME, 'WARN', 'Database unavailable, skipping recent observations');
       return [];
     }
-    try {
-      const project = scope.type === 'project' ? scope.name : undefined;
-      const recent = getRecentObservations(db, 5, project);
-      logToFile(HOOK_NAME, 'DEBUG', `Got ${recent.length} recent observations`);
-      return recent;
-    } finally {
-      db.close();
-    }
+
+    const { getRecentObservations } = require('../db/observations.js') as typeof import('../db/observations.js');
+
+    const project = scope.type === 'project' ? scope.name : undefined;
+    const recent = getRecentObservations(db, 5, project);
+    logToFile(HOOK_NAME, 'DEBUG', `Got ${recent.length} recent observations`);
+    return recent;
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'Recent observations query failed, skipping', err);
     return [];
@@ -218,86 +208,78 @@ runHook(HOOK_NAME, async (input) => {
   const scope = detectScope(cwd);
   logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
 
-  // 4. Get recent observations early — needed for both context AND hologram fallback
-  const recentObservations = getRecent(scope);
-
-  // 5. Query hologram sidecar (with degradation fallback using recent file paths)
-  const recentFiles = extractRecentFiles(recentObservations);
-  const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope);
-
-  // 5.5. Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
-  if (hologramResult) {
-    try {
-      const { getDatabase } = await import('../db/connection.js');
-      const { upsertPressureScore } = await import('../db/pressure.js');
-
-      const db = getDatabase();
-      if (!db) {
-        logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping pressure score persistence');
-      } else {
-        try {
-          const project = scope.type === 'project' ? scope.name : '__global__';
-          const nowEpoch = Date.now();
-
-          const entries: Array<{ list: typeof hologramResult.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
-            { list: hologramResult.hot, temp: 'HOT', pressure: 0.9 },
-            { list: hologramResult.warm, temp: 'WARM', pressure: 0.5 },
-            { list: hologramResult.cold, temp: 'COLD', pressure: 0.1 },
-          ];
-
-          let persisted = 0;
-          for (const { list, temp, pressure } of entries) {
-            for (const file of list) {
-              upsertPressureScore(db, {
-                file_path: file.path,
-                project,
-                raw_pressure: file.raw_pressure ?? pressure,
-                temperature: temp,
-                last_accessed_epoch: nowEpoch,
-                decay_rate: 0.05,
-              });
-              persisted++;
-            }
-          }
-
-          logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} pressure scores to DB`);
-        } finally {
-          db.close();
-        }
-      }
-    } catch (err) {
-      logToFile(HOOK_NAME, 'WARN', 'Failed to persist hologram pressure scores (non-fatal)', err);
-    }
+  // 4. Open database ONCE for the entire hook invocation
+  const db = getDatabase();
+  if (!db) {
+    logToFile(HOOK_NAME, 'WARN', 'Database connection failed — proceeding with degraded context');
   }
 
-  // 6. Query FTS5 search (keywords from prompt)
-  const ftsResults = queryFts5(promptText, scope);
-
-  // 7. Assemble context
-  const assembled = assembleContext(
-    {
-      hologram: hologramResult,
-      searchResults: ftsResults,
-      recentObservations,
-      scope,
-    },
-    { maxTokens: CONTEXT_TOKEN_BUDGET },
-  );
-
-  const elapsedMs = Date.now() - startMs;
-  logToFile(HOOK_NAME, 'INFO', `Completed in ${elapsedMs}ms, tokens=${assembled.tokenEstimate}, sources=[${assembled.sources.join(',')}]`);
-
-  // 8.5. Audit log: context assembly
   try {
-    const { getDatabase: getAuditDb } = await import('../db/connection.js');
-    const { logAudit } = await import('../db/audit.js');
-    const auditDb = getAuditDb();
-    if (!auditDb) {
-      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping audit logging');
-    } else {
+    // 5. Get recent observations early — needed for both context AND hologram fallback
+    const recentObservations = getRecent(scope, db);
+
+    // 6. Query hologram sidecar (with degradation fallback using recent file paths)
+    const recentFiles = extractRecentFiles(recentObservations);
+    const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope, db);
+
+    // 6.5. Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
+    if (hologramResult && db) {
       try {
+        const { upsertPressureScore } = await import('../db/pressure.js');
+
+        const project = scope.type === 'project' ? scope.name : '__global__';
+        const nowEpoch = Date.now();
+
+        const entries: Array<{ list: typeof hologramResult.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
+          { list: hologramResult.hot, temp: 'HOT', pressure: 0.9 },
+          { list: hologramResult.warm, temp: 'WARM', pressure: 0.5 },
+          { list: hologramResult.cold, temp: 'COLD', pressure: 0.1 },
+        ];
+
+        let persisted = 0;
+        for (const { list, temp, pressure } of entries) {
+          for (const file of list) {
+            upsertPressureScore(db, {
+              file_path: file.path,
+              project,
+              raw_pressure: file.raw_pressure ?? pressure,
+              temperature: temp,
+              last_accessed_epoch: nowEpoch,
+              decay_rate: 0.05,
+            });
+            persisted++;
+          }
+        }
+
+        logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} pressure scores to DB`);
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Failed to persist hologram pressure scores (non-fatal)', err);
+      }
+    }
+
+    // 7. Query FTS5 search (keywords from prompt)
+    const ftsResults = queryFts5(promptText, scope, db);
+
+    // 8. Assemble context
+    const assembled = assembleContext(
+      {
+        hologram: hologramResult,
+        searchResults: ftsResults,
+        recentObservations,
+        scope,
+      },
+      { maxTokens: CONTEXT_TOKEN_BUDGET },
+    );
+
+    const elapsedMs = Date.now() - startMs;
+    logToFile(HOOK_NAME, 'INFO', `Completed in ${elapsedMs}ms, tokens=${assembled.tokenEstimate}, sources=[${assembled.sources.join(',')}]`);
+
+    // 8.5. Audit log: context assembly
+    if (db) {
+      try {
+        const { logAudit } = await import('../db/audit.js');
         const now = new Date();
-        logAudit(auditDb, {
+        logAudit(db, {
           timestamp: now.toISOString(),
           timestamp_epoch: now.getTime(),
           session_id: sessionId,
@@ -309,23 +291,30 @@ runHook(HOOK_NAME, async (input) => {
             durationMs: elapsedMs,
           },
         });
-      } finally {
-        auditDb.close();
+      } catch (auditErr) {
+        logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);
       }
     }
-  } catch (auditErr) {
-    logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);
-  }
 
-  // 8. Return — empty if nothing assembled
-  if (!assembled.markdown) {
-    return {};
-  }
+    // 9. Return — empty if nothing assembled
+    if (!assembled.markdown) {
+      return {};
+    }
 
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'UserPromptSubmit',
-      additionalContext: assembled.markdown,
-    },
-  };
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit',
+        additionalContext: assembled.markdown,
+      },
+    };
+  } finally {
+    // Close the shared DB handle once, regardless of success or failure
+    if (db) {
+      try {
+        db.close();
+      } catch {
+        // Close failure is non-fatal
+      }
+    }
+  }
 });
