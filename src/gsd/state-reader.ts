@@ -33,6 +33,10 @@ const fieldPattern = (name: string): RegExp =>
 // ROADMAP.md phase heading
 const PHASE_HEADING_PATTERN = /#{2,4}\s*Phase\s+(\d+(?:\.\d+)?)\s*:\s*([^\n]+)/gi;
 
+// ROADMAP.md field extraction (handles both **Field**: and **Field:** formats)
+const roadmapField = (name: string): RegExp =>
+  new RegExp(`\\*\\*${name}(?:\\*\\*:|:\\*\\*)\\s*([^\\n]+)`, 'i');
+
 // =============================================================================
 // parseStateMd
 // =============================================================================
@@ -160,18 +164,15 @@ export function parseRoadmapMd(content: string): GsdPhase[] {
     if (isNaN(phaseNumber)) continue;
 
     // Goal
-    const goalMatch = section.match(/\*\*Goal\*\*:\s*([^\n]+)/i) ||
-      section.match(/\*\*Goal:\*\*\s*([^\n]+)/i);
+    const goalMatch = section.match(roadmapField('Goal'));
     const goal = goalMatch ? goalMatch[1]!.trim() : null;
 
     // Depends on
-    const dependsMatch = section.match(/\*\*Depends on\*\*:\s*([^\n]+)/i) ||
-      section.match(/\*\*Depends on:\*\*\s*([^\n]+)/i);
+    const dependsMatch = section.match(roadmapField('Depends on'));
     const dependsOn = dependsMatch ? dependsMatch[1]!.trim() : null;
 
     // Requirements
-    const reqMatch = section.match(/\*\*Requirements\*\*:\s*([^\n]+)/i) ||
-      section.match(/\*\*Requirements:\*\*\s*([^\n]+)/i);
+    const reqMatch = section.match(roadmapField('Requirements'));
     const requirements = reqMatch
       ? reqMatch[1]!.split(',')
           .map(s => s.trim())
