@@ -10,6 +10,7 @@ import {
   getHotFiles,
   getWarmFiles,
   decayAllScores,
+  accumulatePressureScore,
 } from '../../src/db/pressure.js';
 import type { PressureScore } from '../../src/shared/types.js';
 
@@ -243,6 +244,119 @@ describe('epoch validation', () => {
 
     const rows = getPressureScores(db, 'p');
     expect(rows[0]!.last_accessed_epoch).toBeUndefined();
+  });
+});
+
+describe('accumulatePressureScore', () => {
+  it('accumulates pressure on repeated touches', () => {
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+
+    const rows = getPressureScores(db, 'alpha');
+    expect(rows).toHaveLength(1);
+    // After 3 touches with diminishing returns:
+    // Touch 1: 0.15
+    // Touch 2: 0.15 + 0.15*(1-0.15) = 0.15 + 0.1275 = 0.2775
+    // Touch 3: 0.2775 + 0.15*(1-0.2775) = 0.2775 + 0.108375 = 0.385875
+    expect(rows[0]!.raw_pressure).toBeGreaterThan(0.15);
+    expect(rows[0]!.raw_pressure).toBeLessThan(1.0);
+  });
+
+  it('applies diminishing returns — each touch adds less', () => {
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    const afterFirst = getPressureScores(db, 'alpha');
+    const p1 = afterFirst[0]!.raw_pressure;
+
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    const afterSecond = getPressureScores(db, 'alpha');
+    const p2 = afterSecond[0]!.raw_pressure;
+    const delta1 = p2 - p1;
+
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    const afterThird = getPressureScores(db, 'alpha');
+    const p3 = afterThird[0]!.raw_pressure;
+    const delta2 = p3 - p2;
+
+    // Each subsequent touch adds less than the previous
+    expect(delta2).toBeLessThan(delta1);
+  });
+
+  it('transitions temperature from COLD to WARM to HOT', () => {
+    // Start with a small increment — should be COLD
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.05);
+    let rows = getPressureScores(db, 'alpha');
+    expect(rows[0]!.temperature).toBe('COLD');
+
+    // Accumulate until WARM (>= 0.3)
+    for (let i = 0; i < 20; i++) {
+      accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.05);
+    }
+    rows = getPressureScores(db, 'alpha');
+    expect(rows[0]!.raw_pressure).toBeGreaterThanOrEqual(0.3);
+    expect(rows[0]!.temperature).toBe('WARM');
+
+    // Accumulate until HOT (>= 0.7)
+    for (let i = 0; i < 60; i++) {
+      accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.05);
+    }
+    rows = getPressureScores(db, 'alpha');
+    expect(rows[0]!.raw_pressure).toBeGreaterThanOrEqual(0.7);
+    expect(rows[0]!.temperature).toBe('HOT');
+  });
+
+  it('does not exceed 1.0 even after many touches', () => {
+    for (let i = 0; i < 50; i++) {
+      accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    }
+    const rows = getPressureScores(db, 'alpha');
+    expect(rows[0]!.raw_pressure).toBeLessThanOrEqual(1.0);
+  });
+
+  it('isolates pressure by project', () => {
+    accumulatePressureScore(db, 'src/main.ts', 'project-a', 0.15);
+    accumulatePressureScore(db, 'src/main.ts', 'project-a', 0.15);
+    accumulatePressureScore(db, 'src/main.ts', 'project-a', 0.15);
+
+    const projectA = getPressureScores(db, 'project-a');
+    const projectB = getPressureScores(db, 'project-b');
+
+    expect(projectA).toHaveLength(1);
+    expect(projectA[0]!.raw_pressure).toBeGreaterThan(0.15);
+    expect(projectB).toHaveLength(0);
+  });
+
+  it('coexists with upsertPressureScore — upsert overwrites accumulated value', () => {
+    // Accumulate a score
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+    accumulatePressureScore(db, 'src/main.ts', 'alpha', 0.15);
+
+    const before = getPressureScores(db, 'alpha');
+    expect(before[0]!.raw_pressure).toBeGreaterThan(0.15);
+
+    // Hologram overwrites with upsert
+    upsertPressureScore(db, makeScore({
+      file_path: 'src/main.ts',
+      project: 'alpha',
+      raw_pressure: 0.9,
+      temperature: 'HOT',
+    }));
+
+    const after = getPressureScores(db, 'alpha');
+    expect(after).toHaveLength(1);
+    expect(after[0]!.raw_pressure).toBe(0.9);
+    expect(after[0]!.temperature).toBe('HOT');
+  });
+
+  it('handles closed DB gracefully', () => {
+    const closedDb = setupDb();
+    closedDb.close();
+
+    // Should not throw
+    expect(() => {
+      accumulatePressureScore(closedDb, 'src/main.ts', 'alpha', 0.15);
+    }).not.toThrow();
   });
 });
 

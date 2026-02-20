@@ -183,6 +183,83 @@ export function getWarmFiles(db: Database.Database, project?: string): PressureS
 }
 
 /**
+ * Accumulate pressure for a file path with diminishing returns.
+ *
+ * Uses INSERT ... ON CONFLICT DO UPDATE so a single SQL statement handles
+ * both new files (INSERT) and existing files (UPDATE).
+ *
+ * Diminishing-returns formula: new_pressure = MIN(1.0, old + increment * (1.0 - old))
+ * Each successive touch adds less because (1.0 - old) shrinks as old grows.
+ *
+ * Default decay_rate for new rows is 0.05.
+ */
+export function accumulatePressureScore(
+  db: Database.Database,
+  filePath: string,
+  project: string | undefined,
+  increment: number,
+): void {
+  const startMs = Date.now();
+  try {
+    const resolvedProject = project ?? GLOBAL_PROJECT_SENTINEL;
+
+    // Guard against reserved project name collision
+    if (project === RESERVED_PROJECT_NAME) {
+      log.warn(`Project name "${RESERVED_PROJECT_NAME}" is reserved and conflicts with internal sentinel. Skipping accumulate for file: ${filePath}`);
+      recordMetric('db.insert', Date.now() - startMs);
+      return;
+    }
+
+    // Clamp increment to [0, 1] — defensive against invalid values
+    const safeIncrement = Math.max(0, Math.min(1, Number.isFinite(increment) ? increment : 0));
+    if (safeIncrement === 0) return;
+
+    const now = new Date().toISOString();
+    const nowEpoch = Date.now();
+
+    // Compute initial temperature from the increment value (for INSERT case)
+    const initialTemp: TemperatureLevel =
+      safeIncrement >= 0.7 ? 'HOT' : safeIncrement >= 0.3 ? 'WARM' : 'COLD';
+
+    const defaultDecayRate = 0.05;
+
+    db.prepare(`
+      INSERT INTO pressure_scores (
+        file_path, project, raw_pressure, temperature,
+        last_accessed_epoch, decay_rate,
+        updated_at, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(file_path, project) DO UPDATE SET
+        raw_pressure = MIN(1.0, pressure_scores.raw_pressure + ? * (1.0 - pressure_scores.raw_pressure)),
+        temperature = CASE
+          WHEN MIN(1.0, pressure_scores.raw_pressure + ? * (1.0 - pressure_scores.raw_pressure)) >= 0.7 THEN 'HOT'
+          WHEN MIN(1.0, pressure_scores.raw_pressure + ? * (1.0 - pressure_scores.raw_pressure)) >= 0.3 THEN 'WARM'
+          ELSE 'COLD'
+        END,
+        last_accessed_epoch = excluded.last_accessed_epoch,
+        updated_at = excluded.updated_at,
+        updated_at_epoch = excluded.updated_at_epoch
+    `).run(
+      filePath,
+      resolvedProject,
+      safeIncrement,      // initial raw_pressure for INSERT
+      initialTemp,        // initial temperature for INSERT
+      nowEpoch,           // last_accessed_epoch
+      defaultDecayRate,   // decay_rate for INSERT
+      now,                // updated_at
+      nowEpoch,           // updated_at_epoch
+      safeIncrement,      // ON CONFLICT: increment * (1.0 - old)
+      safeIncrement,      // CASE WHEN branch 1
+      safeIncrement,      // CASE WHEN branch 2
+    );
+    recordMetric('db.insert', Date.now() - startMs);
+  } catch (err) {
+    recordMetric('db.insert', Date.now() - startMs, true);
+    log.error('Failed to accumulate pressure score:', err);
+  }
+}
+
+/**
  * Apply decay to all pressure scores: raw_pressure = raw_pressure * (1 - decay_rate)
  * Update temperature based on new pressure: >= 0.7 HOT, >= 0.3 WARM, else COLD
  * Update updated_at and updated_at_epoch.

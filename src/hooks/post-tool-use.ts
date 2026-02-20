@@ -47,30 +47,72 @@ runHook(HOOK_NAME, async (input) => {
     return {};
   }
 
-  // Step 3: Store in SQLite
+  // Acquire DB once for Steps 3 + 3.5, close after both complete
+  let db: import('better-sqlite3').Database | null = null;
   try {
     const { getDatabase } = await import('../db/connection.js');
-    const { storeObservation } = await import('../db/observations.js');
-    const { incrementObservationCount } = await import('../db/sessions.js');
-
-    const db = getDatabase();
-    if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping observation storage (Tier 2 degradation)');
-    } else {
-      try {
-        const result = storeObservation(db, observation);
-        if (result.id !== -1) {
-          incrementObservationCount(db, sessionId);
-          logToFile(HOOK_NAME, 'DEBUG', `Observation stored (id=${result.id}) tool=${toolName}`);
-        } else {
-          logToFile(HOOK_NAME, 'WARN', `storeObservation returned error sentinel for tool=${toolName}`);
-        }
-      } finally {
-        db.close();
-      }
-    }
+    db = getDatabase();
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'SQLite unavailable, skipping storage (Tier 2 degradation)', err);
+  }
+
+  // Step 3: Store in SQLite
+  if (!db) {
+    logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping observation storage (Tier 2 degradation)');
+  } else {
+    try {
+      const { storeObservation } = await import('../db/observations.js');
+      const { incrementObservationCount } = await import('../db/sessions.js');
+
+      const result = storeObservation(db, observation);
+      if (result.id !== -1) {
+        incrementObservationCount(db, sessionId);
+        logToFile(HOOK_NAME, 'DEBUG', `Observation stored (id=${result.id}) tool=${toolName}`);
+      } else {
+        logToFile(HOOK_NAME, 'WARN', `storeObservation returned error sentinel for tool=${toolName}`);
+      }
+    } catch (err) {
+      logToFile(HOOK_NAME, 'WARN', 'Observation storage failed (non-fatal)', err);
+    }
+  }
+
+  // Step 3.5: Accumulate local pressure scores from file observations
+  if (observation && db) {
+    try {
+      const { accumulatePressureScore } = await import('../db/pressure.js');
+      const project = scope.type === 'project' ? scope.name : undefined;
+
+      // Tool-weighted increments — only accumulate for known file-bearing tools
+      const TOOL_INCREMENTS: Record<string, number> = {
+        Write: 0.15, Edit: 0.15,  // mutative = high signal
+        Read: 0.05,               // discovery = medium signal
+        Grep: 0.02,               // search hit = low signal
+      };
+
+      const increment = TOOL_INCREMENTS[toolName];
+      if (increment !== undefined) {
+        // Accumulate for all touched files (dedupe: same file in both modified + read)
+        const allFiles = [...new Set([
+          ...(observation.files_modified || []),
+          ...(observation.files_read || []),
+        ])];
+
+        for (const filePath of allFiles) {
+          accumulatePressureScore(db, filePath, project, increment);
+        }
+
+        if (allFiles.length > 0) {
+          logToFile(HOOK_NAME, 'DEBUG', `Accumulated pressure for ${allFiles.length} files (tool=${toolName}, increment=${increment})`);
+        }
+      }
+    } catch (err) {
+      logToFile(HOOK_NAME, 'DEBUG', 'Pressure accumulation failed (non-fatal)', err);
+    }
+  }
+
+  // Close DB after Steps 3 + 3.5
+  if (db) {
+    try { db.close(); } catch { /* best effort */ }
   }
 
   // Step 4: Mirror to flat file (WP-17 soft dependency — skip if unavailable)

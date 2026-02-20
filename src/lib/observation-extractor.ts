@@ -254,7 +254,8 @@ function extractGrep(
     } else if (typeof files === 'string') {
       const lines = files.split('\n').filter(Boolean);
       matchCount = lines.length;
-      topFiles = lines.slice(0, 5);
+      // Strip :line:content suffixes from grep output lines (e.g. "src/foo.ts:10:matched")
+      topFiles = lines.slice(0, 5).map(line => line.split(':')[0] || line);
     }
   }
 
