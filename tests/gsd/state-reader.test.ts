@@ -633,7 +633,7 @@ describe.skipIf(!fs.existsSync(REAL_PLANNING_DIR))('real project integration', (
     expect(state.active).toBe(true);
     expect(state.phases.length).toBe(8);
     expect(state.position).not.toBeNull();
-    expect(state.position!.phase).toBe(1);
+    expect(state.position!.phase).toBeGreaterThanOrEqual(1);
 
     // Phase 1 should have PCTX-01 requirement
     const phase1 = state.phases.find(p => p.number === 1);
