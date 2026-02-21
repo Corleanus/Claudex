@@ -19,6 +19,9 @@ import {
   parseStateMd,
   parseRoadmapMd,
   countPlanFiles,
+  findActivePlanFile,
+  extractPlanMustHaves,
+  countCompletedRequirements,
 } from '../../src/gsd/state-reader.js';
 
 // =============================================================================
@@ -616,6 +619,279 @@ describe('edge cases', () => {
 
     const phases = parseRoadmapMd(roadmapCrlf);
     expect(phases).toHaveLength(3);
+  });
+});
+
+// =============================================================================
+// findActivePlanFile
+// =============================================================================
+
+describe('findActivePlanFile', () => {
+  beforeEach(() => {
+    tmpDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupTmpDir(tmpDir);
+  });
+
+  it('returns correct path when plan file exists in matching phase directory', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    const phaseDir = path.join(phasesDir, '02-some-phase');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '02-01-PLAN.md'), '# Plan');
+
+    const result = findActivePlanFile(phasesDir, 2, 1);
+    expect(result).not.toBeNull();
+    expect(result).toBe(path.join(phaseDir, '02-01-PLAN.md'));
+  });
+
+  it('returns null when planNumber is 0', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    fs.mkdirSync(phasesDir, { recursive: true });
+
+    const result = findActivePlanFile(phasesDir, 2, 0);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when planNumber is negative', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    fs.mkdirSync(phasesDir, { recursive: true });
+
+    const result = findActivePlanFile(phasesDir, 2, -1);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when the phase directory does not exist', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    fs.mkdirSync(phasesDir, { recursive: true });
+    // No phase-02 directory created
+
+    const result = findActivePlanFile(phasesDir, 2, 1);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when plan file does not exist in directory', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    const phaseDir = path.join(phasesDir, '02-some-phase');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    // Directory exists but no plan file for plan 3
+    fs.writeFileSync(path.join(phaseDir, '02-01-PLAN.md'), '# Plan');
+
+    const result = findActivePlanFile(phasesDir, 2, 3);
+    expect(result).toBeNull();
+  });
+
+  it('handles decimal phase numbers (e.g., phase 2.1)', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    const phaseDir = path.join(phasesDir, '02.1-inserted-fix');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '02.1-01-PLAN.md'), '# Plan');
+
+    const result = findActivePlanFile(phasesDir, 2.1, 1);
+    expect(result).not.toBeNull();
+    expect(result!.endsWith('02.1-01-PLAN.md')).toBe(true);
+  });
+
+  it('returns null gracefully when phasesDir does not exist', () => {
+    const result = findActivePlanFile(path.join(tmpDir, 'nonexistent'), 1, 1);
+    expect(result).toBeNull();
+  });
+});
+
+// =============================================================================
+// extractPlanMustHaves
+// =============================================================================
+
+describe('extractPlanMustHaves', () => {
+  beforeEach(() => {
+    tmpDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupTmpDir(tmpDir);
+  });
+
+  it('extracts truths array from YAML frontmatter', () => {
+    const planContent = `---
+phase: 01-test
+plan: 01
+must_haves:
+  truths:
+    - "truth one"
+    - "truth two"
+---
+
+# Plan content
+`;
+    const planPath = path.join(tmpDir, 'test-PLAN.md');
+    fs.writeFileSync(planPath, planContent);
+
+    const result = extractPlanMustHaves(planPath);
+    expect(result).toEqual(['truth one', 'truth two']);
+  });
+
+  it('returns empty array when file does not exist', () => {
+    const result = extractPlanMustHaves(path.join(tmpDir, 'nonexistent.md'));
+    expect(result).toEqual([]);
+  });
+
+  it('returns empty array when file has no frontmatter', () => {
+    const planPath = path.join(tmpDir, 'no-frontmatter.md');
+    fs.writeFileSync(planPath, '# Just a heading\n\nSome content.');
+
+    const result = extractPlanMustHaves(planPath);
+    expect(result).toEqual([]);
+  });
+
+  it('returns empty array when frontmatter has no must_haves section', () => {
+    const planContent = `---
+phase: 01-test
+plan: 01
+---
+
+# Plan content
+`;
+    const planPath = path.join(tmpDir, 'no-musthaves.md');
+    fs.writeFileSync(planPath, planContent);
+
+    const result = extractPlanMustHaves(planPath);
+    expect(result).toEqual([]);
+  });
+
+  it('handles CRLF line endings correctly', () => {
+    const planContent = `---\r\nphase: 01-test\r\nplan: 01\r\nmust_haves:\r\n  truths:\r\n    - "crlf truth one"\r\n    - "crlf truth two"\r\n---\r\n\r\n# Content\r\n`;
+    const planPath = path.join(tmpDir, 'crlf-plan.md');
+    fs.writeFileSync(planPath, planContent);
+
+    const result = extractPlanMustHaves(planPath);
+    expect(result).toEqual(['crlf truth one', 'crlf truth two']);
+  });
+
+  it('limits output to first 4 truths', () => {
+    const planContent = `---
+phase: 01-test
+plan: 01
+must_haves:
+  truths:
+    - "truth one"
+    - "truth two"
+    - "truth three"
+    - "truth four"
+    - "truth five"
+    - "truth six"
+---
+
+# Plan
+`;
+    const planPath = path.join(tmpDir, 'many-truths.md');
+    fs.writeFileSync(planPath, planContent);
+
+    const result = extractPlanMustHaves(planPath);
+    expect(result).toHaveLength(4);
+    expect(result).toEqual(['truth one', 'truth two', 'truth three', 'truth four']);
+  });
+
+  it('handles truths with both double-quoted and unquoted values', () => {
+    const planContent = `---
+phase: 01-test
+plan: 01
+must_haves:
+  truths:
+    - "quoted truth"
+    - unquoted truth value
+---
+
+# Plan
+`;
+    const planPath = path.join(tmpDir, 'mixed-quotes.md');
+    fs.writeFileSync(planPath, planContent);
+
+    const result = extractPlanMustHaves(planPath);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe('quoted truth');
+    expect(result[1]).toBe('unquoted truth value');
+  });
+});
+
+// =============================================================================
+// countCompletedRequirements
+// =============================================================================
+
+describe('countCompletedRequirements', () => {
+  beforeEach(() => {
+    tmpDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupTmpDir(tmpDir);
+  });
+
+  it('returns correct counts for mixed checked/unchecked requirements', () => {
+    const reqContent = `# Requirements
+
+- [x] **REQ-01**: First requirement - done
+- [ ] **REQ-02**: Second requirement - pending
+- [x] **REQ-03**: Third requirement - also done
+`;
+    const reqPath = path.join(tmpDir, 'REQUIREMENTS.md');
+    fs.writeFileSync(reqPath, reqContent);
+
+    const result = countCompletedRequirements(['REQ-01', 'REQ-02'], reqPath);
+    expect(result).toEqual({ complete: 1, total: 2 });
+  });
+
+  it('returns all zeros when all checkboxes are unchecked', () => {
+    const reqContent = `# Requirements
+
+- [ ] **REQ-01**: First requirement
+- [ ] **REQ-02**: Second requirement
+- [ ] **REQ-03**: Third requirement
+`;
+    const reqPath = path.join(tmpDir, 'REQUIREMENTS.md');
+    fs.writeFileSync(reqPath, reqContent);
+
+    const result = countCompletedRequirements(['REQ-01', 'REQ-02', 'REQ-03'], reqPath);
+    expect(result).toEqual({ complete: 0, total: 3 });
+  });
+
+  it('returns complete 0 with total from input when file does not exist', () => {
+    const result = countCompletedRequirements(
+      ['REQ-01', 'REQ-02'],
+      path.join(tmpDir, 'nonexistent.md'),
+    );
+    expect(result).toEqual({ complete: 0, total: 2 });
+  });
+
+  it('returns complete 0 with total N when file is empty', () => {
+    const reqPath = path.join(tmpDir, 'REQUIREMENTS.md');
+    fs.writeFileSync(reqPath, '');
+
+    const result = countCompletedRequirements(['REQ-01', 'REQ-02'], reqPath);
+    expect(result).toEqual({ complete: 0, total: 2 });
+  });
+
+  it('only counts IDs from the provided requirementIds array', () => {
+    const reqContent = `# Requirements
+
+- [x] **REQ-01**: First requirement - done
+- [x] **REQ-02**: Second requirement - done
+- [x] **REQ-03**: Third requirement - done
+`;
+    const reqPath = path.join(tmpDir, 'REQUIREMENTS.md');
+    fs.writeFileSync(reqPath, reqContent);
+
+    // Only ask about REQ-01 and REQ-03 (skip REQ-02)
+    const result = countCompletedRequirements(['REQ-01', 'REQ-03'], reqPath);
+    expect(result).toEqual({ complete: 2, total: 2 });
+  });
+
+  it('returns {complete:0, total:0} for empty requirementIds array', () => {
+    const reqPath = path.join(tmpDir, 'REQUIREMENTS.md');
+    fs.writeFileSync(reqPath, '# Requirements\n- [x] **REQ-01**: Done');
+
+    const result = countCompletedRequirements([], reqPath);
+    expect(result).toEqual({ complete: 0, total: 0 });
   });
 });
 
