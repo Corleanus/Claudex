@@ -7,6 +7,7 @@ import type {
   ScoredFile,
   Scope,
 } from '../../src/shared/types.js';
+import type { GsdState } from '../../src/gsd/types.js';
 
 // Mock logger
 vi.mock('../../src/shared/logger.js', () => ({
@@ -399,5 +400,191 @@ describe('source tracking', () => {
     });
     const result = assembleContext(sources, { maxTokens: 4000 });
     expect(result.sources).toContain('recency');
+  });
+});
+
+// =============================================================================
+// GSD context injection tests
+// =============================================================================
+
+function makeGsdState(overrides: Partial<GsdState> = {}): GsdState {
+  return {
+    active: true,
+    position: {
+      phase: 2,
+      totalPhases: 8,
+      phaseName: 'Phase-Aware Context Injection',
+      plan: 1,
+      totalPlans: 2,
+      status: 'In progress',
+    },
+    phases: [
+      {
+        number: 1,
+        name: 'GSD State Reader',
+        goal: 'Parse and expose GSD state',
+        dependsOn: null,
+        requirements: ['PCTX-01'],
+        successCriteria: ['Claudex detects active phase'],
+        roadmapComplete: true,
+        plans: { total: 1, complete: 1 },
+      },
+      {
+        number: 2,
+        name: 'Phase-Aware Context Injection',
+        goal: 'Post-compact context includes phase goal and plan details',
+        dependsOn: 'Phase 1',
+        requirements: ['PCTX-02'],
+        successCriteria: [
+          'Injected context contains current phase name, goal, and success criteria',
+          'Injected context contains active plan must-haves',
+          'Context shows which requirements are complete vs pending',
+          'No regression for non-GSD projects',
+        ],
+        roadmapComplete: false,
+        plans: { total: 2, complete: 0 },
+      },
+    ],
+    warnings: [],
+    ...overrides,
+  };
+}
+
+describe('GSD context injection', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('includes ## Project Phase section when GSD state is active', () => {
+    const sources = emptySources({ gsdState: makeGsdState() });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('## Project Phase');
+  });
+
+  it('omits GSD section when gsdState is undefined', () => {
+    const sources = emptySources();
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).not.toContain('## Project Phase');
+  });
+
+  it('omits GSD section when gsdState.active is false', () => {
+    const sources = emptySources({
+      gsdState: { active: false, position: null, phases: [], warnings: [] },
+    });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).not.toContain('## Project Phase');
+  });
+
+  it('includes milestone progress line', () => {
+    const sources = emptySources({ gsdState: makeGsdState() });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    // 1 of 8 phases complete = Math.round(12.5) = 13%
+    expect(result.markdown).toContain('Phase 2 of 8, 13% complete');
+  });
+
+  it('includes phase goal', () => {
+    const sources = emptySources({ gsdState: makeGsdState() });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('**Goal:** Post-compact context includes phase goal and plan details');
+  });
+
+  it('includes success criteria bullets', () => {
+    const sources = emptySources({ gsdState: makeGsdState() });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('**Success Criteria:**');
+    expect(result.markdown).toContain('- Injected context contains current phase name, goal, and success criteria');
+    expect(result.markdown).toContain('- No regression for non-GSD projects');
+  });
+
+  it('truncates long success criteria', () => {
+    const longCriterion = 'A'.repeat(150);
+    const state = makeGsdState();
+    state.phases[1]!.successCriteria = [longCriterion];
+    const sources = emptySources({ gsdState: state });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('A'.repeat(100) + '...');
+    expect(result.markdown).not.toContain('A'.repeat(101));
+  });
+
+  it('includes plan must-haves when provided', () => {
+    const sources = emptySources({
+      gsdState: makeGsdState(),
+      gsdPlanMustHaves: ['Truth one', 'Truth two'],
+    });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('**Active Plan:**');
+    expect(result.markdown).toContain('- Truth one');
+    expect(result.markdown).toContain('- Truth two');
+  });
+
+  it('omits plan section when gsdPlanMustHaves is undefined', () => {
+    const sources = emptySources({ gsdState: makeGsdState() });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).not.toContain('**Active Plan:**');
+  });
+
+  it('includes requirement status when provided', () => {
+    const sources = emptySources({
+      gsdState: makeGsdState(),
+      gsdRequirementStatus: { complete: 1, total: 2 },
+    });
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('**Requirements:** 1 of 2 complete');
+  });
+
+  it('GSD section appears after Active Focus and before Flow Reasoning', () => {
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts' })],
+        warm: [],
+        cold: [],
+      },
+      gsdState: makeGsdState(),
+      reasoningChains: [{
+        session_id: 'sess-001',
+        timestamp: '2023-11-14T22:00:00.000Z',
+        timestamp_epoch: Date.now() - 60000,
+        trigger: 'pre_compact' as const,
+        title: 'Reasoning chain',
+        reasoning: 'Some reasoning',
+        importance: 3,
+      }],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    const md = result.markdown;
+
+    const hotIdx = md.indexOf('## Active Focus');
+    const gsdIdx = md.indexOf('## Project Phase');
+    const flowIdx = md.indexOf('## Flow Reasoning');
+
+    expect(hotIdx).toBeGreaterThan(-1);
+    expect(gsdIdx).toBeGreaterThan(-1);
+    expect(flowIdx).toBeGreaterThan(-1);
+
+    expect(hotIdx).toBeLessThan(gsdIdx);
+    expect(gsdIdx).toBeLessThan(flowIdx);
+  });
+
+  it('REGRESSION: non-GSD sources produce identical output', () => {
+    const baseSources: ContextSources = {
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts' })],
+        warm: [makeScoredFile({ path: '/src/warm.ts', raw_pressure: 0.5, temperature: 'WARM' })],
+        cold: [],
+      },
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'FTS result' }) })],
+      recentObservations: [makeObservation({ title: 'Recent' })],
+      scope: GLOBAL_SCOPE,
+    };
+
+    const result1 = assembleContext(baseSources, { maxTokens: 4000 });
+    const result2 = assembleContext({ ...baseSources, gsdState: undefined }, { maxTokens: 4000 });
+
+    expect(result1.markdown).toBe(result2.markdown);
   });
 });
