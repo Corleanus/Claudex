@@ -437,3 +437,130 @@ function buildCrossReferenceWarnings(
 
   return warnings;
 }
+
+// =============================================================================
+// findActivePlanFile
+// =============================================================================
+
+/**
+ * Find the active plan file on disk given a phases directory and phase/plan numbers.
+ * Returns the full path to the plan file, or null if not found.
+ * Never throws -- returns null on any error.
+ */
+export function findActivePlanFile(
+  phasesDir: string,
+  phaseNumber: number,
+  planNumber: number,
+): string | null {
+  try {
+    if (planNumber <= 0) return null;
+
+    const phaseDir = findPhaseDir(phasesDir, phaseNumber);
+    if (!phaseDir) return null;
+
+    const paddedPhase = normalizePhaseName(phaseNumber);
+    const paddedPlan = String(planNumber).padStart(2, '0');
+    const expectedName = `${paddedPhase}-${paddedPlan}-PLAN.md`;
+    const expectedPath = path.join(phaseDir, expectedName);
+
+    if (fs.existsSync(expectedPath)) return expectedPath;
+
+    // Fallback: scan directory for any file ending in -{paddedPlan}-PLAN.md
+    const suffix = `-${paddedPlan}-PLAN.md`;
+    const entries = fs.readdirSync(phaseDir);
+    for (const entry of entries) {
+      if (entry.endsWith(suffix)) {
+        return path.join(phaseDir, entry);
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// =============================================================================
+// extractPlanMustHaves
+// =============================================================================
+
+/**
+ * Extract must_haves.truths[] from YAML frontmatter in a plan file.
+ * Returns up to 4 truths (truncated for context budget).
+ * Never throws -- returns empty array on any error.
+ */
+export function extractPlanMustHaves(planFilePath: string): string[] {
+  try {
+    const content = fs.readFileSync(planFilePath, 'utf-8').replace(/\r\n/g, '\n');
+
+    // Extract YAML frontmatter between --- delimiters
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) return [];
+
+    const frontmatter = fmMatch[1]!;
+
+    // Find must_haves: truths: section and extract indented - lines
+    const truthsMatch = frontmatter.match(
+      /must_haves:\s*\n\s+truths:\s*\n((?:\s+- .+\n?)+)/,
+    );
+    if (!truthsMatch) return [];
+
+    const truthLines = truthsMatch[1]!
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.startsWith('- '));
+
+    const truths = truthLines.map(line => {
+      let value = line.slice(2).trim(); // Remove leading "- "
+      // Strip surrounding quotes (double or single)
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      return value;
+    });
+
+    // Limit to first 4 truths
+    return truths.slice(0, 4);
+  } catch {
+    return [];
+  }
+}
+
+// =============================================================================
+// countCompletedRequirements
+// =============================================================================
+
+/**
+ * Count how many requirement IDs are checked in REQUIREMENTS.md.
+ * Returns { complete, total } where total is always requirementIds.length.
+ * Never throws -- returns { complete: 0, total: N } on any error.
+ */
+export function countCompletedRequirements(
+  requirementIds: string[],
+  requirementsPath: string,
+): { complete: number; total: number } {
+  if (requirementIds.length === 0) return { complete: 0, total: 0 };
+
+  try {
+    const content = fs.readFileSync(requirementsPath, 'utf-8');
+    let checkedCount = 0;
+
+    for (const id of requirementIds) {
+      // Match checked checkbox: - [x] **ID**
+      const checkedPattern = new RegExp(
+        `-\\s*\\[x\\]\\s*\\*\\*${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\*\\*`,
+        'i',
+      );
+      if (checkedPattern.test(content)) {
+        checkedCount++;
+      }
+    }
+
+    return { complete: checkedCount, total: requirementIds.length };
+  } catch {
+    return { complete: 0, total: requirementIds.length };
+  }
+}
