@@ -5,6 +5,8 @@
  * Changes here affect every module. Modify with care.
  */
 
+import type { GsdState } from '../gsd/types.js';
+
 // =============================================================================
 // Hook I/O
 // =============================================================================
@@ -289,6 +291,9 @@ export interface ContextSources {
   identity?: { agent?: string; user?: string };
   projectContext?: { primer?: string; handoff?: string };
   postCompaction?: boolean;
+  gsdState?: GsdState;
+  gsdPlanMustHaves?: string[];
+  gsdRequirementStatus?: { complete: number; total: number };
 }
 
 export interface AssembledContext {

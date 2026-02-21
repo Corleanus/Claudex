@@ -27,6 +27,7 @@ import type {
   ReasoningChain,
   ConsensusDecision,
 } from '../shared/types.js';
+import type { GsdState } from '../gsd/types.js';
 import { redactAssemblyOutput } from './redaction.js';
 
 // =============================================================================
@@ -91,6 +92,57 @@ function buildHotSection(hotFiles: ScoredFile[]): string {
     f => `- \`${f.path}\` — HOT (pressure: ${f.raw_pressure.toFixed(2)})`,
   );
   return `## Active Focus\n${lines.join('\n')}\n`;
+}
+
+function buildGsdSection(
+  gsdState: GsdState,
+  planMustHaves?: string[],
+  requirementStatus?: { complete: number; total: number },
+): string {
+  if (!gsdState.active || !gsdState.position) return '';
+
+  const pos = gsdState.position;
+  const lines: string[] = [];
+
+  // Milestone progress
+  const completedCount = gsdState.phases.filter(p => p.roadmapComplete).length;
+  const totalCount = pos.totalPhases;
+  const pct = totalCount > 0 ? Math.round(completedCount / totalCount * 100) : 0;
+  lines.push(`Phase ${pos.phase} of ${totalCount}, ${pct}% complete`);
+
+  // Current phase name
+  const currentPhase = gsdState.phases.find(p => p.number === pos.phase);
+  const phaseName = pos.phaseName ?? currentPhase?.name ?? 'Unknown';
+  lines.push(`**Current:** ${phaseName}`);
+
+  // Goal
+  if (currentPhase?.goal) {
+    lines.push(`**Goal:** ${currentPhase.goal}`);
+  }
+
+  // Success criteria (up to 5, truncated to 100 chars)
+  if (currentPhase?.successCriteria?.length) {
+    lines.push('**Success Criteria:**');
+    for (const criterion of currentPhase.successCriteria.slice(0, 5)) {
+      const truncated = criterion.length > 100 ? criterion.slice(0, 100) + '...' : criterion;
+      lines.push(`- ${truncated}`);
+    }
+  }
+
+  // Plan must-haves
+  if (planMustHaves?.length) {
+    lines.push('**Active Plan:**');
+    for (const truth of planMustHaves.slice(0, 3)) {
+      lines.push(`- ${truth}`);
+    }
+  }
+
+  // Requirement status
+  if (requirementStatus && requirementStatus.total > 0) {
+    lines.push(`**Requirements:** ${requirementStatus.complete} of ${requirementStatus.total} complete`);
+  }
+
+  return `## Project Phase\n${lines.join('\n')}\n`;
 }
 
 function buildSearchSection(results: SearchResult[]): string {
@@ -166,8 +218,9 @@ export function assembleContext(
       !!(sources.projectContext?.primer || sources.projectContext?.handoff);
     const hasReasoning = !!(sources.reasoningChains?.length);
     const hasConsensus = !!(sources.consensusDecisions?.length);
+    const hasGsd = !!(sources.gsdState?.active);
 
-    if (!hasHologram && !hasSearch && !hasRecent && !hasIdentity && !hasProject && !sources.postCompaction && !hasReasoning && !hasConsensus) {
+    if (!hasHologram && !hasSearch && !hasRecent && !hasIdentity && !hasProject && !sources.postCompaction && !hasReasoning && !hasConsensus && !hasGsd) {
       return { markdown: '', tokenEstimate: 0, sources: [] };
     }
 
@@ -208,6 +261,11 @@ export function assembleContext(
     // 3. HOT files
     if (hasHologram && sources.hologram!.hot.length > 0) {
       tryAppend(buildHotSection(sources.hologram!.hot), 'hologram');
+    }
+
+    // 3.5. GSD Project Phase
+    if (hasGsd) {
+      tryAppend(buildGsdSection(sources.gsdState!, sources.gsdPlanMustHaves, sources.gsdRequirementStatus), 'gsd');
     }
 
     // 4. Flow Reasoning
