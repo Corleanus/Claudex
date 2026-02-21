@@ -11,14 +11,18 @@
  * Database is opened ONCE per hook invocation and shared across all subsystems.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { loadConfig } from '../shared/config.js';
 import { assembleContext } from '../lib/context-assembler.js';
 import { normalizeFts5Query } from '../shared/fts5-utils.js';
 import { getDatabase } from '../db/connection.js';
+import { readGsdState, findActivePlanFile, extractPlanMustHaves, countCompletedRequirements } from '../gsd/state-reader.js';
 import type { UserPromptSubmitInput, SearchResult, Observation, Scope } from '../shared/types.js';
 import type { ContextSuggestion } from '../hologram/degradation.js';
+import type { GsdState } from '../gsd/types.js';
 
 const HOOK_NAME = 'user-prompt-submit';
 const SHORT_PROMPT_THRESHOLD = 10;
@@ -211,6 +215,42 @@ runHook(HOOK_NAME, async (input) => {
   const scope = detectScope(cwd);
   logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
 
+  // 3.5. Read GSD state (fast-path: skip if not a project or no .planning/STATE.md)
+  let gsdState: GsdState | undefined;
+  let gsdPlanMustHaves: string[] | undefined;
+  let gsdRequirementStatus: { complete: number; total: number } | undefined;
+
+  if (scope.type === 'project') {
+    try {
+      const statePath = path.join(scope.path, '.planning', 'STATE.md');
+      if (fs.existsSync(statePath)) {
+        gsdState = readGsdState(scope.path);
+
+        if (gsdState.active && gsdState.position) {
+          // Extract plan must-haves if there's an active plan
+          if (gsdState.position.plan > 0) {
+            const phasesDir = path.join(scope.path, '.planning', 'phases');
+            const planFile = findActivePlanFile(phasesDir, gsdState.position.phase, gsdState.position.plan);
+            if (planFile) {
+              gsdPlanMustHaves = extractPlanMustHaves(planFile);
+            }
+          }
+
+          // Count requirement completion for current phase
+          const currentPhase = gsdState.phases.find(p => p.number === gsdState!.position!.phase);
+          if (currentPhase?.requirements.length) {
+            const reqPath = path.join(scope.path, '.planning', 'REQUIREMENTS.md');
+            gsdRequirementStatus = countCompletedRequirements(currentPhase.requirements, reqPath);
+          }
+
+          logToFile(HOOK_NAME, 'DEBUG', `GSD active: Phase ${gsdState.position.phase}, plan ${gsdState.position.plan}`);
+        }
+      }
+    } catch (err) {
+      logToFile(HOOK_NAME, 'WARN', 'GSD state read failed (non-fatal)', err);
+    }
+  }
+
   // 4. Open database ONCE for the entire hook invocation
   const db = getDatabase();
   if (!db) {
@@ -307,6 +347,9 @@ runHook(HOOK_NAME, async (input) => {
         hologram: hologramResult,
         searchResults: ftsResults,
         recentObservations,
+        gsdState,
+        gsdPlanMustHaves,
+        gsdRequirementStatus,
         scope,
       },
       { maxTokens: CONTEXT_TOKEN_BUDGET },
