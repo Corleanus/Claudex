@@ -88,9 +88,10 @@ function buildProjectSection(sources: ContextSources): string {
 
 function buildHotSection(hotFiles: ScoredFile[]): string {
   if (hotFiles.length === 0) return '';
-  const lines = hotFiles.map(
-    f => `- \`${f.path}\` — HOT (pressure: ${f.raw_pressure.toFixed(2)})`,
-  );
+  const lines = hotFiles.map(f => {
+    const boost = f.phase_boosted ? ' [phase]' : '';
+    return `- \`${f.path}\` — HOT (pressure: ${f.raw_pressure.toFixed(2)})${boost}`;
+  });
   return `## Active Focus\n${lines.join('\n')}\n`;
 }
 
@@ -183,7 +184,10 @@ function buildPostCompactionSection(): string {
 
 function buildWarmSection(warmFiles: ScoredFile[]): string {
   if (warmFiles.length === 0) return '';
-  const paths = warmFiles.map(f => `\`${f.path}\``).join(', ');
+  const paths = warmFiles.map(f => {
+    const boost = f.phase_boosted ? ' [phase]' : '';
+    return `\`${f.path}\`${boost}`;
+  }).join(', ');
   return `## Warm Context\n- ${paths}\n`;
 }
 

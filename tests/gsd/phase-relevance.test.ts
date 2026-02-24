@@ -377,19 +377,19 @@ describe('integration: real .planning/ data', () => {
     expect(result.otherPlanFiles.size).toBe(0);
   });
 
-  it('phase 3 plan 1 (active) returns files from 03-01-PLAN.md as active set', () => {
-    const result = getPhaseRelevanceSet(phasesDir, 3, 1);
+  it('phase 3 plan 2 (active) returns files from 03-02-PLAN.md as active set', () => {
+    // 03-01 is completed (has SUMMARY.md) so its files are excluded
+    // 03-02 is the active plan
+    const result = getPhaseRelevanceSet(phasesDir, 3, 2);
 
-    // 03-01-PLAN.md files_modified includes these files
-    expect(result.activePlanFiles.has('Claudex/src/gsd/types.ts')).toBe(true);
-    expect(result.activePlanFiles.has('Claudex/src/gsd/state-reader.ts')).toBe(true);
-    expect(result.activePlanFiles.has('Claudex/src/gsd/phase-relevance.ts')).toBe(true);
-    expect(result.activePlanFiles.has('Claudex/src/shared/types.ts')).toBe(true);
-    expect(result.activePlanFiles.has('Claudex/tests/gsd/phase-relevance.test.ts')).toBe(true);
+    // 03-02-PLAN.md files_modified includes these files
+    expect(result.activePlanFiles.has('Claudex/src/hooks/user-prompt-submit.ts')).toBe(true);
+    expect(result.activePlanFiles.has('Claudex/src/lib/context-assembler.ts')).toBe(true);
+    expect(result.activePlanFiles.has('Claudex/tests/lib/context-assembler.test.ts')).toBe(true);
 
-    // 03-02-PLAN.md files should be in otherPlanFiles
-    expect(result.otherPlanFiles.has('Claudex/src/hooks/user-prompt-submit.ts')).toBe(true);
-    expect(result.otherPlanFiles.has('Claudex/src/lib/context-assembler.ts')).toBe(true);
+    // 03-01 files should NOT appear (completed plan is excluded)
+    expect(result.activePlanFiles.has('Claudex/src/gsd/phase-relevance.ts')).toBe(false);
+    expect(result.otherPlanFiles.has('Claudex/src/gsd/phase-relevance.ts')).toBe(false);
   });
 
   it('extractPlanFilesModified works on real 02-01-PLAN.md', () => {

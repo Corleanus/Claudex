@@ -588,3 +588,72 @@ describe('GSD context injection', () => {
     expect(result1.markdown).toBe(result2.markdown);
   });
 });
+
+// =============================================================================
+// Phase boost annotation tests
+// =============================================================================
+
+describe('Phase boost annotation', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('hot section shows [phase] marker for boosted files', () => {
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/boosted.ts', raw_pressure: 0.95, phase_boosted: true })],
+        warm: [],
+        cold: [],
+      },
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('`/src/boosted.ts` — HOT (pressure: 0.95) [phase]');
+  });
+
+  it('hot section omits marker for non-boosted files', () => {
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/normal.ts', raw_pressure: 0.9 })],
+        warm: [],
+        cold: [],
+      },
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('`/src/normal.ts` — HOT (pressure: 0.90)');
+    expect(result.markdown).not.toContain('[phase]');
+  });
+
+  it('warm section shows [phase] marker for boosted files', () => {
+    const sources = emptySources({
+      hologram: {
+        hot: [],
+        warm: [makeScoredFile({ path: '/src/warm-boosted.ts', raw_pressure: 0.5, temperature: 'WARM', phase_boosted: true })],
+        cold: [],
+      },
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).toContain('`/src/warm-boosted.ts` [phase]');
+  });
+
+  it('non-GSD project has no [phase] markers (regression guard)', () => {
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts', raw_pressure: 0.9 })],
+        warm: [makeScoredFile({ path: '/src/warm.ts', raw_pressure: 0.5, temperature: 'WARM' })],
+        cold: [],
+      },
+      searchResults: [makeSearchResult()],
+      recentObservations: [makeObservation()],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.markdown).not.toContain('[phase]');
+  });
+});
