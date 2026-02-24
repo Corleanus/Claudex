@@ -91,6 +91,36 @@ export interface PhaseRelevanceSet {
 }
 
 // =============================================================================
+// Cross-Phase Intelligence (Phase 5)
+// =============================================================================
+
+/** A file that recurs across multiple completed phases */
+export interface RecurringPattern {
+  /** File path (e.g., "Claudex/src/gsd/types.ts") */
+  filePath: string;
+  /** Phases where this file appeared, with reason */
+  appearances: Array<{ phase: string; reason: string }>;
+}
+
+/** A decision extracted from a session log or handoff */
+export interface PhaseDecision {
+  /** Date of the session/handoff (e.g., "2026-02-21") */
+  date: string;
+  /** Decision text (bullet point content) */
+  decision: string;
+  /** Source type */
+  source: 'session' | 'handoff';
+}
+
+/** Complete cross-phase intelligence data */
+export interface CrossPhaseData {
+  /** Files appearing in 2+ completed phases */
+  patterns: RecurringPattern[];
+  /** Decisions organized by phase label (chronological) */
+  decisionsByPhase: Map<string, PhaseDecision[]>;
+}
+
+// =============================================================================
 // Constants
 // =============================================================================
 
