@@ -20,9 +20,15 @@ import { assembleContext } from '../lib/context-assembler.js';
 import { normalizeFts5Query } from '../shared/fts5-utils.js';
 import { getDatabase } from '../db/connection.js';
 import { readGsdState, findActivePlanFile, extractPlanMustHaves, countCompletedRequirements } from '../gsd/state-reader.js';
+import { readTokenGauge } from '../lib/token-gauge.js';
+import { writeCheckpoint } from '../checkpoint/writer.js';
+import { readDecisions, readQuestions } from '../checkpoint/state-files.js';
+import { PATHS } from '../shared/paths.js';
 import type { UserPromptSubmitInput, SearchResult, Observation, Scope } from '../shared/types.js';
 import type { ContextSuggestion } from '../hologram/degradation.js';
 import type { GsdState } from '../gsd/types.js';
+import type { GaugeReading } from '../lib/token-gauge.js';
+import type { Decision } from '../checkpoint/types.js';
 
 const HOOK_NAME = 'user-prompt-submit';
 const SHORT_PROMPT_THRESHOLD = 10;
@@ -215,6 +221,11 @@ runHook(HOOK_NAME, async (input) => {
   const scope = detectScope(cwd);
   logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
 
+  // 3.3. Token gauge from transcript
+  const transcriptPath = promptInput.transcript_path;
+  const gauge: GaugeReading = readTokenGauge(transcriptPath, 200_000);
+  logToFile(HOOK_NAME, 'DEBUG', `Token gauge: ${gauge.formatted} (${gauge.threshold})`);
+
   // 3.5. Read GSD state (fast-path: skip if not a project or no .planning/STATE.md)
   let gsdState: GsdState | undefined;
   let gsdPlanMustHaves: string[] | undefined;
@@ -260,6 +271,18 @@ runHook(HOOK_NAME, async (input) => {
   try {
     // 5. Get recent observations early — needed for both context AND hologram fallback
     const recentObservations = getRecent(scope, db);
+
+    // 5.3. Read incremental state for context enrichment
+    let decisions: Decision[] = [];
+    let openQuestions: string[] = [];
+    if (scope.type === 'project') {
+      try {
+        decisions = readDecisions(scope.path, sessionId);
+        openQuestions = readQuestions(scope.path, sessionId);
+      } catch (err) {
+        logToFile(HOOK_NAME, 'DEBUG', 'Incremental state read failed (non-fatal)', err);
+      }
+    }
 
     // 5.5. Feature 3 — Post-compact active file bridge
     let boostFiles: string[] | undefined;
@@ -374,6 +397,20 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
+    // 6.9. Write cross-phase summary (debounced)
+    if (gsdState?.active && gsdState.position && scope.type === 'project') {
+      try {
+        const { writeCrossPhaseSummary } = await import('../gsd/cross-phase-writer.js');
+        const claudexDir = path.join(scope.path, 'Claudex');
+        const wrote = writeCrossPhaseSummary(scope.path, claudexDir);
+        if (wrote) {
+          logToFile(HOOK_NAME, 'DEBUG', 'Cross-phase summary written');
+        }
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Cross-phase summary failed (non-fatal)', err);
+      }
+    }
+
     // 7. Query FTS5 search (keywords from prompt)
     const ftsResults = queryFts5(promptText, scope, db);
 
@@ -390,6 +427,19 @@ runHook(HOOK_NAME, async (input) => {
       },
       { maxTokens: CONTEXT_TOKEN_BUDGET },
     );
+
+    // 8.3. Enrich assembled context with gauge + incremental state
+    let contextMarkdown = assembled.markdown;
+    if (contextMarkdown) {
+      contextMarkdown = gauge.formatted + '\n\n' + contextMarkdown;
+      if (decisions.length > 0) {
+        const decisionBlock = decisions.map(d => `- **${d.what}**: ${d.why}`).join('\n');
+        contextMarkdown += '\n\n### Active Decisions\n' + decisionBlock;
+      }
+      if (openQuestions.length > 0) {
+        contextMarkdown += '\n\n### Open Questions\n' + openQuestions.map(q => `- ${q}`).join('\n');
+      }
+    }
 
     const elapsedMs = Date.now() - startMs;
     logToFile(HOOK_NAME, 'INFO', `Completed in ${elapsedMs}ms, tokens=${assembled.tokenEstimate}, sources=[${assembled.sources.join(',')}]`);
@@ -416,15 +466,48 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
+    // 8.7. Write checkpoint if utilization ≥80%
+    if (gauge.status === 'ok' && (gauge.threshold === 'checkpoint' || gauge.threshold === 'critical')) {
+      try {
+        const projectDir = scope.type === 'project' ? scope.path : PATHS.home;
+        const latestPath = path.join(projectDir, 'context', 'checkpoints', 'latest.yaml');
+        let shouldWrite = true;
+        try {
+          const stat = fs.statSync(latestPath);
+          if (Date.now() - stat.mtimeMs < 60_000) {
+            shouldWrite = false;
+            logToFile(HOOK_NAME, 'DEBUG', 'Checkpoint debounced — written <60s ago');
+          }
+        } catch { /* latest.yaml doesn't exist — should write */ }
+
+        if (shouldWrite) {
+          const scopeStr = scope.type === 'project' ? `project:${scope.name}` : 'global';
+          const result = writeCheckpoint({
+            projectDir,
+            sessionId,
+            scope: scopeStr,
+            trigger: 'auto-80pct',
+            gaugeReading: gauge,
+            gsdState,
+          });
+          if (result) {
+            logToFile(HOOK_NAME, 'INFO', `Checkpoint written: ${result.checkpointId} at ${(gauge.utilization * 100).toFixed(0)}%`);
+          }
+        }
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Checkpoint write failed (non-fatal)', err);
+      }
+    }
+
     // 9. Return — empty if nothing assembled
-    if (!assembled.markdown) {
+    if (!contextMarkdown) {
       return {};
     }
 
     return {
       hookSpecificOutput: {
         hookEventName: 'UserPromptSubmit',
-        additionalContext: assembled.markdown,
+        additionalContext: contextMarkdown,
       },
     };
   } finally {
