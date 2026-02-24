@@ -360,3 +360,43 @@ describe('applyPhaseBoost', () => {
     expect(warmFile.temperature).toBe('WARM');
   });
 });
+
+// =============================================================================
+// Integration: real .planning/ data
+// =============================================================================
+
+describe('integration: real .planning/ data', () => {
+  // Use this project's actual .planning/phases/ directory
+  const projectRoot = path.resolve(__dirname, '..', '..', '..');
+  const phasesDir = path.join(projectRoot, '.planning', 'phases');
+
+  it('phase 1 plans are all completed (summaries exist) so relevance set is empty', () => {
+    const result = getPhaseRelevanceSet(phasesDir, 1, 1);
+    // Phase 1 has 01-01-PLAN.md + 01-01-SUMMARY.md -> completed -> excluded
+    expect(result.activePlanFiles.size).toBe(0);
+    expect(result.otherPlanFiles.size).toBe(0);
+  });
+
+  it('phase 3 plan 1 (active) returns files from 03-01-PLAN.md as active set', () => {
+    const result = getPhaseRelevanceSet(phasesDir, 3, 1);
+
+    // 03-01-PLAN.md files_modified includes these files
+    expect(result.activePlanFiles.has('Claudex/src/gsd/types.ts')).toBe(true);
+    expect(result.activePlanFiles.has('Claudex/src/gsd/state-reader.ts')).toBe(true);
+    expect(result.activePlanFiles.has('Claudex/src/gsd/phase-relevance.ts')).toBe(true);
+    expect(result.activePlanFiles.has('Claudex/src/shared/types.ts')).toBe(true);
+    expect(result.activePlanFiles.has('Claudex/tests/gsd/phase-relevance.test.ts')).toBe(true);
+
+    // 03-02-PLAN.md files should be in otherPlanFiles
+    expect(result.otherPlanFiles.has('Claudex/src/hooks/user-prompt-submit.ts')).toBe(true);
+    expect(result.otherPlanFiles.has('Claudex/src/lib/context-assembler.ts')).toBe(true);
+  });
+
+  it('extractPlanFilesModified works on real 02-01-PLAN.md', () => {
+    const planPath = path.join(phasesDir, '02-phase-aware-context-injection', '02-01-PLAN.md');
+    const files = extractPlanFilesModified(planPath);
+    expect(files).toContain('Claudex/src/gsd/state-reader.ts');
+    expect(files).toContain('Claudex/tests/gsd/state-reader.test.ts');
+    expect(files.length).toBe(2);
+  });
+});
