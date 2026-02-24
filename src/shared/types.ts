@@ -229,6 +229,7 @@ export interface ScoredFile {
   temperature: 'HOT' | 'WARM' | 'COLD';
   system_bucket: number;
   pressure_bucket: number;
+  phase_boosted?: boolean;  // true when file was boosted by phase relevance
 }
 
 export interface HologramQuery {

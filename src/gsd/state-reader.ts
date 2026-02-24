@@ -274,7 +274,7 @@ function normalizePhaseName(phase: number): string {
  * Looks for directories matching pattern `{paddedNum}-*` in .planning/phases/.
  * Returns the full directory path, or null if not found.
  */
-function findPhaseDir(phasesDir: string, phaseNumber: number): string | null {
+export function findPhaseDir(phasesDir: string, phaseNumber: number): string | null {
   try {
     if (!fs.existsSync(phasesDir)) return null;
 

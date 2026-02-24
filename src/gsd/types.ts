@@ -79,6 +79,18 @@ export interface GsdState {
 }
 
 // =============================================================================
+// Phase Relevance (for phase-weighted scoring)
+// =============================================================================
+
+/** Tiered set of files relevant to the current GSD phase */
+export interface PhaseRelevanceSet {
+  /** Active plan files get full boost (1.4x) */
+  activePlanFiles: Set<string>;
+  /** Other plans in the same phase get partial boost (1.2x) */
+  otherPlanFiles: Set<string>;
+}
+
+// =============================================================================
 // Constants
 // =============================================================================
 
