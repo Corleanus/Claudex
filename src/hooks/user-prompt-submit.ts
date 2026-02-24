@@ -338,13 +338,36 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
+    // 6.7. Apply phase boost to hologram result (transparent: boosts phase-relevant files' scores)
+    let boostedHologram = hologramResult;
+    if (gsdState?.active && gsdState.position && hologramResult && scope.type === 'project') {
+      try {
+        const { getPhaseRelevanceSet, applyPhaseBoost } = await import('../gsd/phase-relevance.js');
+        const phasesDir = path.join(scope.path, '.planning', 'phases');
+        const relevance = getPhaseRelevanceSet(phasesDir, gsdState.position.phase, gsdState.position.plan);
+        if (relevance.activePlanFiles.size > 0 || relevance.otherPlanFiles.size > 0) {
+          const allFiles = [...hologramResult.hot, ...hologramResult.warm, ...hologramResult.cold];
+          const boosted = applyPhaseBoost(allFiles, relevance);
+          boostedHologram = {
+            hot: boosted.filter(f => f.temperature === 'HOT'),
+            warm: boosted.filter(f => f.temperature === 'WARM'),
+            cold: boosted.filter(f => f.temperature === 'COLD'),
+            source: hologramResult.source,
+          };
+          logToFile(HOOK_NAME, 'DEBUG', `Phase boost applied: ${relevance.activePlanFiles.size} active, ${relevance.otherPlanFiles.size} other files`);
+        }
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Phase boost failed (non-fatal)', err);
+      }
+    }
+
     // 7. Query FTS5 search (keywords from prompt)
     const ftsResults = queryFts5(promptText, scope, db);
 
     // 8. Assemble context
     const assembled = assembleContext(
       {
-        hologram: hologramResult,
+        hologram: boostedHologram,
         searchResults: ftsResults,
         recentObservations,
         gsdState,
