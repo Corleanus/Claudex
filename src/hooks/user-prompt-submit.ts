@@ -361,6 +361,19 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
+    // 6.8. Write phase summary (debounced)
+    if (gsdState?.active && gsdState.position && scope.type === 'project' && db) {
+      try {
+        const { writePhaseSummary } = await import('../gsd/summary-writer.js');
+        const wrote = writePhaseSummary(scope.path, scope.name, db, gsdState);
+        if (wrote) {
+          logToFile(HOOK_NAME, 'DEBUG', 'Phase summary written to .planning/context/SUMMARY.md');
+        }
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Phase summary write failed (non-fatal)', err);
+      }
+    }
+
     // 7. Query FTS5 search (keywords from prompt)
     const ftsResults = queryFts5(promptText, scope, db);
 
