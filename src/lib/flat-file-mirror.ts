@@ -13,6 +13,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { CLAUDEX_HOME, dailyMemoryPath } from '../shared/paths.js';
+import { createLogger } from '../shared/logger.js';
+
+const log = createLogger('flat-file-mirror');
 import type {
   ConsensusDecision,
   Observation,
@@ -42,7 +45,7 @@ export function mirrorObservation(obs: Observation, scope: Scope): void {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.appendFileSync(filePath, entry, 'utf-8');
   } catch (err) {
-    console.error('[claudex] flat-file-mirror: write failed:', err);
+    log.error(' write failed:', err);
   }
 }
 
@@ -186,7 +189,7 @@ export function mirrorReasoning(chain: ReasoningChain, scope: Scope): void {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, content, 'utf-8');
   } catch (err) {
-    console.error('[claudex] flat-file-mirror: reasoning write failed:', err);
+    log.error(' reasoning write failed:', err);
   }
 }
 
@@ -258,7 +261,7 @@ export function mirrorConsensus(decision: ConsensusDecision, scope: Scope): void
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, content, 'utf-8');
   } catch (err) {
-    console.error('[claudex] flat-file-mirror: consensus write failed:', err);
+    log.error(' consensus write failed:', err);
   }
 }
 
@@ -323,6 +326,6 @@ export function mirrorPressureScores(scores: PressureScore[], scope: Scope): voi
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, content, 'utf-8');
   } catch (err) {
-    console.error('[claudex] flat-file-mirror: pressure write failed:', err);
+    log.error(' pressure write failed:', err);
   }
 }

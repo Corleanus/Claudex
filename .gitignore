@@ -3,3 +3,7 @@ dist/
 __pycache__/
 *.pyc
 context/
+.claude/
+test-results.txt
+vitest_out.txt
+vitest_err.txt

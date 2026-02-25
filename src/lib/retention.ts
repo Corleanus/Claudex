@@ -15,7 +15,10 @@
 import type Database from 'better-sqlite3';
 import { deleteOldObservations } from '../db/observations.js';
 import { rebuildSearchIndex } from '../db/search.js';
+import { createLogger } from '../shared/logger.js';
 import type { ClaudexConfig } from '../shared/types.js';
+
+const log = createLogger('retention');
 
 export interface RetentionResult {
   observationsDeleted: number;
@@ -59,7 +62,7 @@ export function enforceRetention(db: Database.Database, config: ClaudexConfig): 
     }
   } catch (err) {
     // Never crash — log and return partial results
-    console.error('[retention] Error during cleanup:', err);
+    log.error('Error during cleanup:', err);
   }
 
   result.durationMs = Date.now() - start;
