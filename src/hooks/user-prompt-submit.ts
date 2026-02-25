@@ -534,7 +534,7 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
-    // 8.7. Write checkpoint if utilization ≥80%
+    // 8.7. Write checkpoint if utilization ≥75%
     if (gauge.status === 'ok' && (gauge.threshold === 'checkpoint' || gauge.threshold === 'critical')) {
       try {
         const projectDir = scope.type === 'project' ? scope.path : PATHS.home;
@@ -554,7 +554,7 @@ runHook(HOOK_NAME, async (input) => {
             projectDir,
             sessionId,
             scope: scopeStr,
-            trigger: 'auto-80pct',
+            trigger: 'auto-75pct',
             gaugeReading: gauge,
             gsdState,
           });

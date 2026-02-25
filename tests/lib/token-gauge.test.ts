@@ -2,7 +2,7 @@
  * Claudex v3 — Token Gauge Tests (WP-1)
  *
  * 10 tests covering: valid transcript, empty/undefined path, missing usage,
- * threshold boundaries (70%, 80%, 95%), gauge formatting, large transcript,
+ * threshold boundaries (65%, 75%, 95%), gauge formatting, large transcript,
  * malformed trailing line, CRLF, BOM, zero-length file.
  */
 
@@ -129,28 +129,28 @@ describe('readTokenGauge', () => {
     expect(result.threshold).toBe('unavailable');
   });
 
-  it('classifies threshold boundaries correctly: 70%, 80%, 95%', () => {
-    // Exactly 70% → approaching
-    const at70 = writeTranscript('at70.jsonl', [makeAssistantLine(140_000)]);
-    expect(readTokenGauge(at70).threshold).toBe('approaching');
+  it('classifies threshold boundaries correctly: 65%, 75%, 95%', () => {
+    // Exactly 65% → approaching
+    const at65 = writeTranscript('at65.jsonl', [makeAssistantLine(130_000)]);
+    expect(readTokenGauge(at65).threshold).toBe('approaching');
 
-    // Exactly 80% → checkpoint
-    const at80 = writeTranscript('at80.jsonl', [makeAssistantLine(160_000)]);
-    expect(readTokenGauge(at80).threshold).toBe('checkpoint');
+    // Exactly 75% → checkpoint
+    const at75 = writeTranscript('at75.jsonl', [makeAssistantLine(150_000)]);
+    expect(readTokenGauge(at75).threshold).toBe('checkpoint');
 
     // Exactly 95% → critical
     const at95 = writeTranscript('at95.jsonl', [makeAssistantLine(190_000)]);
     expect(readTokenGauge(at95).threshold).toBe('critical');
 
-    // Just below 70% → normal
-    const below70 = writeTranscript('below70.jsonl', [makeAssistantLine(139_999)]);
-    expect(readTokenGauge(below70).threshold).toBe('normal');
+    // Just below 65% → normal
+    const below65 = writeTranscript('below65.jsonl', [makeAssistantLine(129_999)]);
+    expect(readTokenGauge(below65).threshold).toBe('normal');
 
-    // Just below 80% (but ≥ 70%) → approaching
-    const at79 = writeTranscript('at79.jsonl', [makeAssistantLine(159_999)]);
-    expect(readTokenGauge(at79).threshold).toBe('approaching');
+    // Just below 75% (but ≥ 65%) → approaching
+    const at74 = writeTranscript('at74.jsonl', [makeAssistantLine(149_999)]);
+    expect(readTokenGauge(at74).threshold).toBe('approaching');
 
-    // Just below 95% (but ≥ 80%) → checkpoint
+    // Just below 95% (but ≥ 75%) → checkpoint
     const at94 = writeTranscript('at94.jsonl', [makeAssistantLine(189_999)]);
     expect(readTokenGauge(at94).threshold).toBe('checkpoint');
   });

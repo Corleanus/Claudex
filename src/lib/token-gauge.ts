@@ -3,7 +3,7 @@
  *
  * Reads Claude Code's transcript JSONL to extract exact context window
  * utilization from API response metadata. Foundation for the checkpoint
- * system — tells UserPromptSubmit when context hits 80%.
+ * system — tells UserPromptSubmit when context hits 75%.
  *
  * NEVER throws. Always returns a GaugeReading.
  */
@@ -63,8 +63,8 @@ const UNAVAILABLE_READING: GaugeReading = {
 
 function classifyThreshold(utilization: number): GaugeThreshold {
   if (utilization >= 0.95) return 'critical';
-  if (utilization >= 0.80) return 'checkpoint';
-  if (utilization >= 0.70) return 'approaching';
+  if (utilization >= 0.75) return 'checkpoint';
+  if (utilization >= 0.65) return 'approaching';
   return 'normal';
 }
 

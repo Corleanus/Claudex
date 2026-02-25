@@ -70,7 +70,7 @@ describe('user-prompt-submit checkpoint integration', () => {
 
       expect(gauge.status).toBe('ok');
       expect(gauge.utilization).toBe(0.8);
-      expect(gauge.threshold).toBe('checkpoint');
+      expect(gauge.threshold).toBe('checkpoint'); // 80% ≥ 75% threshold
       expect(gauge.formatted).toContain('80%');
     });
 
@@ -94,9 +94,9 @@ describe('user-prompt-submit checkpoint integration', () => {
       expect(gauge.threshold).toBe('normal');
     });
 
-    it('classifies approaching threshold at 70-79%', async () => {
+    it('classifies approaching threshold at 65-74%', async () => {
       const { readTokenGauge } = await import('../../src/lib/token-gauge.js');
-      const transcriptPath = writeTranscript(tmpDir, 150_000);
+      const transcriptPath = writeTranscript(tmpDir, 140_000);
 
       const gauge = readTokenGauge(transcriptPath, 200_000);
 
@@ -120,7 +120,7 @@ describe('user-prompt-submit checkpoint integration', () => {
   // =============================================================================
 
   describe('checkpoint trigger', () => {
-    it('writes checkpoint at 80% utilization', async () => {
+    it('writes checkpoint at 75% utilization', async () => {
       const { writeCheckpoint } = await import('../../src/checkpoint/writer.js');
       const { readTokenGauge } = await import('../../src/lib/token-gauge.js');
 
@@ -134,7 +134,7 @@ describe('user-prompt-submit checkpoint integration', () => {
         projectDir,
         sessionId: 'test-sess-1',
         scope: 'project:test',
-        trigger: 'auto-80pct',
+        trigger: 'auto-75pct',
         gaugeReading: gauge,
       });
 
@@ -147,7 +147,7 @@ describe('user-prompt-submit checkpoint integration', () => {
       expect(fs.existsSync(latestPath)).toBe(true);
     });
 
-    it('does NOT trigger checkpoint below 80%', async () => {
+    it('does NOT trigger checkpoint below 75%', async () => {
       const { readTokenGauge } = await import('../../src/lib/token-gauge.js');
       const transcriptPath = writeTranscript(tmpDir, 100_000);
 
@@ -172,7 +172,7 @@ describe('user-prompt-submit checkpoint integration', () => {
         projectDir,
         sessionId: 'test-sess-debounce',
         scope: 'project:test',
-        trigger: 'auto-80pct',
+        trigger: 'auto-75pct',
         gaugeReading: gauge,
       });
       expect(first).not.toBeNull();
@@ -289,7 +289,7 @@ describe('user-prompt-submit checkpoint integration', () => {
         projectDir: tmpDir,
         sessionId: 'test-fail',
         scope: 'project:test',
-        trigger: 'auto-80pct',
+        trigger: 'auto-75pct',
         gaugeReading: gauge,
       });
 
