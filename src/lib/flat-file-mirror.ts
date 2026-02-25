@@ -33,6 +33,9 @@ import type {
  */
 export function mirrorObservation(obs: Observation, scope: Scope): void {
   try {
+    // Only mirror observations with importance >= 3 to prevent daily file bloat
+    if (obs.importance < 3) return;
+
     const filePath = resolveTargetPath(obs, scope);
     const entry = formatEntry(obs);
 

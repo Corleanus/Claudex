@@ -173,6 +173,35 @@ describe('readTokenGauge', () => {
     expect(barSmall).toContain('500/100k');
   });
 
+  it('sums input + cache_creation + cache_read tokens for utilization', () => {
+    // Real Claude Code API returns input_tokens:1 with most tokens in cache
+    const lines = [
+      makeUserLine(),
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello' }],
+          usage: {
+            input_tokens: 1,
+            output_tokens: 291,
+            cache_creation_input_tokens: 802,
+            cache_read_input_tokens: 88_995,
+          },
+        },
+      }),
+    ];
+    const transcriptPath = writeTranscript('cached.jsonl', lines);
+
+    const result = readTokenGauge(transcriptPath);
+    expect(result.status).toBe('ok');
+    // Total: 1 + 802 + 88995 = 89798
+    expect(result.utilization).toBeCloseTo(89_798 / 200_000, 4);
+    expect(result.threshold).toBe('normal'); // ~45%, below 70%
+    expect(result.formatted).toContain('45%');
+    expect(result.formatted).toContain('90k/200k');
+  });
+
   it('reads only the last assistant message in large transcript', () => {
     const lines: string[] = [];
     // Add many messages — only the last assistant message matters

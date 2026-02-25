@@ -189,10 +189,11 @@ export function readTokenGauge(transcriptPath: string | undefined, windowSize?: 
       return { ...UNAVAILABLE_READING, window_size: ws };
     }
 
-    // Compute utilization
-    const utilization = ws > 0 ? usage.input_tokens / ws : 0;
+    // Compute utilization — sum all input token types (uncached + cache creation + cache read)
+    const totalInput = usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+    const utilization = ws > 0 ? totalInput / ws : 0;
     const threshold = classifyThreshold(utilization);
-    const formatted = formatGauge(utilization, usage.input_tokens, ws);
+    const formatted = formatGauge(utilization, totalInput, ws);
 
     return {
       status: 'ok',
