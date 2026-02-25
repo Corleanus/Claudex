@@ -16,8 +16,23 @@ export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 /**
  * Create a logger for a specific hook or module.
  */
+const MAX_LOG_SIZE = 5 * 1024 * 1024; // 5 MB
+
 export function createLogger(name: string) {
   const logPath = path.join(PATHS.hookLogs, `${name}.log`);
+
+  function rotateIfNeeded(): void {
+    try {
+      const stats = fs.statSync(logPath);
+      if (stats.size >= MAX_LOG_SIZE) {
+        const rotatedPath = `${logPath}.1`;
+        // Single rotation: current → .1 (overwrite previous .1)
+        fs.renameSync(logPath, rotatedPath);
+      }
+    } catch {
+      // File doesn't exist or can't stat — nothing to rotate
+    }
+  }
 
   function log(level: LogLevel, ...args: unknown[]): void {
     try {
@@ -26,6 +41,8 @@ export function createLogger(name: string) {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
+
+      rotateIfNeeded();
 
       const timestamp = new Date().toISOString();
       const message = args

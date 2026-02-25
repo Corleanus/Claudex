@@ -60,6 +60,7 @@ export interface StopInput extends HookStdin {
 /** Stdout format for all hooks (Claude Code v1.0.21+ protocol) */
 export interface HookStdout {
   schema_version?: number;  // Stamped on output by infrastructure
+  systemMessage?: string;   // Top-level system message (Stop hook and others)
   hookSpecificOutput?: {
     hookEventName: string;
     additionalContext?: string;
