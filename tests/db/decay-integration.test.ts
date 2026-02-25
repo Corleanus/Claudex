@@ -207,14 +207,14 @@ describe('pruneObservations', () => {
     }
 
     const result = pruneObservations(db, 'test');
-    expect(result.pruned).toBe(10); // batch of 10
-    expect(result.remaining).toBe(991);
+    expect(result.pruned).toBe(50); // batch of 50
+    expect(result.remaining).toBe(951);
 
     // Soft-delete: deleted_at_epoch should be set on pruned rows
     const deletedCount = db.prepare(
       'SELECT COUNT(*) as cnt FROM observations WHERE deleted_at_epoch IS NOT NULL AND project = ?'
     ).get('test') as { cnt: number };
-    expect(deletedCount.cnt).toBe(10);
+    expect(deletedCount.cnt).toBe(50);
   });
 
   it('respects immunity: critical importance observations are never pruned', () => {

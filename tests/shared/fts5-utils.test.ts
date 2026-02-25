@@ -49,4 +49,52 @@ describe('normalizeFts5Query', () => {
     expect(normalizeFts5Query('TypeScript')).toBe('TypeScript');
     expect(normalizeFts5Query('TREE-SHAKING')).toBe('TREE SHAKING');
   });
+
+  describe('OR mode', () => {
+    it('joins terms with OR when mode is OR', () => {
+      expect(normalizeFts5Query('typescript errors', { mode: 'OR' })).toBe('typescript OR errors');
+    });
+
+    it('preserves existing operators in OR mode', () => {
+      // AND is a FTS5 operator — preserved as-is, no OR inserted around it
+      expect(normalizeFts5Query('typescript AND errors', { mode: 'OR' })).toBe('typescript AND errors');
+    });
+
+    it('handles single term in OR mode (no OR needed)', () => {
+      expect(normalizeFts5Query('typescript', { mode: 'OR' })).toBe('typescript');
+    });
+
+    it('handles hyphenated terms in OR mode', () => {
+      expect(normalizeFts5Query('tree-shaking build', { mode: 'OR' })).toBe('tree OR shaking OR build');
+    });
+  });
+
+  describe('prefix matching', () => {
+    it('appends * to short terms (< 6 chars) when prefix is true', () => {
+      expect(normalizeFts5Query('err', { prefix: true })).toBe('err*');
+      expect(normalizeFts5Query('type', { prefix: true })).toBe('type*');
+      expect(normalizeFts5Query('build', { prefix: true })).toBe('build*');
+    });
+
+    it('does not append * to long terms (>= 6 chars)', () => {
+      expect(normalizeFts5Query('typescript', { prefix: true })).toBe('typescript');
+      expect(normalizeFts5Query('refactor', { prefix: true })).toBe('refactor');
+    });
+
+    it('does not append * to terms that already have it', () => {
+      expect(normalizeFts5Query('type*', { prefix: true })).toBe('type*');
+    });
+
+    it('does not append * to FTS5 operators', () => {
+      expect(normalizeFts5Query('err AND big', { prefix: true })).toBe('err* AND big*');
+    });
+
+    it('does not append * to column filters', () => {
+      expect(normalizeFts5Query('title:err', { prefix: true })).toBe('title:err');
+    });
+
+    it('combines prefix with OR mode', () => {
+      expect(normalizeFts5Query('err fix', { mode: 'OR', prefix: true })).toBe('err* OR fix*');
+    });
+  });
 });

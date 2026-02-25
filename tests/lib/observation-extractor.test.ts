@@ -207,6 +207,302 @@ describe('extractObservation', () => {
     });
   });
 
+  describe('Bash tool — expanded trivial commands', () => {
+    const trivialCmds = ['cat', 'head', 'tail', 'echo', 'type', 'dir', 'cls', 'clear', 'which', 'where', 'whoami'];
+
+    for (const cmd of trivialCmds) {
+      it(`filters trivial Bash command (${cmd}) — returns null`, () => {
+        const result = extractObservation(
+          'Bash',
+          { command: `${cmd} something` },
+          { exit_code: 0, output: 'output' },
+          SESSION_ID,
+          GLOBAL_SCOPE,
+        );
+        expect(result).toBeNull();
+      });
+    }
+  });
+
+  describe('Read tool — dynamic importance', () => {
+    it('assigns importance 3 for config files (.json)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/package.json' },
+        { output: '{}' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(3);
+    });
+
+    it('assigns importance 3 for config files (.yaml)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/config.yaml' },
+        { output: 'key: value' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(3);
+    });
+
+    it('assigns importance 3 for config files (.toml)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/pyproject.toml' },
+        { output: '[tool]' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(3);
+    });
+
+    it('assigns importance 3 for config files (.env)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/.env' },
+        { output: 'KEY=value' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(3);
+    });
+
+    it('assigns importance 3 for markdown files (.md)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/docs/README.md' },
+        { output: '# Title' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(3);
+    });
+
+    it('assigns importance 3 for test files (.test.ts)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/tests/utils.test.ts' },
+        { output: 'describe(...)' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(3);
+    });
+
+    it('assigns importance 3 for spec files (.spec.ts)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/tests/utils.spec.ts' },
+        { output: 'it(...)' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(3);
+    });
+
+    it('assigns importance 2 for regular source files (.ts)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/index.ts' },
+        { output: 'const x = 1;' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.importance).toBe(2);
+    });
+  });
+
+  describe('Read tool — truncation limit', () => {
+    it('includes up to 8 lines of preview', () => {
+      const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n');
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/big.ts' },
+        { output: lines },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      // Should contain lines 1-8 but not line 9
+      expect(result!.content).toContain('line 8');
+      expect(result!.content).not.toContain('line 9\n');
+      expect(result!.content).toContain('more lines');
+    });
+  });
+
+  describe('Edit tool — truncation limit', () => {
+    it('includes up to 5 lines for old/new strings', () => {
+      const oldStr = Array.from({ length: 10 }, (_, i) => `old ${i + 1}`).join('\n');
+      const newStr = Array.from({ length: 10 }, (_, i) => `new ${i + 1}`).join('\n');
+      const result = extractObservation(
+        'Edit',
+        { file_path: '/src/a.ts', old_string: oldStr, new_string: newStr },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.content).toContain('old 5');
+      expect(result!.content).not.toContain('old 6\n');
+      expect(result!.content).toContain('new 5');
+      expect(result!.content).not.toContain('new 6\n');
+    });
+  });
+
+  describe('Bash tool — truncation limit', () => {
+    it('includes up to 10 lines of output', () => {
+      const output = Array.from({ length: 20 }, (_, i) => `out ${i + 1}`).join('\n');
+      const result = extractObservation(
+        'Bash',
+        { command: 'npm test' },
+        { exit_code: 0, output },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.content).toContain('out 10');
+      expect(result!.content).not.toContain('out 11\n');
+      expect(result!.content).toContain('more lines');
+    });
+  });
+
+  describe('Bash tool — description field', () => {
+    it('prepends description to content when present', () => {
+      const result = extractObservation(
+        'Bash',
+        { command: 'npm install', description: 'Install dependencies' },
+        { exit_code: 0, output: 'added 57 packages' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.content).toMatch(/^\[Install dependencies\]/);
+    });
+
+    it('omits description bracket when not present', () => {
+      const result = extractObservation(
+        'Bash',
+        { command: 'npm install' },
+        { exit_code: 0, output: 'added 57 packages' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.content).not.toContain('[');
+    });
+  });
+
+  describe('Task tool', () => {
+    it('extracts observation with prompt and subagent_type', () => {
+      const result = extractObservation(
+        'Task',
+        { prompt: 'Find all usages of the deprecated API', subagent_type: 'Explore' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.tool_name).toBe('Task');
+      expect(result!.importance).toBe(3);
+      expect(result!.content).toContain('Task (Explore)');
+      expect(result!.content).toContain('Find all usages of the deprecated API');
+    });
+
+    it('truncates long prompts to 100 chars', () => {
+      const longPrompt = 'x'.repeat(200);
+      const result = extractObservation(
+        'Task',
+        { prompt: longPrompt, subagent_type: 'general' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.content.length).toBeLessThan(200);
+      expect(result!.content).toContain('...');
+    });
+
+    it('returns null when prompt is empty', () => {
+      const result = extractObservation(
+        'Task',
+        { prompt: '' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('WebSearch tool', () => {
+    it('extracts observation with query', () => {
+      const result = extractObservation(
+        'WebSearch',
+        { query: 'TypeScript generics tutorial' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.tool_name).toBe('WebSearch');
+      expect(result!.category).toBe('discovery');
+      expect(result!.importance).toBe(3);
+      expect(result!.content).toBe('WebSearch: TypeScript generics tutorial');
+    });
+
+    it('returns null when query is empty', () => {
+      const result = extractObservation(
+        'WebSearch',
+        { query: '' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('NotebookEdit tool', () => {
+    it('extracts observation with path and source preview', () => {
+      const source = 'import pandas as pd\ndf = pd.read_csv("data.csv")\nprint(df.head())';
+      const result = extractObservation(
+        'NotebookEdit',
+        { notebook_path: '/notebooks/analysis.ipynb', new_source: source },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.tool_name).toBe('NotebookEdit');
+      expect(result!.category).toBe('change');
+      expect(result!.importance).toBe(3);
+      expect(result!.content).toContain('analysis.ipynb');
+      expect(result!.content).toContain('import pandas');
+      expect(result!.files_modified).toEqual(['/notebooks/analysis.ipynb']);
+    });
+
+    it('returns null when notebook_path is empty', () => {
+      const result = extractObservation(
+        'NotebookEdit',
+        { notebook_path: '', new_source: 'code' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+  });
+
   describe('Unknown tools', () => {
     it('returns null for unhandled tool names', () => {
       const result = extractObservation(

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { searchObservations, migration_2 } from '../../src/db/search.js';
+import { searchObservations, searchAll, migration_2 } from '../../src/db/search.js';
 import { migration_1 } from '../../src/db/schema.js';
 import { MigrationRunner } from '../../src/db/migrations.js';
 import { storeObservation } from '../../src/db/observations.js';
@@ -291,5 +291,74 @@ describe('searchObservations', () => {
     const results = searchObservations(db, 'pre-commit');
     expect(results.length).toBe(1);
     expect(results[0]!.observation.content).toContain('pre-commit');
+  });
+
+  it('passes mode through to FTS5 normalizer (OR mode finds partial matches)', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'TypeScript migration',
+      content: 'Migrated the codebase to TypeScript',
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Database refactor',
+      content: 'Refactored the database layer',
+    }));
+
+    // AND mode: "TypeScript database" should match nothing (no single doc has both)
+    const andResults = searchObservations(db, 'TypeScript database');
+    expect(andResults.length).toBe(0);
+
+    // OR mode: should match both documents
+    const orResults = searchObservations(db, 'TypeScript database', { mode: 'OR' });
+    expect(orResults.length).toBe(2);
+  });
+});
+
+describe('searchAll', () => {
+  it('returns results from observations', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'Webpack configuration update',
+      content: 'Updated webpack to version 5',
+    }));
+
+    const results = searchAll(db, 'webpack');
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0]!.observation.title).toBe('Webpack configuration update');
+  });
+
+  it('respects limit option', () => {
+    for (let i = 0; i < 5; i++) {
+      storeObservation(db, makeTestObservation({
+        title: `Widget item ${i}`,
+        content: `Widget content ${i}`,
+      }));
+    }
+
+    const results = searchAll(db, 'Widget', { limit: 2 });
+    expect(results.length).toBe(2);
+  });
+
+  it('passes mode through (OR finds broader matches)', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'React component',
+      content: 'Built a new React component',
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Vue migration',
+      content: 'Migrated Vue components',
+    }));
+
+    // AND: "React Vue" matches nothing
+    const andResults = searchAll(db, 'React Vue');
+    expect(andResults.length).toBe(0);
+
+    // OR: matches both
+    const orResults = searchAll(db, 'React Vue', { mode: 'OR' });
+    expect(orResults.length).toBe(2);
+  });
+
+  it('returns empty for empty query', () => {
+    storeObservation(db, makeTestObservation());
+    const results = searchAll(db, '');
+    expect(results).toEqual([]);
   });
 });

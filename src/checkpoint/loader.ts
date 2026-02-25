@@ -71,6 +71,7 @@ function numericCheckpointSort(a: string, b: string): number {
 const KNOWN_KEYS = new Set([
   'schema', 'version', 'meta', 'working', 'decisions',
   'files', 'gsd', 'open_questions', 'learnings', 'thread',
+  'pressure_snapshot', 'recent_observations', 'boost_state',
 ]);
 
 /**
@@ -118,7 +119,7 @@ function validateCheckpoint(data: unknown): Checkpoint | null {
     log.warn(`Invalid checkpoint schema: ${String(obj.schema)}`);
     return null;
   }
-  if (obj.version !== CHECKPOINT_VERSION) {
+  if (typeof obj.version !== 'number' || obj.version > CHECKPOINT_VERSION) {
     log.warn(`Invalid checkpoint version: ${String(obj.version)}`);
     return null;
   }

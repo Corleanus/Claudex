@@ -15,7 +15,10 @@ export { redactSensitive as redactSecrets } from './redaction.js';
 // Helpers
 // =============================================================================
 
-const TRIVIAL_BASH_COMMANDS = new Set(['ls', 'cd', 'pwd']);
+const TRIVIAL_BASH_COMMANDS = new Set([
+  'ls', 'cd', 'pwd', 'cat', 'head', 'tail', 'echo',
+  'type', 'dir', 'cls', 'clear', 'which', 'where', 'whoami',
+]);
 
 function str(val: unknown): string {
   if (typeof val === 'string') return val;
@@ -106,10 +109,18 @@ function extractRead(
   if (toolResponse) {
     const output = str(toolResponse['output'] || toolResponse['content'] || '');
     if (output) {
-      const preview = truncateLines(output, 3);
+      const preview = truncateLines(output, 8);
       contentSummary += `\n${preview}`;
     }
   }
+
+  // Dynamic importance: config/test files get 3, others get 2
+  const readExt = fileExtension(filePath).toLowerCase();
+  const readBase = basename(filePath).toLowerCase();
+  const isConfigFile = ['json', 'yaml', 'yml', 'toml', 'env', 'md'].includes(readExt)
+    || readBase === '.env' || readBase.startsWith('.env.');
+  const isTestFile = readBase.endsWith('.test.ts') || readBase.endsWith('.spec.ts');
+  const readImportance = (isConfigFile || isTestFile) ? 3 : 2;
 
   return makeObservation(
     sessionId,
@@ -118,7 +129,7 @@ function extractRead(
     'discovery',
     `Read: ${basename(filePath)}`,
     contentSummary,
-    2,
+    readImportance,
     [filePath],
   );
 }
@@ -136,10 +147,10 @@ function extractEdit(
   const newStr = str(toolInput['new_string']);
 
   const oldSummary = oldStr
-    ? truncateLines(oldStr, 2)
+    ? truncateLines(oldStr, 5)
     : '(unknown)';
   const newSummary = newStr
-    ? truncateLines(newStr, 2)
+    ? truncateLines(newStr, 5)
     : '(unknown)';
 
   const content = `Old: ${oldSummary}\nNew: ${newSummary}`;
@@ -196,10 +207,14 @@ function extractBash(
   const base = baseCommand(command);
   if (TRIVIAL_BASH_COMMANDS.has(base)) return null;
 
+  const description = str(toolInput['description']);
   const exitCode = toolResponse != null ? (toolResponse['exit_code'] ?? toolResponse['exitCode']) : undefined;
   const isError = exitCode != null && exitCode !== 0;
 
   let content = '';
+  if (description) {
+    content += `[${description}] `;
+  }
   if (exitCode != null) {
     content += `Exit code: ${exitCode}`;
   }
@@ -207,7 +222,7 @@ function extractBash(
   if (toolResponse) {
     const output = str(toolResponse['output'] || toolResponse['stdout'] || '');
     if (output) {
-      const preview = truncateLines(output, 5);
+      const preview = truncateLines(output, 10);
       content += content ? '\n' : '';
       content += preview;
     }
@@ -322,11 +337,86 @@ function extractWebFetch(
   );
 }
 
+function extractTask(
+  toolInput: Record<string, unknown>,
+  _toolResponse: Record<string, unknown> | undefined,
+  sessionId: string,
+  scope: Scope,
+): Observation | null {
+  const prompt = str(toolInput['prompt']);
+  if (!prompt) return null;
+
+  const subagentType = str(toolInput['subagent_type'] || 'general');
+  const promptSummary = prompt.length > 100 ? prompt.slice(0, 97) + '...' : prompt;
+  const content = `Task (${subagentType}): ${promptSummary}`;
+
+  return makeObservation(
+    sessionId,
+    scope,
+    'Task',
+    'change',
+    `Task: ${promptSummary.length > 40 ? promptSummary.slice(0, 37) + '...' : promptSummary}`,
+    content,
+    3,
+  );
+}
+
+function extractWebSearch(
+  toolInput: Record<string, unknown>,
+  _toolResponse: Record<string, unknown> | undefined,
+  sessionId: string,
+  scope: Scope,
+): Observation | null {
+  const query = str(toolInput['query']);
+  if (!query) return null;
+
+  const content = `WebSearch: ${query}`;
+
+  return makeObservation(
+    sessionId,
+    scope,
+    'WebSearch',
+    'discovery',
+    `Search: ${query.length > 40 ? query.slice(0, 37) + '...' : query}`,
+    content,
+    3,
+  );
+}
+
+function extractNotebookEdit(
+  toolInput: Record<string, unknown>,
+  _toolResponse: Record<string, unknown> | undefined,
+  sessionId: string,
+  scope: Scope,
+): Observation | null {
+  const notebookPath = str(toolInput['notebook_path']);
+  if (!notebookPath) return null;
+
+  const newSource = str(toolInput['new_source']);
+  const preview = newSource ? truncateLines(newSource, 5) : '(empty)';
+  const content = `NotebookEdit ${basename(notebookPath)}: ${preview}`;
+
+  return makeObservation(
+    sessionId,
+    scope,
+    'NotebookEdit',
+    'change',
+    `NotebookEdit: ${basename(notebookPath)}`,
+    content,
+    3,
+    undefined,
+    [notebookPath],
+  );
+}
+
 // =============================================================================
 // Main Entry Point
 // =============================================================================
 
-const HANDLED_TOOLS = new Set(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'WebFetch']);
+const HANDLED_TOOLS = new Set([
+  'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'WebFetch',
+  'Task', 'WebSearch', 'NotebookEdit',
+]);
 
 export function extractObservation(
   toolName: string,
@@ -372,6 +462,15 @@ export function extractObservation(
 
     case 'WebFetch':
       return extractWebFetch(toolInput, toolResponse, sessionId, scope);
+
+    case 'Task':
+      return extractTask(toolInput, toolResponse, sessionId, scope);
+
+    case 'WebSearch':
+      return extractWebSearch(toolInput, toolResponse, sessionId, scope);
+
+    case 'NotebookEdit':
+      return extractNotebookEdit(toolInput, toolResponse, sessionId, scope);
 
     default:
       return null;

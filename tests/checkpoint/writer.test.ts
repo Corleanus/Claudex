@@ -7,11 +7,13 @@
  * writer_version, and scope.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as yaml from 'js-yaml';
+import Database from 'better-sqlite3';
+import { MigrationRunner } from '../../src/db/migrations.js';
 import {
   appendDecision,
   appendQuestion,
@@ -23,7 +25,20 @@ import { writeCheckpoint } from '../../src/checkpoint/writer.js';
 import type { WriteCheckpointInput } from '../../src/checkpoint/writer.js';
 import type { GaugeReading } from '../../src/lib/token-gauge.js';
 import type { Checkpoint } from '../../src/checkpoint/types.js';
+import { CHECKPOINT_VERSION } from '../../src/checkpoint/types.js';
 import type { GsdState } from '../../src/gsd/types.js';
+import { upsertPressureScore } from '../../src/db/pressure.js';
+import { storeObservation } from '../../src/db/observations.js';
+import { upsertCheckpointState, updateBoostState } from '../../src/db/checkpoint.js';
+
+vi.mock('../../src/shared/logger.js', () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
 
 // =============================================================================
 // Test Helpers
@@ -92,6 +107,22 @@ function readCheckpointYaml(filePath: string): Checkpoint {
   return yaml.load(raw, { schema: yaml.JSON_SCHEMA }) as Checkpoint;
 }
 
+function setupDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_versions (
+      id INTEGER PRIMARY KEY,
+      version INTEGER UNIQUE NOT NULL,
+      applied_at TEXT NOT NULL
+    )
+  `);
+  const runner = new MigrationRunner(db);
+  runner.run();
+  return db;
+}
+
 // =============================================================================
 // Setup / Teardown
 // =============================================================================
@@ -132,7 +163,7 @@ describe('checkpoint writer', () => {
 
     expect(result).not.toBeNull();
     expect(result!.checkpoint.schema).toBe('claudex/checkpoint');
-    expect(result!.checkpoint.version).toBe(1);
+    expect(result!.checkpoint.version).toBe(2);
 
     // Verify from disk
     const loaded = readCheckpointYaml(result!.path);
@@ -340,5 +371,145 @@ describe('checkpoint writer', () => {
 
     expect(result).not.toBeNull();
     expect(result!.tokenEstimate).toBeGreaterThan(0);
+  });
+
+  it('checkpoint version is 2', () => {
+    const result = writeCheckpoint(makeBaseInput());
+    expect(result).not.toBeNull();
+    expect(result!.checkpoint.version).toBe(2);
+    expect(CHECKPOINT_VERSION).toBe(2);
+  });
+});
+
+// =============================================================================
+// Enrichment Tests (DB-backed)
+// =============================================================================
+
+describe('checkpoint writer enrichment', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = setupDb();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('pressure_snapshot populated from DB when db provided', () => {
+    // Insert HOT and WARM files (project must match scope in makeBaseInput)
+    upsertPressureScore(db, {
+      file_path: 'src/hot-file.ts',
+      project: 'claudex-v2',
+      raw_pressure: 0.9,
+      temperature: 'HOT',
+      decay_rate: 0.05,
+    });
+    upsertPressureScore(db, {
+      file_path: 'src/warm-file.ts',
+      project: 'claudex-v2',
+      raw_pressure: 0.5,
+      temperature: 'WARM',
+      decay_rate: 0.05,
+    });
+    upsertPressureScore(db, {
+      file_path: 'src/cold-file.ts',
+      project: 'claudex-v2',
+      raw_pressure: 0.1,
+      temperature: 'COLD',
+      decay_rate: 0.05,
+    });
+
+    const result = writeCheckpoint(makeBaseInput({ db }));
+
+    expect(result).not.toBeNull();
+    expect(result!.checkpoint.pressure_snapshot).toBeDefined();
+    expect(result!.checkpoint.pressure_snapshot!.hot).toContain('src/hot-file.ts');
+    expect(result!.checkpoint.pressure_snapshot!.warm).toContain('src/warm-file.ts');
+    // COLD files should not appear in either list
+    expect(result!.checkpoint.pressure_snapshot!.hot).not.toContain('src/cold-file.ts');
+    expect(result!.checkpoint.pressure_snapshot!.warm).not.toContain('src/cold-file.ts');
+  });
+
+  it('recent_observations populated from DB when db provided', () => {
+    // Insert observations (project must match scope in makeBaseInput)
+    for (let i = 0; i < 10; i++) {
+      storeObservation(db, {
+        session_id: 'test-session-1',
+        project: 'claudex-v2',
+        timestamp: new Date(Date.now() - i * 60000).toISOString(),
+        timestamp_epoch: Date.now() - i * 60000,
+        tool_name: 'Read',
+        category: 'discovery',
+        title: `Observation ${i}`,
+        content: `Content ${i}`,
+        importance: 3,
+      });
+    }
+
+    const result = writeCheckpoint(makeBaseInput({ db }));
+
+    expect(result).not.toBeNull();
+    expect(result!.checkpoint.recent_observations).toBeDefined();
+    // Should cap at 8 most recent
+    expect(result!.checkpoint.recent_observations).toHaveLength(8);
+    // Most recent first (getRecentObservations orders DESC)
+    expect(result!.checkpoint.recent_observations![0]!.title).toBe('Observation 0');
+    expect(result!.checkpoint.recent_observations![0]!.category).toBe('discovery');
+    expect(result!.checkpoint.recent_observations![0]!.timestamp_epoch).toBeGreaterThan(0);
+  });
+
+  it('boost_state populated from DB when checkpoint state has boost', () => {
+    // Create checkpoint state with boost
+    upsertCheckpointState(db, 'test-session-1', Date.now(), ['src/a.ts', 'src/b.ts']);
+    const boostTime = Date.now() - 5000;
+    updateBoostState(db, 'test-session-1', boostTime, 2);
+
+    const result = writeCheckpoint(makeBaseInput({ db }));
+
+    expect(result).not.toBeNull();
+    expect(result!.checkpoint.boost_state).not.toBeNull();
+    expect(result!.checkpoint.boost_state!.files).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(result!.checkpoint.boost_state!.turn).toBe(2);
+    expect(result!.checkpoint.boost_state!.applied_at).toBe(boostTime);
+  });
+
+  it('boost_state is null when no boost exists in DB', () => {
+    // Create checkpoint state WITHOUT boost
+    upsertCheckpointState(db, 'test-session-1', Date.now(), ['src/a.ts']);
+
+    const result = writeCheckpoint(makeBaseInput({ db }));
+
+    expect(result).not.toBeNull();
+    expect(result!.checkpoint.boost_state).toBeNull();
+  });
+
+  it('enrichment fields have empty defaults when db is not provided', () => {
+    const result = writeCheckpoint(makeBaseInput());
+
+    expect(result).not.toBeNull();
+    expect(result!.checkpoint.pressure_snapshot).toEqual({ hot: [], warm: [] });
+    expect(result!.checkpoint.recent_observations).toEqual([]);
+    expect(result!.checkpoint.boost_state).toBeNull();
+  });
+
+  it('enrichment fields persisted to YAML on disk', () => {
+    upsertPressureScore(db, {
+      file_path: 'src/main.ts',
+      project: 'claudex-v2',
+      raw_pressure: 0.8,
+      temperature: 'HOT',
+      decay_rate: 0.05,
+    });
+
+    const result = writeCheckpoint(makeBaseInput({ db }));
+    expect(result).not.toBeNull();
+
+    // Read back from disk
+    const loaded = readCheckpointYaml(result!.path);
+    expect(loaded.pressure_snapshot).toBeDefined();
+    expect(loaded.pressure_snapshot!.hot).toContain('src/main.ts');
+    expect(loaded.recent_observations).toBeDefined();
+    expect(loaded.boost_state).toBeNull();
   });
 });

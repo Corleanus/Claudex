@@ -408,6 +408,7 @@ runHook('pre-compact', async (input: HookStdin) => {
             scope: scopeStr,
             trigger: 'pre-compact',
             gaugeReading: gauge,
+            db,
           });
           if (result) {
             logToFile(HOOK_NAME, 'INFO', `Structured checkpoint written: ${result.checkpointId}`);

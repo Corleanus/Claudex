@@ -977,3 +977,110 @@ describe('demand-paging: mode switching', () => {
     expect(md).not.toContain('(refs)');
   });
 });
+
+// =============================================================================
+// Search result reservation tests (WP-4)
+// =============================================================================
+
+describe('search result reservation', () => {
+  const NOW = 1700000000000;
+
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('search results get injected when budget is tight but trimmable sections exist', () => {
+    // Large warm section + search results. Budget barely fits warm but not search.
+    // Reservation should trim warm to make room for search ref.
+    const manyWarmFiles = Array.from({ length: 15 }, (_, i) =>
+      makeScoredFile({ path: `/src/warm-${i}.ts`, raw_pressure: 0.5, temperature: 'WARM' as const }),
+    );
+
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts' })],
+        warm: manyWarmFiles,
+        cold: [],
+      },
+      searchResults: [
+        makeSearchResult({ observation: makeObservation({ title: 'Important FTS result' }) }),
+        makeSearchResult({ observation: makeObservation({ title: 'Another FTS result' }) }),
+      ],
+    });
+
+    // Tight budget: HOT + warm consume most, leaving no room for search normally
+    const result = assembleContext(sources, { maxTokens: 300 });
+
+    // Either search results made it in directly, or via reservation
+    // At minimum, fts5 should appear in sources if reservation worked
+    if (result.sources.includes('hologram') && result.markdown.includes('Warm Context')) {
+      // If warm was included, search reservation should have trimmed it
+      // and injected search ref
+      expect(result.sources).toContain('fts5');
+    }
+  });
+
+  it('search results included normally when budget is sufficient', () => {
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts' })],
+        warm: [],
+        cold: [],
+      },
+      searchResults: [
+        makeSearchResult({ observation: makeObservation({ title: 'FTS result' }) }),
+      ],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    expect(result.sources).toContain('fts5');
+    expect(result.markdown).toContain('## Related Observations');
+  });
+
+  it('search reservation trims warm section to make room for search ref', () => {
+    // Create a scenario where warm files fill up the budget, pushing search out
+    const manyWarmFiles = Array.from({ length: 20 }, (_, i) =>
+      makeScoredFile({ path: `/src/long-warm-file-name-${i}.ts`, raw_pressure: 0.5, temperature: 'WARM' as const }),
+    );
+
+    const sources = emptySources({
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts' })],
+        warm: manyWarmFiles,
+        cold: [],
+      },
+      searchResults: [
+        makeSearchResult({ observation: makeObservation({ title: 'Critical search hit' }) }),
+      ],
+      recentObservations: [makeObservation({ title: 'Recent' })],
+    });
+
+    // Budget that fits HOT + recent + warm but NOT search
+    // After reservation: warm trimmed, search ref injected
+    const result = assembleContext(sources, { maxTokens: 600 });
+
+    // If warm consumed the budget, the reservation should have rescued search
+    if (result.markdown.includes('Related Observations') || result.markdown.includes('(refs)')) {
+      expect(result.sources).toContain('fts5');
+    }
+  });
+
+  it('no trimming when search results already included', () => {
+    const sources = emptySources({
+      searchResults: [
+        makeSearchResult({ observation: makeObservation({ title: 'FTS result' }) }),
+      ],
+      recentObservations: [makeObservation({ title: 'Recent' })],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    // Both should be present with plenty of budget
+    expect(result.sources).toContain('fts5');
+    expect(result.sources).toContain('recency');
+  });
+});

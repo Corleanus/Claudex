@@ -7,8 +7,26 @@
  * EI formula (mnemon-derived):
  *   baseWeight × accessFactor × decayFactor × connectivityBonus
  *
- * Half-lives from Kore stratified model:
- *   importance 5 → 365d, 4 → 90d, 3 → 30d, 2 → 7d, 1 → 3d
+ * Half-lives (v2 tuned):
+ *   importance 5 → 365d, 4 → 90d, 3 → 60d, 2 → 14d, 1 → 7d
+ *
+ * ---
+ * Two complementary decay systems operate in Claudex:
+ *
+ * 1. **Observation EI** (this module): Measures observation "value" via
+ *    importance-weighted half-lives, access patterns, and file-based
+ *    co-occurrence connectivity. Used for pruning decisions — low-EI
+ *    observations are soft-deleted when the store exceeds capacity.
+ *
+ * 2. **Pressure Stratified Tiers** (pressure-scoring module): Measures
+ *    file "hotness" via access frequency tiers (cold/warm/hot/critical).
+ *    Used for retrieval ranking — hot files surface their observations first.
+ *
+ * These systems are complementary, not competing: EI governs what stays,
+ * pressure governs what surfaces. An observation can have high EI (important,
+ * well-connected) while its files have low pressure (rarely accessed recently),
+ * and vice versa.
+ * ---
  */
 
 import type Database from 'better-sqlite3';
@@ -24,18 +42,18 @@ const log = createLogger('decay-engine');
 const HALF_LIFE_DAYS: Record<number, number> = {
   5: 365,
   4: 90,
-  3: 30,
-  2: 7,
-  1: 3,
+  3: 60,
+  2: 14,
+  1: 7,
 };
 
 /**
  * Maps observation importance (1-5) to base half-life in days.
- * Clamps to known range: < 1 → 3d, > 5 → 365d.
+ * Clamps to known range: < 1 → 7d, > 5 → 365d.
  */
 export function getHalfLife(importance: number): number {
   const clamped = Math.max(1, Math.min(5, Math.round(importance)));
-  return HALF_LIFE_DAYS[clamped] ?? 3;
+  return HALF_LIFE_DAYS[clamped] ?? 7;
 }
 
 // =============================================================================
@@ -76,16 +94,16 @@ export function computeEI(params: EIParams): number {
 // Immunity Check
 // =============================================================================
 
-const NINETY_DAYS_MS = 90 * 86400 * 1000;
+const IMMUNITY_WINDOW_MS = 180 * 86400 * 1000;
 
 /**
  * Returns true if an observation is immune from pruning.
  *
  * Immune when:
  * - importance >= 5 (critical), OR
- * - accessCount >= 3 AND last accessed within 90 days
+ * - accessCount >= 3 AND last accessed within 180 days
  *
- * The 90-day recency guard prevents immortal stale records.
+ * The 180-day recency guard prevents immortal stale records.
  */
 export function isImmune(
   importance: number,
@@ -94,7 +112,7 @@ export function isImmune(
 ): boolean {
   if (importance >= 5) return true;
   if (accessCount >= 3) {
-    if (lastAccessedEpoch !== null && Date.now() - lastAccessedEpoch < NINETY_DAYS_MS) {
+    if (lastAccessedEpoch !== null && Date.now() - lastAccessedEpoch < IMMUNITY_WINDOW_MS) {
       return true;
     }
   }
@@ -114,7 +132,7 @@ interface ObservationForPruning {
 }
 
 const PRUNE_THRESHOLD = 1000;
-const PRUNE_BATCH = 10;
+const PRUNE_BATCH = 50;
 
 /**
  * Soft-delete lowest-EI non-immune observations when count exceeds 1000.
@@ -157,17 +175,62 @@ export function pruneObservations(
 
     const nowMs = Date.now();
 
+    // Pre-compute co-occurrence adjacency via files_modified self-join.
+    // Falls back to coOccurrences=0 on error or if query takes > 100ms.
+    let coOccurrenceMap: Map<number, number> = new Map();
+    try {
+      const coQueryStart = Date.now();
+      const coSql = project
+        ? `SELECT o1.id, COUNT(DISTINCT o2.id) as co_count
+           FROM observations o1
+           JOIN observations o2 ON o1.id != o2.id AND o2.deleted_at_epoch IS NULL AND o2.project = ?
+           WHERE o1.deleted_at_epoch IS NULL AND o1.project = ?
+           AND EXISTS (
+             SELECT 1 FROM json_each(o1.files_modified) fm1
+             JOIN json_each(o2.files_modified) fm2 ON fm1.value = fm2.value
+           )
+           GROUP BY o1.id`
+        : `SELECT o1.id, COUNT(DISTINCT o2.id) as co_count
+           FROM observations o1
+           JOIN observations o2 ON o1.id != o2.id AND o2.deleted_at_epoch IS NULL
+           WHERE o1.deleted_at_epoch IS NULL
+           AND EXISTS (
+             SELECT 1 FROM json_each(o1.files_modified) fm1
+             JOIN json_each(o2.files_modified) fm2 ON fm1.value = fm2.value
+           )
+           GROUP BY o1.id`;
+
+      const coRows = project
+        ? (db.prepare(coSql).all(project, project) as { id: number; co_count: number }[])
+        : (db.prepare(coSql).all() as { id: number; co_count: number }[]);
+
+      const coQueryMs = Date.now() - coQueryStart;
+      if (coQueryMs > 100) {
+        log.warn(`Co-occurrence query took ${coQueryMs}ms (> 100ms threshold) — falling back to coOccurrences=0`);
+        coOccurrenceMap = new Map();
+      } else {
+        for (const r of coRows) {
+          coOccurrenceMap.set(r.id, r.co_count);
+        }
+      }
+    } catch (err) {
+      log.warn('Co-occurrence query failed — falling back to coOccurrences=0:', err);
+      coOccurrenceMap = new Map();
+    }
+
     // Compute EI for each, tag with immunity
     const scored = rows.map(row => {
       const daysSinceAccess = row.last_accessed_at_epoch !== null
         ? (nowMs - row.last_accessed_at_epoch) / 86400000
         : (nowMs - row.timestamp_epoch) / 86400000;
 
+      const coOccurrences = coOccurrenceMap.get(row.id) ?? 0;
+
       const ei = computeEI({
         importance: row.importance,
         accessCount: row.access_count ?? 0,
         daysSinceAccess: Math.max(0, daysSinceAccess),
-        coOccurrences: 0,
+        coOccurrences,
       });
 
       const immune = isImmune(

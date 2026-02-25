@@ -86,6 +86,11 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
     if (typeof config.hooks.latency_budget_ms !== 'number' || config.hooks.latency_budget_ms < 0) {
       config.hooks.latency_budget_ms = defaults.hooks!.latency_budget_ms;
     }
+    if (config.hooks.context_token_budget !== undefined) {
+      if (typeof config.hooks.context_token_budget !== 'number' || config.hooks.context_token_budget < 500 || config.hooks.context_token_budget > 50000) {
+        delete config.hooks.context_token_budget;  // fall back to hardcoded default in hook
+      }
+    }
   }
 
   // Validate observation

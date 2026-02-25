@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { computeEI, getHalfLife, isImmune } from '../../src/lib/decay-engine.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { computeEI, getHalfLife, isImmune, pruneObservations } from '../../src/lib/decay-engine.js';
 
 vi.mock('../../src/shared/logger.js', () => ({
   createLogger: () => ({
@@ -19,16 +20,16 @@ vi.mock('../../src/shared/metrics.js', () => ({
 // =============================================================================
 
 describe('getHalfLife', () => {
-  it('importance 1 → 3 days', () => {
-    expect(getHalfLife(1)).toBe(3);
+  it('importance 1 → 7 days', () => {
+    expect(getHalfLife(1)).toBe(7);
   });
 
-  it('importance 2 → 7 days', () => {
-    expect(getHalfLife(2)).toBe(7);
+  it('importance 2 → 14 days', () => {
+    expect(getHalfLife(2)).toBe(14);
   });
 
-  it('importance 3 → 30 days', () => {
-    expect(getHalfLife(3)).toBe(30);
+  it('importance 3 → 60 days', () => {
+    expect(getHalfLife(3)).toBe(60);
   });
 
   it('importance 4 → 90 days', () => {
@@ -39,8 +40,8 @@ describe('getHalfLife', () => {
     expect(getHalfLife(5)).toBe(365);
   });
 
-  it('clamps below 1 to 3 days', () => {
-    expect(getHalfLife(0)).toBe(3);
+  it('clamps below 1 to 7 days', () => {
+    expect(getHalfLife(0)).toBe(7);
   });
 
   it('clamps above 5 to 365 days', () => {
@@ -71,9 +72,9 @@ describe('computeEI', () => {
     expect(boosted).toBeGreaterThan(base);
   });
 
-  it('decay over time: 30 days scores lower than 0 days', () => {
+  it('decay over time: 60 days scores lower than 0 days', () => {
     const fresh = computeEI({ importance: 3, accessCount: 0, daysSinceAccess: 0, coOccurrences: 0 });
-    const aged = computeEI({ importance: 3, accessCount: 0, daysSinceAccess: 30, coOccurrences: 0 });
+    const aged = computeEI({ importance: 3, accessCount: 0, daysSinceAccess: 60, coOccurrences: 0 });
     expect(aged).toBeLessThan(fresh);
   });
 
@@ -102,8 +103,8 @@ describe('computeEI', () => {
     expect(score).toBeCloseTo(1.0, 5);
   });
 
-  it('at half-life: decayFactor = 0.5 for importance 3 at 30 days, no access boost', () => {
-    const score = computeEI({ importance: 3, accessCount: 0, daysSinceAccess: 30, coOccurrences: 0 });
+  it('at half-life: decayFactor = 0.5 for importance 3 at 60 days, no access boost', () => {
+    const score = computeEI({ importance: 3, accessCount: 0, daysSinceAccess: 60, coOccurrences: 0 });
     // baseWeight=0.6, accessFactor=1, decayFactor=0.5, connectivity=1
     expect(score).toBeCloseTo(0.3, 5);
   });
@@ -114,7 +115,7 @@ describe('computeEI', () => {
 // =============================================================================
 
 describe('isImmune', () => {
-  const NINETY_DAYS_MS = 90 * 86400 * 1000;
+  const IMMUNITY_WINDOW_MS = 180 * 86400 * 1000;
 
   it('critical importance (5) is always immune', () => {
     expect(isImmune(5, 0, null)).toBe(true);
@@ -129,9 +130,19 @@ describe('isImmune', () => {
     expect(isImmune(3, 3, recentEpoch)).toBe(true);
   });
 
-  it('accessCount >= 3 with stale access (> 90 days) is NOT immune', () => {
-    const staleEpoch = Date.now() - 100 * 86400 * 1000; // 100 days ago
+  it('accessCount >= 3 within 180-day window is immune', () => {
+    const withinWindow = Date.now() - 170 * 86400 * 1000; // 170 days ago — within 180d
+    expect(isImmune(3, 3, withinWindow)).toBe(true);
+  });
+
+  it('accessCount >= 3 with stale access (> 180 days) is NOT immune', () => {
+    const staleEpoch = Date.now() - 200 * 86400 * 1000; // 200 days ago
     expect(isImmune(3, 3, staleEpoch)).toBe(false);
+  });
+
+  it('accessCount >= 3 at old 90-day mark is still immune (window is now 180d)', () => {
+    const ninetyOneDaysAgo = Date.now() - 91 * 86400 * 1000;
+    expect(isImmune(3, 3, ninetyOneDaysAgo)).toBe(true);
   });
 
   it('accessCount >= 3 with null last access is NOT immune', () => {
@@ -147,9 +158,210 @@ describe('isImmune', () => {
     expect(isImmune(2, 2, recentEpoch)).toBe(false);
   });
 
-  it('boundary: exactly 90 days ago is NOT immune (must be strictly less than 90d)', () => {
-    const exactlyNinetyDaysAgo = Date.now() - NINETY_DAYS_MS;
-    // Date.now() - epoch = NINETY_DAYS_MS which is NOT < NINETY_DAYS_MS
-    expect(isImmune(3, 3, exactlyNinetyDaysAgo)).toBe(false);
+  it('boundary: exactly 180 days ago is NOT immune (must be strictly less than 180d)', () => {
+    const exactlyAtBoundary = Date.now() - IMMUNITY_WINDOW_MS;
+    // Date.now() - epoch = IMMUNITY_WINDOW_MS which is NOT < IMMUNITY_WINDOW_MS
+    expect(isImmune(3, 3, exactlyAtBoundary)).toBe(false);
+  });
+});
+
+// =============================================================================
+// pruneObservations — integration tests with real SQLite
+// =============================================================================
+
+describe('pruneObservations', () => {
+  let db: Database.Database;
+
+  function createSchema(database: Database.Database): void {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL DEFAULT 'test-session',
+        project TEXT,
+        timestamp TEXT NOT NULL DEFAULT '',
+        timestamp_epoch INTEGER NOT NULL,
+        tool_name TEXT NOT NULL DEFAULT 'test',
+        category TEXT NOT NULL DEFAULT 'decision',
+        title TEXT NOT NULL DEFAULT '',
+        content TEXT,
+        facts TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        importance INTEGER NOT NULL DEFAULT 1,
+        access_count INTEGER NOT NULL DEFAULT 0,
+        last_accessed_at_epoch INTEGER,
+        created_at TEXT,
+        created_at_epoch INTEGER,
+        deleted_at_epoch INTEGER
+      )
+    `);
+  }
+
+  function insertObs(
+    database: Database.Database,
+    overrides: Partial<{
+      importance: number;
+      access_count: number;
+      last_accessed_at_epoch: number | null;
+      timestamp_epoch: number;
+      files_modified: string | null;
+      files_read: string | null;
+      deleted_at_epoch: number | null;
+      project: string | null;
+    }> = {},
+  ): number {
+    const now = Date.now();
+    const result = database.prepare(`
+      INSERT INTO observations (
+        timestamp_epoch, importance, access_count, last_accessed_at_epoch,
+        files_modified, files_read, deleted_at_epoch, project
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      overrides.timestamp_epoch ?? now,
+      overrides.importance ?? 1,
+      overrides.access_count ?? 0,
+      overrides.last_accessed_at_epoch ?? null,
+      overrides.files_modified ?? null,
+      overrides.files_read ?? null,
+      overrides.deleted_at_epoch ?? null,
+      overrides.project ?? null,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    createSchema(db);
+  });
+
+  it('does not prune when below threshold (1000)', () => {
+    // Insert 500 observations — well below threshold
+    for (let i = 0; i < 500; i++) {
+      insertObs(db);
+    }
+    const result = pruneObservations(db);
+    expect(result.pruned).toBe(0);
+    expect(result.remaining).toBe(500);
+  });
+
+  it('prunes up to 50 lowest-EI observations when above threshold', () => {
+    const now = Date.now();
+    // Insert 1010 low-importance observations
+    for (let i = 0; i < 1010; i++) {
+      insertObs(db, {
+        importance: 1,
+        timestamp_epoch: now - 30 * 86400000, // 30 days old
+      });
+    }
+    const result = pruneObservations(db);
+    expect(result.pruned).toBe(50);
+    expect(result.remaining).toBe(960);
+  });
+
+  it('does not prune immune observations (importance 5)', () => {
+    const now = Date.now();
+    // Insert 1010 critical observations — all immune
+    for (let i = 0; i < 1010; i++) {
+      insertObs(db, { importance: 5, timestamp_epoch: now });
+    }
+    const result = pruneObservations(db);
+    expect(result.pruned).toBe(0);
+    expect(result.remaining).toBe(1010);
+  });
+
+  it('does not prune immune observations (high access + recent)', () => {
+    const now = Date.now();
+    // Insert 1010 frequently-accessed recent observations
+    for (let i = 0; i < 1010; i++) {
+      insertObs(db, {
+        importance: 3,
+        access_count: 5,
+        last_accessed_at_epoch: now - 10 * 86400000, // 10 days ago
+        timestamp_epoch: now,
+      });
+    }
+    const result = pruneObservations(db);
+    expect(result.pruned).toBe(0);
+    expect(result.remaining).toBe(1010);
+  });
+
+  it('co-occurrence self-join query returns correct counts for shared files', () => {
+    // Test the co-occurrence SQL logic directly: observations sharing
+    // files_modified should be counted as co-occurring.
+    const now = Date.now();
+    const sharedFile = JSON.stringify(['/src/shared.ts']);
+    const otherFile = JSON.stringify(['/src/other.ts']);
+
+    // 3 observations share /src/shared.ts
+    insertObs(db, { importance: 3, timestamp_epoch: now, files_modified: sharedFile });
+    insertObs(db, { importance: 3, timestamp_epoch: now, files_modified: sharedFile });
+    insertObs(db, { importance: 3, timestamp_epoch: now, files_modified: sharedFile });
+    // 1 observation has a different file
+    insertObs(db, { importance: 3, timestamp_epoch: now, files_modified: otherFile });
+    // 1 observation has no files
+    insertObs(db, { importance: 3, timestamp_epoch: now, files_modified: null });
+
+    const coRows = db.prepare(`
+      SELECT o1.id, COUNT(DISTINCT o2.id) as co_count
+      FROM observations o1
+      JOIN observations o2 ON o1.id != o2.id AND o2.deleted_at_epoch IS NULL
+      WHERE o1.deleted_at_epoch IS NULL
+      AND EXISTS (
+        SELECT 1 FROM json_each(o1.files_modified) fm1
+        JOIN json_each(o2.files_modified) fm2 ON fm1.value = fm2.value
+      )
+      GROUP BY o1.id
+    `).all() as { id: number; co_count: number }[];
+
+    // Only the 3 shared-file observations should appear, each with co_count=2
+    expect(coRows.length).toBe(3);
+    for (const row of coRows) {
+      expect(row.co_count).toBe(2);
+    }
+  });
+
+  it('co-occurrence falls back gracefully when files_modified is NULL', () => {
+    const now = Date.now();
+    // Insert 1010 observations with no files_modified — co-occurrence query
+    // should still work (those rows simply won't appear in the self-join)
+    for (let i = 0; i < 1010; i++) {
+      insertObs(db, {
+        importance: 1,
+        timestamp_epoch: now - 30 * 86400000,
+        files_modified: null,
+      });
+    }
+    const result = pruneObservations(db);
+    expect(result.pruned).toBe(50);
+    expect(result.remaining).toBe(960);
+  });
+
+  it('returns safe default on DB error', () => {
+    // Close the database to force an error
+    db.close();
+    const result = pruneObservations(db);
+    expect(result.pruned).toBe(0);
+    expect(result.remaining).toBe(0);
+  });
+
+  it('respects project filter', () => {
+    const now = Date.now();
+    // Insert 600 for project-a and 600 for project-b
+    for (let i = 0; i < 600; i++) {
+      insertObs(db, { importance: 1, timestamp_epoch: now - 30 * 86400000, project: 'project-a' });
+    }
+    for (let i = 0; i < 600; i++) {
+      insertObs(db, { importance: 1, timestamp_epoch: now - 30 * 86400000, project: 'project-b' });
+    }
+
+    // Each project has 600 < 1000 threshold — no pruning per-project
+    const resultA = pruneObservations(db, 'project-a');
+    expect(resultA.pruned).toBe(0);
+    expect(resultA.remaining).toBe(600);
+
+    // Without project filter: 1200 > 1000 — should prune
+    const resultAll = pruneObservations(db);
+    expect(resultAll.pruned).toBe(50);
+    expect(resultAll.remaining).toBe(1150);
   });
 });

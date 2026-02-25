@@ -349,6 +349,38 @@ export function assembleContext(
       tryAppend(builder(sources.hologram!.warm), 'hologram');
     }
 
+    // 9.5. Search result reservation: ensure FTS5 results get at least a ref slot
+    // If search was skipped due to budget but search results exist, trim the
+    // lowest-priority added section to make room for a compact search reference.
+    if (hasSearch && !contributedSources.includes('fts5')) {
+      const SEARCH_RESERVE = 500;
+      const searchRef = buildSearchSectionRef(sources.searchResults);
+      const searchRefTokens = estimateTokens(searchRef + '\n');
+
+      if (searchRefTokens <= SEARCH_RESERVE) {
+        // Try to trim lowest-priority sections (reverse priority) to free space
+        // Use prefix matching to handle both full and ref variants (e.g., "## Warm Context" and "## Warm Context (refs)")
+        const trimmablePrefixes = ['## Warm Context', '## Session Continuity', '## Consensus Decisions', '## Recent Activity'];
+        for (const prefix of trimmablePrefixes) {
+          const idx = assembled.indexOf(prefix);
+          if (idx === -1) continue;
+
+          // Find the end of this section (next ## header or end of string)
+          const nextHeader = assembled.indexOf('\n## ', idx + 1);
+          const sectionEnd = nextHeader === -1 ? assembled.length : nextHeader;
+          const trimmed = assembled.slice(0, idx) + assembled.slice(sectionEnd);
+
+          if (estimateTokens(trimmed + searchRef + '\n') <= config.maxTokens) {
+            assembled = trimmed + searchRef + '\n';
+            if (!contributedSources.includes('fts5')) {
+              contributedSources.push('fts5');
+            }
+            break;
+          }
+        }
+      }
+    }
+
     // If only the header was added (nothing fit), return empty
     if (assembled === header) {
       return { markdown: '', tokenEstimate: 0, sources: [] };

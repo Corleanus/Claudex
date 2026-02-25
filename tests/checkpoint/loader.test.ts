@@ -578,3 +578,42 @@ describe('default options', () => {
     expect(result!.loadedSections).not.toContain('decisions');
   });
 });
+
+// =============================================================================
+// Backward compatibility: version 1 checkpoints load with version 2 code
+// =============================================================================
+
+describe('backward compatibility', () => {
+  it('loads a version-1 checkpoint without new enrichment fields', () => {
+    // Simulate a v1 checkpoint (no pressure_snapshot, recent_observations, boost_state)
+    const v1Cp = makeCheckpoint() as Record<string, unknown>;
+    v1Cp.version = 1;
+    delete v1Cp.pressure_snapshot;
+    delete v1Cp.recent_observations;
+    delete v1Cp.boost_state;
+
+    writeCheckpointFile(tmpDir, '2026-02-24_cp1.yaml', v1Cp as Checkpoint);
+    writeLatestRef(tmpDir, '2026-02-24_cp1.yaml');
+
+    const result = loadLatestCheckpoint(tmpDir, { sections: [], resumeMode: true });
+
+    expect(result).not.toBeNull();
+    expect(result!.checkpoint.meta.checkpoint_id).toBe('2026-02-24_cp1');
+    // New fields are undefined (optional) -- that's fine
+    expect(result!.checkpoint.pressure_snapshot).toBeUndefined();
+    expect(result!.checkpoint.recent_observations).toBeUndefined();
+    expect(result!.checkpoint.boost_state).toBeUndefined();
+  });
+
+  it('rejects a checkpoint with version higher than current', () => {
+    const futureCp = makeCheckpoint() as Record<string, unknown>;
+    futureCp.version = 999;
+
+    writeCheckpointFile(tmpDir, '2026-02-24_cp1.yaml', futureCp as Checkpoint);
+    writeLatestRef(tmpDir, '2026-02-24_cp1.yaml');
+
+    const result = loadLatestCheckpoint(tmpDir, { sections: [], resumeMode: false });
+
+    expect(result).toBeNull();
+  });
+});

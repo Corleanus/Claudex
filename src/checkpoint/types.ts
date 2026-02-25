@@ -13,7 +13,7 @@
 // =============================================================================
 
 export const CHECKPOINT_SCHEMA = 'claudex/checkpoint' as const;
-export const CHECKPOINT_VERSION = 1 as const;
+export const CHECKPOINT_VERSION = 2 as const;
 
 // =============================================================================
 // Checkpoint Metadata
@@ -119,6 +119,9 @@ export interface Checkpoint {
   open_questions: string[];
   learnings: string[];
   thread: ThreadState;
+  pressure_snapshot?: { hot: string[]; warm: string[] };
+  recent_observations?: Array<{ title: string; category: string; timestamp_epoch: number }>;
+  boost_state?: { files: string[]; turn: number; applied_at: number } | null;
 }
 
 // =============================================================================

@@ -331,6 +331,7 @@ export interface ClaudexConfig {
   };
   hooks?: {
     latency_budget_ms: number;
+    context_token_budget?: number;
   };
   observation?: {
     enabled: boolean;
@@ -369,6 +370,7 @@ export const DEFAULT_CONFIG: ClaudexConfig = {
   },
   hooks: {
     latency_budget_ms: 3000,
+    context_token_budget: 4000,
   },
   observation: {
     enabled: true,

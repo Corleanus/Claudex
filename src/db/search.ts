@@ -205,6 +205,8 @@ export function searchObservations(
     limit?: number;
     category?: ObservationCategory;
     minImportance?: number;
+    mode?: 'AND' | 'OR';
+    prefix?: boolean;
   },
 ): SearchResult[] {
   const searchStart = Date.now();
@@ -224,7 +226,7 @@ export function searchObservations(
              o.tool_name, o.category, o.title, o.content,
              o.facts, o.files_read, o.files_modified, o.importance,
              fts.rank,
-             snippet(observations_fts, 1, '<b>', '</b>', '...', 32) AS snippet
+             snippet(observations_fts, 1, '<b>', '</b>', '...', 64) AS snippet
       FROM observations_fts fts
       JOIN observations o ON o.id = fts.rowid
       WHERE observations_fts MATCH ?
@@ -236,7 +238,7 @@ export function searchObservations(
       LIMIT ?
     `;
 
-    const normalizedQuery = normalizeFts5Query(trimmed);
+    const normalizedQuery = normalizeFts5Query(trimmed, { mode: options?.mode, prefix: options?.prefix });
     const rows = db.prepare(sql).all(
       normalizedQuery,
       project, project,
@@ -308,7 +310,7 @@ function reasoningRowToSearchResult(row: ReasoningSearchRow): SearchResult {
 export function searchReasoning(
   db: Database.Database,
   query: string,
-  options?: { project?: string; limit?: number },
+  options?: { project?: string; limit?: number; mode?: 'AND' | 'OR'; prefix?: boolean },
 ): SearchResult[] {
   const searchStart = Date.now();
   try {
@@ -325,7 +327,7 @@ export function searchReasoning(
              r.trigger, r.title, r.reasoning, r.decisions, r.files_involved,
              r.importance, r.created_at, r.created_at_epoch,
              fts.rank,
-             snippet(reasoning_fts, 1, '<b>', '</b>', '...', 32) AS snippet
+             snippet(reasoning_fts, 1, '<b>', '</b>', '...', 64) AS snippet
       FROM reasoning_fts fts
       JOIN reasoning_chains r ON r.id = fts.rowid
       WHERE reasoning_fts MATCH ?
@@ -334,7 +336,7 @@ export function searchReasoning(
       LIMIT ?
     `;
 
-    const normalizedQuery = normalizeFts5Query(trimmed);
+    const normalizedQuery = normalizeFts5Query(trimmed, { mode: options?.mode, prefix: options?.prefix });
     const rows = db.prepare(sql).all(
       normalizedQuery,
       project, project,
@@ -402,7 +404,7 @@ function consensusRowToSearchResult(row: ConsensusSearchRow): SearchResult {
 export function searchConsensus(
   db: Database.Database,
   query: string,
-  options?: { project?: string; limit?: number },
+  options?: { project?: string; limit?: number; mode?: 'AND' | 'OR'; prefix?: boolean },
 ): SearchResult[] {
   const searchStart = Date.now();
   try {
@@ -420,7 +422,7 @@ export function searchConsensus(
              c.human_verdict, c.status, c.tags, c.files_affected,
              c.importance, c.created_at, c.created_at_epoch,
              fts.rank,
-             snippet(consensus_fts, 1, '<b>', '</b>', '...', 32) AS snippet
+             snippet(consensus_fts, 1, '<b>', '</b>', '...', 64) AS snippet
       FROM consensus_fts fts
       JOIN consensus_decisions c ON c.id = fts.rowid
       WHERE consensus_fts MATCH ?
@@ -429,7 +431,7 @@ export function searchConsensus(
       LIMIT ?
     `;
 
-    const normalizedQuery = normalizeFts5Query(trimmed);
+    const normalizedQuery = normalizeFts5Query(trimmed, { mode: options?.mode, prefix: options?.prefix });
     const rows = db.prepare(sql).all(
       normalizedQuery,
       project, project,
@@ -458,7 +460,7 @@ export function searchConsensus(
 export function searchAll(
   db: Database.Database,
   query: string,
-  options?: { project?: string; limit?: number },
+  options?: { project?: string; limit?: number; mode?: 'AND' | 'OR'; prefix?: boolean },
 ): SearchResult[] {
   const searchStart = Date.now();
   try {
@@ -469,9 +471,10 @@ export function searchAll(
 
     const limit = options?.limit ?? 10;
 
-    const obsResults = searchObservations(db, trimmed, { project: options?.project, limit });
-    const reasoningResults = searchReasoning(db, trimmed, { project: options?.project, limit });
-    const consensusResults = searchConsensus(db, trimmed, { project: options?.project, limit });
+    const prefix = options?.prefix;
+    const obsResults = searchObservations(db, trimmed, { project: options?.project, limit, mode: options?.mode, prefix });
+    const reasoningResults = searchReasoning(db, trimmed, { project: options?.project, limit, mode: options?.mode, prefix });
+    const consensusResults = searchConsensus(db, trimmed, { project: options?.project, limit, mode: options?.mode, prefix });
 
     // Merge all results and sort by rank (BM25 — lower/more negative = more relevant)
     const merged = [...obsResults, ...reasoningResults, ...consensusResults];

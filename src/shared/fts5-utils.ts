@@ -22,13 +22,58 @@
  * Strip parentheses to avoid syntax errors. Preserve quotes, asterisk, colon for
  * power users who know FTS5 syntax.
  *
+ * Options:
+ * - mode 'AND' (default): implicit AND between terms (FTS5 default behavior)
+ * - mode 'OR': join terms with OR keyword for broader matching
+ * - prefix: when true, appends * to terms shorter than 6 characters for prefix matching
+ *
  * @param query - Raw user query string
+ * @param options - Optional mode and prefix settings
  * @returns Normalized query safe for FTS5 MATCH
  */
-export function normalizeFts5Query(query: string): string {
-  return query
+export function normalizeFts5Query(
+  query: string,
+  options?: { mode?: 'AND' | 'OR'; prefix?: boolean },
+): string {
+  const sanitized = query
     .replace(/-/g, ' ')       // Replace hyphens with spaces
     .replace(/[()]/g, '')     // Strip parentheses
     .replace(/\s+/g, ' ')     // Collapse multiple spaces
     .trim();
+
+  if (!sanitized) return '';
+
+  const mode = options?.mode ?? 'AND';
+  const usePrefix = options?.prefix ?? false;
+
+  // Split into tokens, preserving quoted phrases and existing operators
+  const tokens = sanitized.split(' ').filter(Boolean);
+  const FTS5_OPERATORS = new Set(['AND', 'OR', 'NOT', 'NEAR']);
+
+  const processed = tokens.map(token => {
+    // Don't modify FTS5 operators, quoted phrases, or tokens with explicit wildcards/column filters
+    if (FTS5_OPERATORS.has(token) || token.startsWith('"') || token.endsWith('*') || token.includes(':')) {
+      return token;
+    }
+    // Append prefix wildcard to short terms
+    if (usePrefix && token.length < 6) {
+      return token + '*';
+    }
+    return token;
+  });
+
+  // Join with OR if mode is OR, otherwise space (implicit AND)
+  // Only insert OR between non-operator tokens — preserve existing operators as-is
+  if (mode === 'OR') {
+    const parts: string[] = [];
+    for (let i = 0; i < processed.length; i++) {
+      parts.push(processed[i]);
+      // Insert OR joiner only between two non-operator tokens
+      if (i < processed.length - 1 && !FTS5_OPERATORS.has(processed[i]) && !FTS5_OPERATORS.has(processed[i + 1])) {
+        parts.push('OR');
+      }
+    }
+    return parts.join(' ');
+  }
+  return processed.join(' ');
 }

@@ -26,6 +26,7 @@ import {
 } from './state-files.js';
 import type { GaugeReading } from '../lib/token-gauge.js';
 import type { GsdState } from '../gsd/types.js';
+import type Database from 'better-sqlite3';
 import type {
   Checkpoint,
   CheckpointMeta,
@@ -33,6 +34,9 @@ import type {
   WorkingState,
 } from './types.js';
 import { CHECKPOINT_SCHEMA, CHECKPOINT_VERSION } from './types.js';
+import { getHotFiles, getWarmFiles } from '../db/pressure.js';
+import { getRecentObservations } from '../db/observations.js';
+import { getCheckpointState } from '../db/checkpoint.js';
 
 const log = createLogger('checkpoint-writer');
 
@@ -56,6 +60,7 @@ export interface WriteCheckpointInput {
   workingTask?: string;
   nextAction?: string;
   branch?: string;
+  db?: Database.Database;               // Optional DB handle for enrichment (pressure, observations, boost)
 }
 
 export interface WriteCheckpointResult {
@@ -257,6 +262,51 @@ export function writeCheckpoint(input: WriteCheckpointInput): WriteCheckpointRes
     // Build GSD checkpoint state
     const gsd = buildGsdCheckpointState(input.gsdState);
 
+    // Build enrichment data from DB (if available)
+    let pressureSnapshot: { hot: string[]; warm: string[] } = { hot: [], warm: [] };
+    let recentObs: Array<{ title: string; category: string; timestamp_epoch: number }> = [];
+    let boostState: { files: string[]; turn: number; applied_at: number } | null = null;
+
+    if (input.db) {
+      // Derive project name from scope for filtered queries
+      const projectFilter = input.scope.startsWith('project:') ? input.scope.slice('project:'.length) : undefined;
+
+      try {
+        const hotFiles = getHotFiles(input.db, projectFilter);
+        const warmFiles = getWarmFiles(input.db, projectFilter);
+        pressureSnapshot = {
+          hot: hotFiles.map(f => f.file_path),
+          warm: warmFiles.map(f => f.file_path),
+        };
+      } catch (e) {
+        log.warn('Failed to read pressure snapshot', e);
+      }
+
+      try {
+        const observations = getRecentObservations(input.db, 8, projectFilter);
+        recentObs = observations.map(o => ({
+          title: o.title,
+          category: o.category,
+          timestamp_epoch: o.timestamp_epoch,
+        }));
+      } catch (e) {
+        log.warn('Failed to read recent observations', e);
+      }
+
+      try {
+        const cpState = getCheckpointState(input.db, input.sessionId);
+        if (cpState?.boost_applied_at != null && cpState.boost_turn_count != null) {
+          boostState = {
+            files: cpState.active_files,
+            turn: cpState.boost_turn_count,
+            applied_at: cpState.boost_applied_at,
+          };
+        }
+      } catch (e) {
+        log.warn('Failed to read boost state', e);
+      }
+    }
+
     // Build the full checkpoint
     const now = new Date();
     const checkpoint: Checkpoint = {
@@ -281,6 +331,9 @@ export function writeCheckpoint(input: WriteCheckpointInput): WriteCheckpointRes
       open_questions: questions,
       learnings: [],
       thread,
+      pressure_snapshot: pressureSnapshot,
+      recent_observations: recentObs,
+      boost_state: boostState,
     };
 
     // Serialize to YAML

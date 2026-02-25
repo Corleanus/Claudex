@@ -230,6 +230,7 @@ describe('loadConfig', () => {
       },
       hooks: {
         latency_budget_ms: 5000,
+        context_token_budget: 4000,
       },
       observation: {
         enabled: false,

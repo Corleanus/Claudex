@@ -32,7 +32,7 @@ import type { Decision } from '../checkpoint/types.js';
 
 const HOOK_NAME = 'user-prompt-submit';
 const SHORT_PROMPT_THRESHOLD = 10;
-const CONTEXT_TOKEN_BUDGET = 4000;
+const DEFAULT_CONTEXT_TOKEN_BUDGET = 4000;
 
 // =============================================================================
 // Subsystem queries (each independently try/caught)
@@ -108,7 +108,7 @@ function extractRecentFiles(observations: Observation[]): string[] {
  * Extract simple keywords from a prompt for FTS5 search.
  * Filters out short words and common stop words.
  */
-function extractKeywords(prompt: string): string {
+export function extractKeywords(prompt: string): string {
   const stopWords = new Set([
     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
     'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
@@ -119,16 +119,20 @@ function extractKeywords(prompt: string): string {
     'all', 'each', 'every', 'any', 'no', 'some', 'just', 'also',
     'me', 'my', 'we', 'our', 'you', 'your', 'they', 'them', 'their',
     'please', 'thanks', 'thank',
+    // Technical stop words — noise in a code-centric memory system
+    'file', 'code', 'function', 'const', 'let', 'var', 'import', 'export',
+    'return', 'true', 'false', 'null', 'undefined', 'new', 'class', 'type',
+    'interface',
   ]);
 
   const words = prompt
     .toLowerCase()
     .replace(/[^a-z0-9\s_-]/g, ' ')
     .split(/\s+/)
-    .filter(w => w.length >= 3 && !stopWords.has(w));
+    .filter(w => w.length >= 2 && !stopWords.has(w));
 
-  // Deduplicate and take top 5 keywords
-  const unique = [...new Set(words)].slice(0, 5);
+  // Deduplicate and take top 8 keywords (more = better recall with OR-expansion)
+  const unique = [...new Set(words)].slice(0, 8);
   const keywords = unique.join(' ');
 
   // Normalize for FTS5 (strips hyphens and other special chars)
@@ -136,7 +140,9 @@ function extractKeywords(prompt: string): string {
 }
 
 /**
- * Query FTS5 search for observations matching prompt keywords.
+ * Query FTS5 search across all tables (observations, reasoning, consensus).
+ * Uses strict-then-relax strategy: AND first, OR fallback if < 2 results.
+ * Applies temporal re-ranking to boost recent results.
  * Returns empty array if database is unavailable or query fails.
  *
  * @param db - Shared database handle (caller manages lifecycle)
@@ -154,14 +160,58 @@ function queryFts5(promptText: string, scope: Scope, db: import('better-sqlite3'
       return [];
     }
 
-    const { searchObservations } = require('../db/search.js') as typeof import('../db/search.js');
+    const { searchAll } = require('../db/search.js') as typeof import('../db/search.js');
 
     const project = scope.type === 'project' ? scope.name : undefined;
-    const results = searchObservations(db, keywords, {
+
+    // Strict-then-relax: try AND first, fall back to OR if < 2 results
+    let results = searchAll(db, keywords, {
       project,
-      limit: 5,
-      minImportance: 2,
+      limit: 8,
+      prefix: true,
     });
+
+    if (results.length < 2) {
+      const andCount = results.length;
+      const orResults = searchAll(db, keywords, {
+        project,
+        limit: 8,
+        mode: 'OR',
+        prefix: true,
+      });
+      if (orResults.length > andCount) {
+        results = orResults;
+        logToFile(HOOK_NAME, 'DEBUG', `FTS5 OR fallback: ${orResults.length} results (AND had ${andCount})`);
+      }
+    }
+
+    // Temporal re-ranking: blend BM25 relevance with recency
+    if (results.length > 0) {
+      const now = Date.now();
+      // FTS5 rank is negative (more negative = better match)
+      // Find the "best" (most negative) rank to normalize against
+      const minRank = Math.min(...results.map(r => r.rank));
+      const maxRank = Math.max(...results.map(r => r.rank));
+      const rankRange = maxRank - minRank;
+
+      const scored = results.map(r => {
+        // Normalize BM25: 0 = worst match, 1 = best match
+        // rank is negative, so minRank is the best. Map minRank→1, maxRank→0
+        const normalizedBM25 = rankRange === 0 ? 1 : (maxRank - r.rank) / rankRange;
+
+        // Recency score: 1/(1 + daysSinceCreation)
+        const epochMs = r.observation.timestamp_epoch;
+        const daysSince = Math.max(0, (now - epochMs) / (1000 * 60 * 60 * 24));
+        const recencyScore = 1 / (1 + daysSince);
+
+        const finalScore = 0.7 * normalizedBM25 + 0.3 * recencyScore;
+        return { result: r, finalScore };
+      });
+
+      scored.sort((a, b) => b.finalScore - a.finalScore);
+      results = scored.map(s => s.result);
+    }
+
     logToFile(HOOK_NAME, 'DEBUG', `FTS5 search returned ${results.length} results for "${keywords}"`);
     return results;
   } catch (err) {
@@ -186,7 +236,7 @@ function getRecent(scope: Scope, db: import('better-sqlite3').Database | null): 
     const { getRecentObservations } = require('../db/observations.js') as typeof import('../db/observations.js');
 
     const project = scope.type === 'project' ? scope.name : undefined;
-    const recent = getRecentObservations(db, 5, project);
+    const recent = getRecentObservations(db, 8, project);
     logToFile(HOOK_NAME, 'DEBUG', `Got ${recent.length} recent observations`);
     return recent;
   } catch (err) {
@@ -214,6 +264,10 @@ runHook(HOOK_NAME, async (input) => {
   // 2. Detect scope (needed before short-prompt gate for thread accumulation)
   const scope = detectScope(cwd);
   logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
+
+  // 2.0. Resolve configurable token budget
+  const config = loadConfig();
+  const CONTEXT_TOKEN_BUDGET = config.hooks?.context_token_budget ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
 
   // 2.1. Thread accumulation — capture user message gist + detect approvals
   // Runs BEFORE short-prompt gate so "yes"/"ok" approvals are captured
@@ -368,8 +422,8 @@ runHook(HOOK_NAME, async (input) => {
     const recentFiles = extractRecentFiles(recentObservations);
     const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope, db, boostFiles);
 
-    // 6.1. Commit boost turn only after real sidecar success (not fallback sources)
-    if (hologramResult?.source === 'hologram' && boostFiles && db) {
+    // 6.1. Commit boost turn when hologram returned any result (including fallback sources)
+    if (hologramResult !== null && boostFiles && db) {
       try {
         const { updateBoostState } = await import('../db/checkpoint.js');
         updateBoostState(db, sessionId, boostAppliedAt, boostNewCount);
@@ -557,6 +611,7 @@ runHook(HOOK_NAME, async (input) => {
             trigger: 'auto-75pct',
             gaugeReading: gauge,
             gsdState,
+            db,
           });
           if (result) {
             logToFile(HOOK_NAME, 'INFO', `Checkpoint written: ${result.checkpointId} at ${(gauge.utilization * 100).toFixed(0)}%`);

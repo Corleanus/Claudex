@@ -14,7 +14,9 @@ import {
   readNudgeState,
   writeNudgeState,
   detectDecisionSignals,
+  extractAssistantGist,
 } from '../../src/hooks/stop.js';
+import type { TranscriptSignals } from '../../src/hooks/stop.js';
 
 // Mock logger and metrics to prevent filesystem writes
 vi.mock('../../src/shared/logger.js', () => ({
@@ -41,7 +43,7 @@ function makeTempDir(): string {
 }
 
 /** Build a minimal JSONL transcript with tool_use blocks in message.content */
-function buildTranscript(tools: Array<{ name: string }>): string {
+function buildTranscript(tools: Array<{ name: string; input?: Record<string, unknown> }>): string {
   const entry = {
     type: 'message',
     message: {
@@ -50,7 +52,7 @@ function buildTranscript(tools: Array<{ name: string }>): string {
         type: 'tool_use',
         id: `tool_${Math.random()}`,
         name: t.name,
-        input: {},
+        input: t.input ?? {},
       })),
       usage: { input_tokens: 10000, output_tokens: 500 },
     },
@@ -178,36 +180,43 @@ describe('detectDecisionSignals', () => {
     vi.restoreAllMocks();
   });
 
-  it('returns fileModifyCount=0 when transcriptPath is undefined', () => {
+  it('returns fileModifyCount=0 and empty toolActions when transcriptPath is undefined', () => {
     const signals = detectDecisionSignals(undefined);
     expect(signals.fileModifyCount).toBe(0);
+    expect(signals.toolActions).toEqual([]);
   });
 
-  it('returns fileModifyCount=0 when transcript file does not exist', () => {
+  it('returns fileModifyCount=0 and empty toolActions when transcript file does not exist', () => {
     const signals = detectDecisionSignals(path.join(tmpDir, 'nonexistent.jsonl'));
     expect(signals.fileModifyCount).toBe(0);
+    expect(signals.toolActions).toEqual([]);
   });
 
-  it('returns fileModifyCount=0 when transcript has no file-modifying tools', () => {
+  it('returns fileModifyCount=0 but captures toolActions for non-modifying tools', () => {
     const content = buildTranscript([
-      { name: 'Read' },
+      { name: 'Read', input: { file_path: '/src/main.ts' } },
       { name: 'Grep' },
       { name: 'Glob' },
     ]);
     const transcriptPath = writeTempTranscript(content, tmpDir);
     const signals = detectDecisionSignals(transcriptPath);
     expect(signals.fileModifyCount).toBe(0);
+    expect(signals.toolActions).toHaveLength(3);
+    expect(signals.toolActions[0]).toEqual({ name: 'Read', target: '/src/main.ts' });
   });
 
-  it('counts Write, Edit, Bash tool_use blocks', () => {
+  it('counts Write, Edit, Bash tool_use blocks and captures toolActions', () => {
     const content = buildTranscript([
-      { name: 'Write' },
-      { name: 'Edit' },
-      { name: 'Bash' },
+      { name: 'Write', input: { file_path: '/src/new-file.ts' } },
+      { name: 'Edit', input: { file_path: '/src/old-file.ts' } },
+      { name: 'Bash', input: { command: 'pnpm test' } },
     ]);
     const transcriptPath = writeTempTranscript(content, tmpDir);
     const signals = detectDecisionSignals(transcriptPath);
     expect(signals.fileModifyCount).toBe(3);
+    expect(signals.toolActions).toHaveLength(3);
+    expect(signals.toolActions[0]).toEqual({ name: 'Write', target: '/src/new-file.ts' });
+    expect(signals.toolActions[2]).toEqual({ name: 'Bash', target: 'pnpm test' });
   });
 
   it('counts 3 Write calls correctly', () => {
@@ -407,5 +416,177 @@ describe('stop hook edge cases', () => {
     const rateLimited = false;
     const shouldNudge = fileModifyCount >= 2 && noNewDecisions && !rateLimited;
     expect(shouldNudge).toBe(true);
+  });
+});
+
+// =============================================================================
+// Tests: extractAssistantGist
+// =============================================================================
+
+describe('extractAssistantGist', () => {
+  it('returns fallback gist when no tool actions', () => {
+    const signals: TranscriptSignals = { fileModifyCount: 0, toolActions: [] };
+    expect(extractAssistantGist(signals)).toBe('Responded to user query');
+  });
+
+  it('produces "Edited <file>" for a single Edit action', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 1,
+      toolActions: [{ name: 'Edit', target: '/src/hooks/stop.ts' }],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toContain('Edited');
+    expect(gist).toContain('stop.ts');
+  });
+
+  it('produces "Created <file>" for a single Write action', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 1,
+      toolActions: [{ name: 'Write', target: '/tests/new-test.ts' }],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toContain('Created');
+    expect(gist).toContain('new-test.ts');
+  });
+
+  it('produces "Read N files" for multiple Read actions', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 0,
+      toolActions: [
+        { name: 'Read', target: '/src/a.ts' },
+        { name: 'Read', target: '/src/b.ts' },
+        { name: 'Read', target: '/src/c.ts' },
+      ],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toBe('Read 3 files');
+  });
+
+  it('produces "Read 1 file" for a single Read action', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 0,
+      toolActions: [{ name: 'Read', target: '/src/a.ts' }],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toBe('Read 1 file');
+  });
+
+  it('detects test runs in Bash commands', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 1,
+      toolActions: [{ name: 'Bash', target: 'pnpm test' }],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toContain('Ran tests');
+  });
+
+  it('produces "Ran N commands" for non-test Bash commands', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 2,
+      toolActions: [
+        { name: 'Bash', target: 'git status' },
+        { name: 'Bash', target: 'git diff' },
+      ],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toContain('Ran 2 commands');
+  });
+
+  it('combines multiple action types with semicolons', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 1,
+      toolActions: [
+        { name: 'Read', target: '/src/a.ts' },
+        { name: 'Edit', target: '/src/a.ts' },
+        { name: 'Bash', target: 'pnpm test' },
+      ],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toContain('Edited');
+    expect(gist).toContain(';');
+    expect(gist).toContain('Read 1 file');
+    expect(gist).toContain('Ran tests');
+  });
+
+  it('deduplicates edited file names', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 3,
+      toolActions: [
+        { name: 'Edit', target: '/src/hooks/stop.ts' },
+        { name: 'Edit', target: '/src/hooks/stop.ts' },
+        { name: 'Edit', target: '/src/hooks/stop.ts' },
+      ],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toBe('Edited stop.ts');
+  });
+
+  it('caps gist length at 100 characters', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 5,
+      toolActions: [
+        { name: 'Edit', target: '/src/very-long-filename-one.ts' },
+        { name: 'Edit', target: '/src/very-long-filename-two.ts' },
+        { name: 'Edit', target: '/src/very-long-filename-three.ts' },
+        { name: 'Edit', target: '/src/very-long-filename-four.ts' },
+        { name: 'Write', target: '/src/very-long-filename-five.ts' },
+        { name: 'Read', target: '/src/a.ts' },
+        { name: 'Read', target: '/src/b.ts' },
+        { name: 'Bash', target: 'pnpm build && pnpm test' },
+      ],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist.length).toBeLessThanOrEqual(100);
+  });
+
+  it('handles tool actions with no target (undefined)', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 1,
+      toolActions: [{ name: 'Edit' }],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toBe('Edited file');
+  });
+
+  it('handles unknown/other tool names', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 0,
+      toolActions: [
+        { name: 'WebSearch' },
+        { name: 'Glob' },
+      ],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toContain('Used');
+    expect(gist).toContain('WebSearch');
+  });
+
+  it('shows "+N more" when many files are edited', () => {
+    const signals: TranscriptSignals = {
+      fileModifyCount: 5,
+      toolActions: [
+        { name: 'Edit', target: '/src/a.ts' },
+        { name: 'Edit', target: '/src/b.ts' },
+        { name: 'Edit', target: '/src/c.ts' },
+        { name: 'Edit', target: '/src/d.ts' },
+        { name: 'Edit', target: '/src/e.ts' },
+      ],
+    };
+    const gist = extractAssistantGist(signals);
+    expect(gist).toContain('+2 more');
+  });
+
+  it('exchange format matches ThreadState expectations (role: agent)', () => {
+    // Verify the gist can be used in an exchange with role: 'agent'
+    const signals: TranscriptSignals = {
+      fileModifyCount: 1,
+      toolActions: [{ name: 'Edit', target: '/src/hooks/stop.ts' }],
+    };
+    const gist = extractAssistantGist(signals);
+    const exchange = { role: 'agent' as const, gist };
+    expect(exchange.role).toBe('agent');
+    expect(typeof exchange.gist).toBe('string');
+    expect(exchange.gist.length).toBeGreaterThan(0);
+    expect(exchange.gist.length).toBeLessThanOrEqual(100);
   });
 });

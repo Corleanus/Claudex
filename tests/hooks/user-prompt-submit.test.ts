@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { MigrationRunner } from '../../src/db/migrations.js';
+import { extractKeywords } from '../../src/hooks/user-prompt-submit.js';
 
 // Mock dependencies
 vi.mock('../../src/shared/logger.js', () => ({
@@ -256,6 +257,96 @@ describe('user-prompt-submit hook logic', () => {
 
       // turnsRemaining should be false — boost block should not activate
       expect(turnsRemaining).toBe(false);
+    });
+
+    it('boost committed when hologram result is non-null (relaxed gate)', async () => {
+      const { upsertCheckpointState, getCheckpointState, updateBoostState } = await import('../../src/db/checkpoint.js');
+
+      const sessionId = 'sess-boost-relaxed';
+      const now = Date.now();
+
+      upsertCheckpointState(db, sessionId, now, ['/src/foo.ts']);
+
+      // db-pressure fallback — non-null result, should now commit boost
+      const hologramResult: { source: string } | null = { source: 'db-pressure' };
+      const boostFiles = ['/src/foo.ts'];
+
+      if (hologramResult !== null && boostFiles && boostFiles.length > 0) {
+        updateBoostState(db, sessionId, now, 1);
+      }
+
+      const stateAfter = getCheckpointState(db, sessionId);
+      expect(stateAfter!.boost_turn_count).toBe(1);
+    });
+
+    it('boost NOT committed when hologram result is null (total failure)', async () => {
+      const { upsertCheckpointState, getCheckpointState, updateBoostState } = await import('../../src/db/checkpoint.js');
+
+      const sessionId = 'sess-boost-null-gate';
+      const now = Date.now();
+
+      upsertCheckpointState(db, sessionId, now, ['/src/foo.ts']);
+
+      const hologramResult: { source: string } | null = null;
+      const boostFiles = ['/src/foo.ts'];
+
+      if (hologramResult !== null && boostFiles && boostFiles.length > 0) {
+        updateBoostState(db, sessionId, now, 1);
+      }
+
+      const stateAfter = getCheckpointState(db, sessionId);
+      expect(stateAfter!.boost_turn_count).toBe(0);
+    });
+  });
+
+  describe('extractKeywords', () => {
+    it('includes 2-character technical terms (db, fs, io, ui, ts)', () => {
+      const result = extractKeywords('check the db and fs modules');
+      expect(result).toContain('db');
+      expect(result).toContain('fs');
+    });
+
+    it('returns up to 8 keywords', () => {
+      const result = extractKeywords('alpha bravo charlie delta echo foxtrot golf hotel india juliet');
+      const words = result.split(/\s+/).filter(Boolean);
+      expect(words.length).toBeLessThanOrEqual(8);
+      expect(words.length).toBeGreaterThan(5);
+    });
+
+    it('filters technical stop words', () => {
+      const result = extractKeywords('the function returns a new class with interface');
+      // 'function', 'returns' (return), 'new', 'class', 'interface' are stop words
+      // 'the', 'a', 'with' are regular stop words
+      expect(result).not.toContain('function');
+      expect(result).not.toContain('new');
+      expect(result).not.toContain('class');
+      expect(result).not.toContain('interface');
+    });
+
+    it('filters code noise words (const, let, var, import, export)', () => {
+      const result = extractKeywords('const value import module export default');
+      expect(result).not.toContain('const');
+      expect(result).not.toContain('import');
+      expect(result).not.toContain('export');
+    });
+
+    it('preserves meaningful 2-char terms in mixed prompt', () => {
+      const result = extractKeywords('fix the ui rendering in ts files');
+      expect(result).toContain('ui');
+      expect(result).toContain('ts');
+      expect(result).toContain('rendering');
+    });
+
+    it('returns empty string for all-stop-word prompts', () => {
+      const result = extractKeywords('the a an is are');
+      expect(result).toBe('');
+    });
+
+    it('deduplicates repeated words', () => {
+      const result = extractKeywords('test test test test test test test test test');
+      const words = result.split(/\s+/).filter(Boolean);
+      expect(words.length).toBe(1);
+      expect(words[0]).toBe('test');
     });
   });
 });
