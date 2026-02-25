@@ -199,10 +199,7 @@ runHook(HOOK_NAME, async (input) => {
       );
 
       return {
-        hookSpecificOutput: {
-          hookEventName: 'Stop',
-          additionalContext: 'Tip: You made significant file changes this turn but logged no decisions. Consider recording key decisions via appendDecision() to context/state/decisions.yaml — this preserves decision rationale across compactions.',
-        },
+        systemMessage: 'Tip: You made significant file changes this turn but logged no decisions. Consider recording key decisions via appendDecision() to context/state/decisions.yaml — this preserves decision rationale across compactions.',
       };
     }
 
