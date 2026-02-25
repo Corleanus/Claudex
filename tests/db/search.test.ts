@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { searchObservations } from '../../src/db/search.js';
+import { searchObservations, migration_2 } from '../../src/db/search.js';
+import { migration_1 } from '../../src/db/schema.js';
 import { MigrationRunner } from '../../src/db/migrations.js';
 import { storeObservation } from '../../src/db/observations.js';
 import type { Observation } from '../../src/shared/types.js';
@@ -179,8 +180,8 @@ describe('searchObservations', () => {
       content: 'This was inserted before the FTS5 table existed',
     }));
 
-    // Now apply migration 2 (FTS5) — it should backfill
-    migration_2(runner2);
+    // Now apply remaining migrations (2=FTS5 backfill, then 3-7 for deleted_at_epoch filter)
+    runner2.run();
 
     // Search should find the pre-existing observation
     const results = searchObservations(db2, 'Backfill');

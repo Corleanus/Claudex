@@ -364,25 +364,26 @@ describe('decayAllScores', () => {
     expect(changed).toBe(1);
 
     const rows = getPressureScores(db, 'p');
-    // 1.0 * (1 - 0.1) = 0.9
-    expect(rows[0]!.raw_pressure).toBeCloseTo(0.9, 5);
+    // Stratified decay: tier >= 0.85 uses factor 0.99810
+    expect(rows[0]!.raw_pressure).toBeCloseTo(1.0 * 0.99810, 4);
   });
 
   it('reclassifies temperature after decay', () => {
-    // Start at HOT (0.75), decay_rate 0.1 → 0.75 * 0.9 = 0.675 → should become WARM
+    // Start at HOT (0.70) — tier 0.70-0.85, factor 0.99232
+    // 0.70 * 0.99232 = 0.69462 → below 0.7 → WARM
     upsertPressureScore(db, makeScore({
-      file_path: 'borderline.ts', project: 'p', raw_pressure: 0.75, temperature: 'HOT', decay_rate: 0.1,
+      file_path: 'borderline.ts', project: 'p', raw_pressure: 0.70, temperature: 'HOT', decay_rate: 0.1,
     }));
 
     decayAllScores(db, 'p');
 
     const rows = getPressureScores(db, 'p');
-    expect(rows[0]!.raw_pressure).toBeCloseTo(0.675, 5);
+    expect(rows[0]!.raw_pressure).toBeCloseTo(0.70 * 0.99232, 4);
     expect(rows[0]!.temperature).toBe('WARM');
   });
 
   it('score at exactly 0.7 boundary becomes WARM after decay', () => {
-    // 0.7 * (1 - 0.05) = 0.665 → WARM (>= 0.3 but < 0.7)
+    // Tier 0.70-0.85, factor 0.99232: 0.7 * 0.99232 = 0.69462 → WARM
     upsertPressureScore(db, makeScore({
       file_path: 'boundary.ts', project: 'p', raw_pressure: 0.7, temperature: 'HOT', decay_rate: 0.05,
     }));
@@ -390,12 +391,12 @@ describe('decayAllScores', () => {
     decayAllScores(db, 'p');
 
     const rows = getPressureScores(db, 'p');
-    expect(rows[0]!.raw_pressure).toBeCloseTo(0.665, 5);
+    expect(rows[0]!.raw_pressure).toBeCloseTo(0.7 * 0.99232, 4);
     expect(rows[0]!.temperature).toBe('WARM');
   });
 
   it('decays into COLD when pressure drops below 0.3', () => {
-    // 0.3 * (1 - 0.1) = 0.27 → COLD
+    // Tier < 0.40, factor 0.90572: 0.3 * 0.90572 = 0.27172 → COLD
     upsertPressureScore(db, makeScore({
       file_path: 'cooling.ts', project: 'p', raw_pressure: 0.3, temperature: 'WARM', decay_rate: 0.1,
     }));
@@ -403,7 +404,7 @@ describe('decayAllScores', () => {
     decayAllScores(db, 'p');
 
     const rows = getPressureScores(db, 'p');
-    expect(rows[0]!.raw_pressure).toBeCloseTo(0.27, 5);
+    expect(rows[0]!.raw_pressure).toBeCloseTo(0.3 * 0.90572, 4);
     expect(rows[0]!.temperature).toBe('COLD');
   });
 
@@ -414,10 +415,10 @@ describe('decayAllScores', () => {
     const changed = decayAllScores(db, 'alpha');
     expect(changed).toBe(1);
 
-    // Alpha decayed, beta untouched
+    // Alpha decayed (tier >= 0.85, factor 0.99810), beta untouched
     const alpha = getPressureScores(db, 'alpha');
     const beta = getPressureScores(db, 'beta');
-    expect(alpha[0]!.raw_pressure).toBeCloseTo(0.9, 5);
+    expect(alpha[0]!.raw_pressure).toBeCloseTo(1.0 * 0.99810, 4);
     expect(beta[0]!.raw_pressure).toBe(1.0);
   });
 

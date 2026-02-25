@@ -6,11 +6,7 @@ import {
   searchAll,
   rebuildSearchIndex,
   optimizeSearchIndex,
-  migration_2,
-  migration_4,
 } from '../../src/db/search.js';
-import { migration_1 } from '../../src/db/schema.js';
-import { migration_3 } from '../../src/db/schema-phase2.js';
 import { MigrationRunner } from '../../src/db/migrations.js';
 import { storeObservation } from '../../src/db/observations.js';
 import { insertReasoning } from '../../src/db/reasoning.js';
@@ -45,10 +41,7 @@ function setupDb(): Database.Database {
   `);
 
   const runner = new MigrationRunner(db);
-  migration_1(runner);
-  migration_2(runner);
-  migration_3(runner);
-  migration_4(runner);
+  runner.run();
 
   return db;
 }
