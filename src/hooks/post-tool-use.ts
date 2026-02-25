@@ -130,13 +130,9 @@ runHook(HOOK_NAME, async (input) => {
     try { db.close(); } catch { /* best effort */ }
   }
 
-  // Step 4: Mirror to flat file (WP-17 soft dependency — skip if unavailable)
-  try {
-    const { mirrorObservation } = await import('../lib/flat-file-mirror.js');
-    mirrorObservation(observation, scope);
-  } catch {
-    // WP-17 not ready or mirror failed — non-blocking, skip silently
-  }
+  // Step 4: REMOVED — flat-file observation mirror killed.
+  // DB is the authoritative store with decay, FTS5, and selection pressure.
+  // Daily files are now curated-only (written by /endsession Step 5).
 
   // Step 4.5. Thread accumulation — capture agent action (rolling window: max 20)
   if (observation && scope.type === 'project') {
