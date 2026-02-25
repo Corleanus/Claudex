@@ -51,6 +51,12 @@ export interface PostToolUseInput extends HookStdin {
   tool_response?: Record<string, unknown>;
 }
 
+/** Stdin for Stop hook */
+export interface StopInput extends HookStdin {
+  hook_event_name: 'Stop';
+  stop_reason?: string;
+}
+
 /** Stdout format for all hooks (Claude Code v1.0.21+ protocol) */
 export interface HookStdout {
   schema_version?: number;  // Stamped on output by infrastructure

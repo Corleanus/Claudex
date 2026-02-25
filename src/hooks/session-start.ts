@@ -12,6 +12,9 @@ import * as fs from 'node:fs';
 import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { PATHS } from '../shared/paths.js';
+import { loadLatestCheckpoint } from '../checkpoint/loader.js';
+import { RESUME_LOAD } from '../checkpoint/types.js';
+import type { LoadOptions } from '../checkpoint/types.js';
 import type { SessionStartInput, Scope, ContextSources, HookStdout } from '../shared/types.js';
 
 const HOOK_NAME = 'session-start';
@@ -413,6 +416,25 @@ runHook(HOOK_NAME, async (input) => {
           `Built hologram fallback from DB: hot=${hot.length} warm=${warm.length} cold=${cold.length}`);
       }
 
+      // Step 5.8: Load checkpoint for resume context
+      let checkpointMarkdown: string | undefined;
+      let checkpointTokens = 0;
+      try {
+        const projectDir = scope.type === 'project' ? scope.path : PATHS.home;
+        const loadOptions: LoadOptions = {
+          sections: [...RESUME_LOAD],
+          resumeMode: true,
+        };
+        const loaded = loadLatestCheckpoint(projectDir, loadOptions);
+        if (loaded) {
+          checkpointMarkdown = loaded.markdown;
+          checkpointTokens = loaded.tokenEstimate;
+          logToFile(HOOK_NAME, 'INFO', `Checkpoint loaded: sections=[${loaded.loadedSections.join(',')}] ~${loaded.tokenEstimate} tokens${loaded.recoveryPath ? ` (recovery: ${loaded.recoveryPath})` : ''}`);
+        }
+      } catch (cpErr) {
+        logToFile(HOOK_NAME, 'WARN', 'Checkpoint loading failed (non-fatal)', cpErr);
+      }
+
       // Build ContextSources
       const sources: ContextSources = {
         hologram: hologramResponse,
@@ -424,13 +446,21 @@ runHook(HOOK_NAME, async (input) => {
         postCompaction: false,
       };
 
-      // Assemble context
-      const assembled = assembleContext(sources, { maxTokens: 4000 });
+      // Assemble context — reduce budget by checkpoint tokens to stay within 4000 total
+      const assemblerBudget = Math.max(1000, 4000 - checkpointTokens);
+      const assembled = assembleContext(sources, { maxTokens: assemblerBudget });
 
-      if (assembled.markdown.length > 0) {
-        additionalContext = assembled.markdown;
+      // Combine: checkpoint first (high priority resume state), then DB context
+      const parts: string[] = [];
+      if (checkpointMarkdown) parts.push(checkpointMarkdown.trimEnd());
+      if (assembled.markdown.length > 0) parts.push(assembled.markdown.trimEnd());
+
+      if (parts.length > 0) {
+        additionalContext = parts.join('\n\n');
+        const allSources = [...(checkpointMarkdown ? ['checkpoint'] : []), ...assembled.sources];
+        const totalTokens = checkpointTokens + assembled.tokenEstimate;
         logToFile(HOOK_NAME, 'INFO',
-          `Context restoration assembled: ${assembled.tokenEstimate} tokens, sources=[${assembled.sources.join(', ')}]`);
+          `Context restoration assembled: ~${totalTokens} tokens, sources=[${allSources.join(', ')}]`);
       } else {
         logToFile(HOOK_NAME, 'INFO', 'Context restoration: no restorable context found');
       }

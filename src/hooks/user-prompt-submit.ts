@@ -211,15 +211,68 @@ runHook(HOOK_NAME, async (input) => {
     || (inputAny.user_message as string)
     || '';
 
-  // 2. Short prompt check — skip heavy injection for trivial prompts
+  // 2. Detect scope (needed before short-prompt gate for thread accumulation)
+  const scope = detectScope(cwd);
+  logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
+
+  // 2.1. Thread accumulation — capture user message gist + detect approvals
+  // Runs BEFORE short-prompt gate so "yes"/"ok" approvals are captured
+  if (scope.type === 'project' && typeof promptText === 'string' && promptText.length > 0) {
+    try {
+      const { extractGist, detectDecisionSignal } = await import('../lib/decision-detector.js');
+      const { appendExchange, appendDecision } = await import('../checkpoint/state-files.js');
+
+      const projectDir = scope.path;
+      const { readThread } = await import('../checkpoint/state-files.js');
+      const gist = extractGist(promptText, 100);
+      appendExchange(projectDir, sessionId, { role: 'user', gist });
+
+      // Rolling-window cap: trim thread to 15 exchanges when >= 20
+      try {
+        const thread = readThread(projectDir, sessionId);
+        if (thread.key_exchanges.length >= 20) {
+          const trimmed = thread.key_exchanges.slice(-15);
+          const yamlMod = await import('js-yaml');
+          const fsMod = await import('node:fs');
+          const pathMod = await import('node:path');
+          const threadPath = pathMod.join(projectDir, 'context', 'state', sessionId, 'thread.yaml');
+          const newThread = { summary: thread.summary, key_exchanges: trimmed };
+          const content = yamlMod.dump(newThread, { schema: yamlMod.JSON_SCHEMA, lineWidth: -1, noRefs: true, sortKeys: false });
+          fsMod.writeFileSync(threadPath, content, 'utf-8');
+        }
+      } catch { /* rolling-window trim non-fatal */ }
+
+      // Auto-detect decision signals (approval, choice, rejection)
+      const signal = detectDecisionSignal(promptText);
+      if (signal?.detected && signal.type === 'approval') {
+        appendDecision(projectDir, sessionId, {
+          id: `auto-${Date.now()}`,
+          what: `User approved: "${gist}"`,
+          why: '(auto-detected from approval pattern, confidence: low)',
+          when: new Date().toISOString(),
+          reversible: true,
+        });
+        logToFile(HOOK_NAME, 'DEBUG', `Auto-detected approval decision: "${gist}"`);
+      } else if (signal?.detected && signal.type === 'choice') {
+        appendDecision(projectDir, sessionId, {
+          id: `auto-${Date.now()}`,
+          what: `User chose: "${gist}"`,
+          why: '(auto-detected from choice pattern, confidence: low)',
+          when: new Date().toISOString(),
+          reversible: true,
+        });
+        logToFile(HOOK_NAME, 'DEBUG', `Auto-detected choice decision: "${gist}"`);
+      }
+    } catch (err) {
+      logToFile(HOOK_NAME, 'DEBUG', 'Thread accumulation failed (non-fatal)', err);
+    }
+  }
+
+  // 3. Short prompt check — skip heavy injection for trivial prompts
   if (typeof promptText === 'string' && promptText.length < SHORT_PROMPT_THRESHOLD) {
     logToFile(HOOK_NAME, 'DEBUG', `Short prompt (${promptText.length} chars), skipping injection`);
     return {};
   }
-
-  // 3. Detect scope
-  const scope = detectScope(cwd);
-  logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
 
   // 3.3. Token gauge from transcript
   const transcriptPath = promptInput.transcript_path;
@@ -413,6 +466,21 @@ runHook(HOOK_NAME, async (input) => {
 
     // 7. Query FTS5 search (keywords from prompt)
     const ftsResults = queryFts5(promptText, scope, db);
+
+    // 7.3. Bump access counts for observations that appeared in search results
+    if (ftsResults.length > 0 && db) {
+      try {
+        const { bumpAccessCount } = await import('../db/observations.js');
+        for (const result of ftsResults) {
+          if (result.observation.id) {
+            bumpAccessCount(db, result.observation.id);
+          }
+        }
+        logToFile(HOOK_NAME, 'DEBUG', `Bumped access counts for ${ftsResults.length} search results`);
+      } catch (err) {
+        logToFile(HOOK_NAME, 'DEBUG', 'Access count bump failed (non-fatal)', err);
+      }
+    }
 
     // 8. Assemble context
     const assembled = assembleContext(

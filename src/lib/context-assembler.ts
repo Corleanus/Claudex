@@ -202,6 +202,44 @@ function buildRecentObservationsSection(observations: Observation[]): string {
 }
 
 // =============================================================================
+// Reference builders (compact mode — emitted when token budget is tight)
+// =============================================================================
+
+function buildSearchSectionRef(results: SearchResult[]): string {
+  if (results.length === 0) return '';
+  const top = results[0]!;
+  const ago = formatTimeAgo(top.observation.timestamp_epoch);
+  return `## Related Observations (refs)\n- [${results.length} observations, top: "${top.observation.title}" (${ago})]\n`;
+}
+
+function buildRecentSectionRef(observations: Observation[]): string {
+  if (observations.length === 0) return '';
+  const latest = observations[0]!;
+  const ago = formatTimeAgo(latest.timestamp_epoch);
+  return `## Recent Activity (refs)\n- [${observations.length} observations, latest: "${latest.title}" (${ago})]\n`;
+}
+
+function buildReasoningSectionRef(chains: ReasoningChain[]): string {
+  if (chains.length === 0) return '';
+  const latest = chains[0]!;
+  const ago = formatTimeAgo(latest.timestamp_epoch);
+  return `## Flow Reasoning (refs)\n- [${chains.length} chains, latest: "${latest.title}" (${ago})]\n`;
+}
+
+function buildConsensusSectionRef(decisions: ConsensusDecision[]): string {
+  if (decisions.length === 0) return '';
+  const latest = decisions[0]!;
+  const ago = formatTimeAgo(latest.timestamp_epoch);
+  return `## Consensus Decisions (refs)\n- [${decisions.length} decisions, latest: "${latest.title}" [${latest.status}] (${ago})]\n`;
+}
+
+function buildWarmSectionRef(warmFiles: ScoredFile[]): string {
+  if (warmFiles.length === 0) return '';
+  const top = warmFiles[0]!;
+  return `## Warm Context (refs)\n- [${warmFiles.length} files, top: \`${top.path}\` (${top.raw_pressure.toFixed(2)})]\n`;
+}
+
+// =============================================================================
 // Main assembler
 // =============================================================================
 
@@ -272,34 +310,43 @@ export function assembleContext(
       tryAppend(buildGsdSection(sources.gsdState!, sources.gsdPlanMustHaves, sources.gsdRequirementStatus), 'gsd');
     }
 
+    // Compute remaining budget after priority sections (1-3.5)
+    const remainingTokens = config.maxTokens - estimateTokens(assembled);
+    const useReferences = remainingTokens < 500;
+
     // 4. Flow Reasoning
     if (hasReasoning) {
-      tryAppend(buildReasoningSection(sources.reasoningChains!), 'reasoning');
+      const builder = useReferences ? buildReasoningSectionRef : buildReasoningSection;
+      tryAppend(builder(sources.reasoningChains!), 'reasoning');
     }
 
     // 5. FTS5 search results
     if (hasSearch) {
-      tryAppend(buildSearchSection(sources.searchResults), 'fts5');
+      const builder = useReferences ? buildSearchSectionRef : buildSearchSection;
+      tryAppend(builder(sources.searchResults), 'fts5');
     }
 
     // 6. Recent observations (temporal context — what just happened)
     if (hasRecent) {
-      tryAppend(buildRecentObservationsSection(sources.recentObservations), 'recency');
+      const builder = useReferences ? buildRecentSectionRef : buildRecentObservationsSection;
+      tryAppend(builder(sources.recentObservations), 'recency');
     }
 
     // 7. Consensus Decisions
     if (hasConsensus) {
-      tryAppend(buildConsensusSection(sources.consensusDecisions!), 'consensus');
+      const builder = useReferences ? buildConsensusSectionRef : buildConsensusSection;
+      tryAppend(builder(sources.consensusDecisions!), 'consensus');
     }
 
-    // 8. Post-compaction continuity
+    // 8. Post-compaction continuity — ALWAYS inline, never reference mode
     if (sources.postCompaction) {
       tryAppend(buildPostCompactionSection(), 'session');
     }
 
     // 9. WARM files
     if (hasHologram && sources.hologram!.warm.length > 0) {
-      tryAppend(buildWarmSection(sources.hologram!.warm), 'hologram');
+      const builder = useReferences ? buildWarmSectionRef : buildWarmSection;
+      tryAppend(builder(sources.hologram!.warm), 'hologram');
     }
 
     // If only the header was added (nothing fit), return empty

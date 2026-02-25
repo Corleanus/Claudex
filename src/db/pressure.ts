@@ -67,11 +67,18 @@ export function upsertPressureScore(
     const nowEpoch = Date.now();
 
     db.prepare(`
-      INSERT OR REPLACE INTO pressure_scores (
+      INSERT INTO pressure_scores (
         file_path, project, raw_pressure, temperature,
         last_accessed_epoch, decay_rate,
         updated_at, updated_at_epoch
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(file_path, project) DO UPDATE SET
+        raw_pressure = excluded.raw_pressure,
+        temperature = excluded.temperature,
+        last_accessed_epoch = excluded.last_accessed_epoch,
+        decay_rate = excluded.decay_rate,
+        updated_at = excluded.updated_at,
+        updated_at_epoch = excluded.updated_at_epoch
     `).run(
       score.file_path,
       score.project ?? GLOBAL_PROJECT_SENTINEL,
@@ -260,10 +267,17 @@ export function accumulatePressureScore(
 }
 
 /**
- * Apply decay to all pressure scores: raw_pressure = raw_pressure * (1 - decay_rate)
- * Update temperature based on new pressure: >= 0.7 HOT, >= 0.3 WARM, else COLD
- * Update updated_at and updated_at_epoch.
- * Returns number of rows updated. Returns 0 on error.
+ * Apply stratified decay to all pressure scores.
+ *
+ * Four tiers with different daily decay factors derived from Kore half-lives:
+ *   Critical (>= 0.85): 0.99810  (half-life ~365d)
+ *   High     (>= 0.70): 0.99232  (half-life ~90d)
+ *   Medium   (>= 0.40): 0.97716  (half-life ~30d)
+ *   Low      (< 0.40):  0.90572  (half-life ~7d)
+ *
+ * Idempotent: each row only decays once per calendar day (last_decay_epoch guard).
+ * The `decay_rate` column is retained for backward compatibility but unused.
+ * Returns total rows updated across all tiers. Returns 0 on error.
  */
 export function decayAllScores(db: Database.Database, project?: string): number {
   const startMs = Date.now();
@@ -271,33 +285,65 @@ export function decayAllScores(db: Database.Database, project?: string): number 
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
 
-    const sql = project
-      ? `UPDATE pressure_scores
-         SET raw_pressure = raw_pressure * (1.0 - decay_rate),
-             temperature = CASE
-               WHEN raw_pressure * (1.0 - decay_rate) >= 0.7 THEN 'HOT'
-               WHEN raw_pressure * (1.0 - decay_rate) >= 0.3 THEN 'WARM'
-               ELSE 'COLD'
-             END,
-             updated_at = ?,
-             updated_at_epoch = ?
-         WHERE project = ?`
-      : `UPDATE pressure_scores
-         SET raw_pressure = raw_pressure * (1.0 - decay_rate),
-             temperature = CASE
-               WHEN raw_pressure * (1.0 - decay_rate) >= 0.7 THEN 'HOT'
-               WHEN raw_pressure * (1.0 - decay_rate) >= 0.3 THEN 'WARM'
-               ELSE 'COLD'
-             END,
-             updated_at = ?,
-             updated_at_epoch = ?`;
+    // Start of today in epoch ms — used as the idempotency threshold
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStartEpoch = today.getTime();
 
-    const result = project
-      ? db.prepare(sql).run(now, nowEpoch, project)
-      : db.prepare(sql).run(now, nowEpoch);
+    const tempExpr = (pressureExpr: string) => `
+      CASE
+        WHEN ${pressureExpr} >= 0.7 THEN 'HOT'
+        WHEN ${pressureExpr} >= 0.3 THEN 'WARM'
+        ELSE 'COLD'
+      END
+    `;
+
+    const idempotencyClause = `(last_decay_epoch IS NULL OR last_decay_epoch < ?)`;
+
+    const tiers: Array<{ factor: number; minPressure: number | null; maxPressure: number | null }> = [
+      { factor: 0.99810, minPressure: 0.85, maxPressure: null },
+      { factor: 0.99232, minPressure: 0.70, maxPressure: 0.85 },
+      { factor: 0.97716, minPressure: 0.40, maxPressure: 0.70 },
+      { factor: 0.90572, minPressure: null, maxPressure: 0.40 },
+    ];
+
+    let totalChanged = 0;
+
+    for (const tier of tiers) {
+      const whereConditions: string[] = [idempotencyClause];
+      if (tier.minPressure !== null) whereConditions.push(`raw_pressure >= ${tier.minPressure}`);
+      if (tier.maxPressure !== null) whereConditions.push(`raw_pressure < ${tier.maxPressure}`);
+      if (project) whereConditions.push('project = ?');
+
+      const newPressureExpr = `raw_pressure * ${tier.factor}`;
+
+      // Parameter order: SET params first, then WHERE params
+      // SET: last_decay_epoch=?, updated_at=?, updated_at_epoch=?
+      // WHERE: todayStartEpoch (idempotency), [project]
+      const sql = `
+        UPDATE pressure_scores
+        SET raw_pressure = ${newPressureExpr},
+            temperature = ${tempExpr(newPressureExpr)},
+            last_decay_epoch = ?,
+            updated_at = ?,
+            updated_at_epoch = ?
+        WHERE ${whereConditions.join(' AND ')}
+      `;
+
+      const runParams: unknown[] = [
+        nowEpoch,           // last_decay_epoch = ?
+        now,                // updated_at = ?
+        nowEpoch,           // updated_at_epoch = ?
+        todayStartEpoch,    // idempotency: last_decay_epoch < ?
+      ];
+      if (project) runParams.push(project);
+
+      const result = db.prepare(sql).run(...runParams);
+      totalChanged += result.changes;
+    }
 
     recordMetric('db.query', Date.now() - startMs);
-    return result.changes;
+    return totalChanged;
   } catch (err) {
     recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to decay pressure scores:', err);

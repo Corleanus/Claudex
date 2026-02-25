@@ -231,6 +231,7 @@ export function searchObservations(
         AND (? IS NULL OR o.project = ?)
         AND (? IS NULL OR o.category = ?)
         AND o.importance >= ?
+        AND o.deleted_at_epoch IS NULL
       ORDER BY fts.rank
       LIMIT ?
     `;

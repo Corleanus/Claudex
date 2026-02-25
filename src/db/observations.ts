@@ -105,7 +105,7 @@ export function getObservationsBySession(db: Database.Database, sessionId: strin
              tool_name, category, title, content,
              facts, files_read, files_modified, importance
       FROM observations
-      WHERE session_id = ?
+      WHERE session_id = ? AND deleted_at_epoch IS NULL
       ORDER BY timestamp_epoch ASC
     `).all(sessionId) as ObservationRow[];
 
@@ -135,7 +135,7 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
-             WHERE project IS NULL
+             WHERE project IS NULL AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT ?`;
       rows = db.prepare(sql).all(limit) as ObservationRow[];
@@ -145,7 +145,7 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
-             WHERE project = ?
+             WHERE project = ? AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT ?`;
       rows = db.prepare(sql).all(project, limit) as ObservationRow[];
@@ -155,6 +155,7 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
+             WHERE deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT ?`;
       rows = db.prepare(sql).all(limit) as ObservationRow[];
@@ -187,7 +188,7 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
-             WHERE timestamp_epoch > ? AND project IS NULL
+             WHERE timestamp_epoch > ? AND project IS NULL AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT 50`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs)) as ObservationRow[];
@@ -197,7 +198,7 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
-             WHERE timestamp_epoch > ? AND project = ?
+             WHERE timestamp_epoch > ? AND project = ? AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT 50`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs), project) as ObservationRow[];
@@ -207,7 +208,7 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
-             WHERE timestamp_epoch > ?
+             WHERE timestamp_epoch > ? AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT 50`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs)) as ObservationRow[];
@@ -219,6 +220,23 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
     recordMetric('db.query', Date.now() - startMs, true);
     log.error('Failed to get observations since epoch:', err);
     return [];
+  }
+}
+
+/**
+ * Increment access_count and update last_accessed_at_epoch for an observation.
+ * No-op on nonexistent id. Never throws.
+ */
+export function bumpAccessCount(db: Database.Database, observationId: number): void {
+  const startMs = Date.now();
+  try {
+    db.prepare(
+      `UPDATE observations SET access_count = access_count + 1, last_accessed_at_epoch = ? WHERE id = ?`
+    ).run(Date.now(), observationId);
+    recordMetric('db.update', Date.now() - startMs);
+  } catch (err) {
+    recordMetric('db.update', Date.now() - startMs, true);
+    log.error('Failed to bump access count:', err);
   }
 }
 

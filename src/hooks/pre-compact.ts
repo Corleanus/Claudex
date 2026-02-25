@@ -22,6 +22,8 @@ import { getDatabase } from '../db/connection.js';
 import { insertReasoning } from '../db/reasoning.js';
 import { getCheckpointState, upsertCheckpointState } from '../db/checkpoint.js';
 import { getObservationsSince } from '../db/observations.js';
+import { readTokenGauge } from '../lib/token-gauge.js';
+import { writeCheckpoint } from '../checkpoint/writer.js';
 import type Database from 'better-sqlite3';
 
 /**
@@ -377,6 +379,42 @@ runHook('pre-compact', async (input: HookStdin) => {
         writeCompactCheckpoint(session_id, scope, db, trigger, input.cwd);
       } catch (cpErr) {
         logToFile(HOOK_NAME, 'ERROR', 'Compact checkpoint writes failed (non-fatal):', cpErr);
+      }
+
+      // =====================================================================
+      // Structured YAML checkpoint — safety net for the checkpoint system
+      // Catches the case where UserPromptSubmit's 80% trigger didn't fire
+      // =====================================================================
+      try {
+        const projectDir = scope.type === 'project' ? scope.path : PATHS.home;
+
+        // Debounce: skip if latest.yaml modified <60s ago (UserPromptSubmit already wrote)
+        const latestPath = path.join(projectDir, 'context', 'checkpoints', 'latest.yaml');
+        let shouldWrite = true;
+        try {
+          const latestStat = fs.statSync(latestPath);
+          if (Date.now() - latestStat.mtimeMs < 60_000) {
+            shouldWrite = false;
+            logToFile(HOOK_NAME, 'DEBUG', 'Structured checkpoint debounced — written <60s ago by UserPromptSubmit');
+          }
+        } catch { /* latest.yaml doesn't exist — should write */ }
+
+        if (shouldWrite) {
+          const gauge = readTokenGauge(transcript_path, 200_000);
+          const scopeStr = scope.type === 'project' ? `project:${scope.name}` : 'global';
+          const result = writeCheckpoint({
+            projectDir,
+            sessionId: session_id,
+            scope: scopeStr,
+            trigger: 'pre-compact',
+            gaugeReading: gauge,
+          });
+          if (result) {
+            logToFile(HOOK_NAME, 'INFO', `Structured checkpoint written: ${result.checkpointId}`);
+          }
+        }
+      } catch (structCpErr) {
+        logToFile(HOOK_NAME, 'WARN', 'Structured checkpoint write failed (non-fatal)', structCpErr);
       }
     } finally {
       // 7. Close DB

@@ -12,6 +12,8 @@ import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { extractObservation } from '../lib/observation-extractor.js';
 import { loadConfig } from '../shared/config.js';
+import { recordFileTouch } from '../checkpoint/state-files.js';
+import { PATHS } from '../shared/paths.js';
 import type { PostToolUseInput } from '../shared/types.js';
 
 const HOOK_NAME = 'post-tool-use';
@@ -110,6 +112,19 @@ runHook(HOOK_NAME, async (input) => {
     }
   }
 
+  // Step 3.7: Update incremental state (files-touched for checkpoint system)
+  if (observation.files_modified && observation.files_modified.length > 0) {
+    try {
+      const projectDir = scope.type === 'project' ? scope.path : PATHS.home;
+      for (const filePath of observation.files_modified) {
+        recordFileTouch(projectDir, sessionId, filePath, toolName, observation.title);
+      }
+      logToFile(HOOK_NAME, 'DEBUG', `State: recorded ${observation.files_modified.length} file touches`);
+    } catch (err) {
+      logToFile(HOOK_NAME, 'DEBUG', 'State file update failed (non-fatal)', err);
+    }
+  }
+
   // Close DB after Steps 3 + 3.5
   if (db) {
     try { db.close(); } catch { /* best effort */ }
@@ -121,6 +136,36 @@ runHook(HOOK_NAME, async (input) => {
     mirrorObservation(observation, scope);
   } catch {
     // WP-17 not ready or mirror failed — non-blocking, skip silently
+  }
+
+  // Step 4.5. Thread accumulation — capture agent action (rolling window: max 20)
+  if (observation && scope.type === 'project') {
+    try {
+      const { appendExchange, readThread } = await import('../checkpoint/state-files.js');
+      const projectDir = scope.path;
+
+      const thread = readThread(projectDir, sessionId);
+      if (thread.key_exchanges.length >= 20) {
+        // Rolling window: trim to last 14, then append new exchange
+        const trimmed = thread.key_exchanges.slice(-14);
+        const actionGist = `${toolName}: ${observation.title}`.slice(0, 100);
+        trimmed.push({ role: 'agent', gist: actionGist });
+
+        // Rewrite thread.yaml with trimmed exchanges
+        const fsSync = await import('node:fs');
+        const pathMod = await import('node:path');
+        const yamlMod = await import('js-yaml');
+        const threadPath = pathMod.join(projectDir, 'context', 'state', sessionId, 'thread.yaml');
+        const newThread = { summary: thread.summary, key_exchanges: trimmed };
+        const content = yamlMod.dump(newThread, { schema: yamlMod.JSON_SCHEMA, lineWidth: -1, noRefs: true, sortKeys: false });
+        fsSync.writeFileSync(threadPath, content, 'utf-8');
+      } else {
+        const actionGist = `${toolName}: ${observation.title}`.slice(0, 100);
+        appendExchange(projectDir, sessionId, { role: 'agent', gist: actionGist });
+      }
+    } catch (err) {
+      logToFile(HOOK_NAME, 'DEBUG', 'Thread accumulation failed (non-fatal)', err);
+    }
   }
 
   return {};

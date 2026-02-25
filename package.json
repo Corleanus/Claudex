@@ -9,10 +9,12 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0"
+    "better-sqlite3": "^11.7.0",
+    "js-yaml": "^4.1.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "esbuild": "^0.24.0",
     "tsx": "^4.21.0",

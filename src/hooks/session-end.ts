@@ -422,6 +422,63 @@ Session ended without /endsession. This is a fail-safe handoff.
   }
 
   // =========================================================================
+  // Section 8: Decay pass — stratified half-life decay on pressure scores
+  // =========================================================================
+  let decayRan = false;
+  let decayCount = 0;
+  try {
+    const { getDatabase } = await import('../db/connection.js');
+    const { decayAllScores } = await import('../db/pressure.js');
+
+    const decayDb = getDatabase();
+    if (!decayDb) {
+      logToFile('session-end', 'WARN', 'Database connection failed, skipping decay pass');
+    } else {
+      try {
+        const project = scope.type === 'project' ? scope.name : undefined;
+        decayCount = decayAllScores(decayDb, project);
+        decayRan = true;
+        if (decayCount > 0) {
+          logToFile('session-end', 'INFO', `Decay pass: ${decayCount} pressure scores updated`);
+        }
+      } finally {
+        decayDb.close();
+      }
+    }
+  } catch (err) {
+    logToFile('session-end', 'WARN', 'Section 8 (decay pass) failed (non-fatal):', err);
+  }
+
+  // =========================================================================
+  // Section 9: Observation pruning — remove lowest-EI observations when >1000
+  // =========================================================================
+  let pruneRan = false;
+  let prunedCount = 0;
+  try {
+    const { getDatabase } = await import('../db/connection.js');
+    const { pruneObservations } = await import('../lib/decay-engine.js');
+
+    const pruneDb = getDatabase();
+    if (!pruneDb) {
+      logToFile('session-end', 'WARN', 'Database connection failed, skipping observation pruning');
+    } else {
+      try {
+        const project = scope.type === 'project' ? scope.name : undefined;
+        const result = pruneObservations(pruneDb, project);
+        pruneRan = true;
+        prunedCount = result.pruned;
+        if (prunedCount > 0) {
+          logToFile('session-end', 'INFO', `Pruning: ${prunedCount} observations soft-deleted, ${result.remaining} remaining`);
+        }
+      } finally {
+        pruneDb.close();
+      }
+    }
+  } catch (err) {
+    logToFile('session-end', 'WARN', 'Section 9 (observation pruning) failed (non-fatal):', err);
+  }
+
+  // =========================================================================
   // Summary log
   // =========================================================================
   logToFile('session-end', 'INFO', [
@@ -437,6 +494,8 @@ Session ended without /endsession. This is a fail-safe handoff.
     `  retentionRan=${retentionRan}`,
     `  pressureCaptured=${pressureCaptured}`,
     `  summaryCaptured=${summaryCaptured}`,
+    `  decayRan=${decayRan} decayCount=${decayCount}`,
+    `  pruneRan=${pruneRan} prunedCount=${prunedCount}`,
   ].join('\n'));
 
   return {};

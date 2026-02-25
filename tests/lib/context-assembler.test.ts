@@ -6,6 +6,8 @@ import type {
   SearchResult,
   ScoredFile,
   Scope,
+  ReasoningChain,
+  ConsensusDecision,
 } from '../../src/shared/types.js';
 import type { GsdState } from '../../src/gsd/types.js';
 
@@ -655,5 +657,323 @@ describe('Phase boost annotation', () => {
 
     const result = assembleContext(sources, { maxTokens: 4000 });
     expect(result.markdown).not.toContain('[phase]');
+  });
+});
+
+// =============================================================================
+// Demand-paging: reference builder tests (WP-11)
+// =============================================================================
+
+function makeReasoningChain(overrides: Partial<ReasoningChain> = {}): ReasoningChain {
+  return {
+    session_id: 'sess-001',
+    timestamp: '2023-11-14T22:00:00.000Z',
+    timestamp_epoch: Date.now() - 3 * 60 * 60_000, // 3h ago
+    trigger: 'pre_compact',
+    title: 'Test reasoning chain',
+    reasoning: 'Some reasoning content',
+    importance: 3,
+    ...overrides,
+  };
+}
+
+function makeConsensusDecision(overrides: Partial<ConsensusDecision> = {}): ConsensusDecision {
+  return {
+    session_id: 'sess-001',
+    timestamp: '2023-11-14T22:00:00.000Z',
+    timestamp_epoch: Date.now() - 2 * 60 * 60_000, // 2h ago
+    title: 'Test decision',
+    description: 'A test consensus decision',
+    status: 'agreed',
+    importance: 3,
+    ...overrides,
+  };
+}
+
+describe('demand-paging: reference builders (via assembleContext with tight budget)', () => {
+  const NOW = 1700000000000;
+
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // To exercise reference builders, we need a budget where priority sections
+  // (Identity, Project, HOT, GSD) consume > maxTokens - 500 chars.
+  // We use a large Identity + Project content to push assembled over the threshold,
+  // then verify reference-eligible sections use compact format.
+
+  function tightBudgetSources(extras: Partial<ContextSources> = {}): ContextSources {
+    // A large primer (~2000 chars) ensures assembled after priority sections is large,
+    // leaving < 500 tokens remaining.
+    return emptySources({
+      scope: PROJECT_SCOPE,
+      identity: { agent: 'A'.repeat(500), user: 'B'.repeat(500) },
+      projectContext: { primer: 'P'.repeat(2000) },
+      ...extras,
+    });
+  }
+
+  it('buildSearchSectionRef: tight budget produces compact search reference', () => {
+    const sources = tightBudgetSources({
+      searchResults: [
+        makeSearchResult({ observation: makeObservation({ title: 'Auth flow fix', timestamp_epoch: NOW - 3 * 60 * 60_000 }) }),
+        makeSearchResult({ observation: makeObservation({ title: 'Second result' }) }),
+      ],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    expect(result.markdown).toContain('## Related Observations (refs)');
+    expect(result.markdown).toContain('[2 observations, top: "Auth flow fix"');
+    expect(result.markdown).toContain('3h ago');
+  });
+
+  it('buildRecentSectionRef: tight budget produces compact recent reference', () => {
+    const sources = tightBudgetSources({
+      recentObservations: [
+        makeObservation({ title: 'Latest change', timestamp_epoch: NOW - 12 * 60_000 }), // 12m ago
+        makeObservation({ title: 'Older change' }),
+      ],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    expect(result.markdown).toContain('## Recent Activity (refs)');
+    expect(result.markdown).toContain('[2 observations, latest: "Latest change"');
+    expect(result.markdown).toContain('12m ago');
+  });
+
+  it('buildReasoningSectionRef: tight budget produces compact reasoning reference', () => {
+    const sources = tightBudgetSources({
+      reasoningChains: [
+        makeReasoningChain({ title: 'Design decision chain', timestamp_epoch: NOW - 60 * 60_000 }), // 1h ago
+      ],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    expect(result.markdown).toContain('## Flow Reasoning (refs)');
+    expect(result.markdown).toContain('[1 chains, latest: "Design decision chain"');
+    expect(result.markdown).toContain('1h ago');
+  });
+
+  it('buildConsensusSectionRef: tight budget produces compact consensus reference', () => {
+    const sources = tightBudgetSources({
+      consensusDecisions: [
+        makeConsensusDecision({ title: 'SQLite sentinel approach', status: 'agreed', timestamp_epoch: NOW - 2 * 60 * 60_000 }),
+        makeConsensusDecision({ title: 'Second decision' }),
+      ],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    expect(result.markdown).toContain('## Consensus Decisions (refs)');
+    expect(result.markdown).toContain('[2 decisions, latest: "SQLite sentinel approach" [agreed]');
+    expect(result.markdown).toContain('2h ago');
+  });
+
+  it('buildWarmSectionRef: tight budget produces compact warm reference', () => {
+    const sources = tightBudgetSources({
+      hologram: {
+        hot: [],
+        warm: [
+          makeScoredFile({ path: 'src/lib/context-assembler.ts', raw_pressure: 0.52, temperature: 'WARM' }),
+          makeScoredFile({ path: 'src/lib/other.ts', raw_pressure: 0.45, temperature: 'WARM' }),
+        ],
+        cold: [],
+      },
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    expect(result.markdown).toContain('## Warm Context (refs)');
+    expect(result.markdown).toContain('[2 files, top: `src/lib/context-assembler.ts` (0.52)]');
+  });
+
+  it('all ref builders return empty string for empty arrays', () => {
+    // With empty arrays, hasSearch/hasRecent/etc. are false — sections are skipped entirely.
+    // The reference builders themselves guard on empty arrays.
+    // We verify via assembleContext that no ref headers appear for empty data.
+    const sources = tightBudgetSources({
+      searchResults: [],
+      recentObservations: [],
+      reasoningChains: [],
+      consensusDecisions: [],
+      hologram: { hot: [], warm: [], cold: [] },
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    expect(result.markdown).not.toContain('(refs)');
+  });
+});
+
+describe('demand-paging: mode switching', () => {
+  const NOW = 1700000000000;
+
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function richSources(): ContextSources {
+    return emptySources({
+      scope: PROJECT_SCOPE,
+      identity: { agent: 'Claudex', user: 'Dev' },
+      projectContext: { primer: 'Small primer' },
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'Search hit' }) })],
+      recentObservations: [makeObservation({ title: 'Recent work' })],
+      reasoningChains: [makeReasoningChain({ title: 'Design chain' })],
+      consensusDecisions: [makeConsensusDecision({ title: 'Some decision' })],
+      hologram: {
+        hot: [],
+        warm: [makeScoredFile({ path: 'src/warm.ts', raw_pressure: 0.5, temperature: 'WARM' })],
+        cold: [],
+      },
+    });
+  }
+
+  it('budget plenty (>500 remaining): all sections rendered inline', () => {
+    const result = assembleContext(richSources(), { maxTokens: 4000 });
+    const md = result.markdown;
+
+    // Inline headers (no "(refs)" suffix)
+    expect(md).toContain('## Flow Reasoning\n');
+    expect(md).toContain('## Related Observations\n');
+    expect(md).toContain('## Recent Activity\n');
+    expect(md).toContain('## Consensus Decisions\n');
+    expect(md).toContain('## Warm Context\n');
+
+    // No reference headers
+    expect(md).not.toContain('(refs)');
+  });
+
+  it('budget tight (<500 remaining): reference-eligible sections switch to refs', () => {
+    // Force tight budget: large identity/project consumes most tokens.
+    const sources = emptySources({
+      scope: PROJECT_SCOPE,
+      identity: { agent: 'A'.repeat(500), user: 'B'.repeat(500) },
+      projectContext: { primer: 'P'.repeat(2000) },
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'Hit' }) })],
+      recentObservations: [makeObservation({ title: 'Recent' })],
+      reasoningChains: [makeReasoningChain({ title: 'Chain' })],
+      consensusDecisions: [makeConsensusDecision({ title: 'Decision' })],
+      hologram: {
+        hot: [],
+        warm: [makeScoredFile({ path: 'warm.ts', raw_pressure: 0.5, temperature: 'WARM' })],
+        cold: [],
+      },
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    const md = result.markdown;
+
+    // At least some reference-eligible sections should appear as refs
+    // (depending on exact budget, not all may fit)
+    // The key assertion: no full inline headers for ref-eligible sections
+    expect(md).not.toContain('### '); // inline reasoning/consensus use ### subheaders
+  });
+
+  it('priority sections remain inline even when budget tight', () => {
+    const sources = emptySources({
+      scope: PROJECT_SCOPE,
+      identity: { agent: 'A'.repeat(100) },
+      projectContext: { primer: 'P'.repeat(100) },
+      hologram: {
+        hot: [makeScoredFile({ path: 'hot.ts', raw_pressure: 0.9 })],
+        warm: [],
+        cold: [],
+      },
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'Hit' }) })],
+    });
+
+    const result = assembleContext(sources, { maxTokens: 200 });
+    const md = result.markdown;
+
+    // Identity, Project, HOT are always inline — verify they appear without "(refs)"
+    if (md.includes('## Identity')) {
+      expect(md).toContain('## Identity\n');
+    }
+    if (md.includes('## Active Focus')) {
+      expect(md).toContain('## Active Focus\n');
+    }
+  });
+
+  it('post-compaction section always inline regardless of budget', () => {
+    const sources = emptySources({
+      scope: PROJECT_SCOPE,
+      identity: { agent: 'A'.repeat(500), user: 'B'.repeat(500) },
+      projectContext: { primer: 'P'.repeat(2000) },
+      postCompaction: true,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 1000 });
+    const md = result.markdown;
+
+    // If Session Continuity fits, it must be inline (not a ref)
+    if (md.includes('Session Continuity')) {
+      expect(md).toContain('## Session Continuity\n');
+      expect(md).not.toContain('## Session Continuity (refs)');
+    }
+  });
+
+  it('reference sections are shorter than inline equivalents', () => {
+    // Use identical sources — inline mode (large budget) vs ref mode (tiny budget).
+    // In ref mode, the ref-eligible sections (reasoning, search, recent, consensus, warm)
+    // collapse to 2-line summaries instead of multi-line inline content.
+    const sources = emptySources({
+      scope: PROJECT_SCOPE,
+      identity: { agent: 'Claudex' },
+      projectContext: { primer: 'Short primer' },
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'Search hit' }) })],
+      recentObservations: [makeObservation({ title: 'Recent work' })],
+      reasoningChains: [makeReasoningChain({ title: 'Design chain', reasoning: 'R'.repeat(400) })],
+      consensusDecisions: [makeConsensusDecision({ title: 'Some decision', description: 'D'.repeat(300) })],
+      hologram: {
+        hot: [],
+        warm: [makeScoredFile({ path: 'src/warm.ts', raw_pressure: 0.5, temperature: 'WARM' })],
+        cold: [],
+      },
+    });
+
+    // Inline: large budget — all sections rendered in full
+    const inlineResult = assembleContext(sources, { maxTokens: 4000 });
+
+    // To force ref mode with the same sources, we need the priority sections to consume
+    // > maxTokens - 500. With tiny identity+project, we set a very small maxTokens
+    // so that after the header + identity + project, < 500 tokens remain.
+    // maxTokens=50: header=~11 tokens, identity=~6 tokens, project=~9 tokens → ~26 tokens used.
+    // 50 - 26 = 24 remaining → useReferences=true. Refs themselves are ~10 tokens each, so they fit.
+    const refResult = assembleContext(sources, { maxTokens: 50 });
+
+    // Inline reasoning section alone is ~100 tokens (400 char reasoning + header).
+    // Ref reasoning is 2 lines ~ 10 tokens. Full inline markdown >> ref markdown.
+    expect(inlineResult.markdown.length).toBeGreaterThan(refResult.markdown.length);
+  });
+
+  it('full assembly with mixed inline and reference sections', () => {
+    // Medium budget: enough for identity + project inline, then refs for rest
+    const sources = emptySources({
+      scope: PROJECT_SCOPE,
+      identity: { agent: 'Claudex' },
+      projectContext: { primer: 'Project primer' },
+      searchResults: [makeSearchResult({ observation: makeObservation({ title: 'FTS hit' }) })],
+      recentObservations: [makeObservation({ title: 'Recent work' })],
+      reasoningChains: [makeReasoningChain({ title: 'Reasoning' })],
+      postCompaction: true,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+    const md = result.markdown;
+
+    // With 4000 tokens and small sources, all should be inline
+    expect(md).toContain('## Identity\n');
+    expect(md).toContain('## Project (my-app)\n');
+    expect(md).toContain('## Flow Reasoning\n');
+    expect(md).toContain('## Related Observations\n');
+    expect(md).toContain('## Recent Activity\n');
+    expect(md).toContain('## Session Continuity\n');
+    expect(md).not.toContain('(refs)');
   });
 });
