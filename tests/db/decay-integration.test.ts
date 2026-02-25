@@ -1,11 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { MigrationRunner } from '../../src/db/migrations.js';
-import { migration_1 } from '../../src/db/schema.js';
-import { migration_2, migration_4 } from '../../src/db/search.js';
-import { migration_3 } from '../../src/db/schema-phase2.js';
-import { migration_5 } from '../../src/db/schema-phase3.js';
-import { migration_6 } from '../../src/db/schema-phase10.js';
 import { migration_7 } from '../../src/db/schema-wave3.js';
 import { bumpAccessCount, storeObservation } from '../../src/db/observations.js';
 import { decayAllScores, upsertPressureScore } from '../../src/db/pressure.js';
@@ -41,13 +36,7 @@ function setupDb(): Database.Database {
     )
   `);
   const runner = new MigrationRunner(db);
-  migration_1(runner);
-  migration_2(runner);
-  migration_3(runner);
-  migration_4(runner);
-  migration_5(runner);
-  migration_6(runner);
-  migration_7(runner);
+  runner.run();
   return db;
 }
 
@@ -260,15 +249,7 @@ describe('migration_7 idempotency', () => {
       )
     `);
     const runner = new MigrationRunner(db);
-    migration_1(runner);
-    migration_2(runner);
-    migration_3(runner);
-    migration_4(runner);
-    migration_5(runner);
-    migration_6(runner);
-
-    // First application
-    expect(() => migration_7(runner)).not.toThrow();
+    runner.run(); // Runs all 7 migrations including migration_7
 
     // Second application — should be no-op (version guard)
     expect(() => migration_7(runner)).not.toThrow();

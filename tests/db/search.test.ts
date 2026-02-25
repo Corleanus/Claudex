@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { searchObservations, migration_2 } from '../../src/db/search.js';
-import { migration_1 } from '../../src/db/schema.js';
+import { searchObservations } from '../../src/db/search.js';
 import { MigrationRunner } from '../../src/db/migrations.js';
 import { storeObservation } from '../../src/db/observations.js';
 import type { Observation } from '../../src/shared/types.js';
@@ -49,8 +48,7 @@ function setupDb(): Database.Database {
   `);
 
   const runner = new MigrationRunner(db);
-  migration_1(runner);
-  migration_2(runner);
+  runner.run();
 
   return db;
 }

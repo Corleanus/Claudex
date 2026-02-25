@@ -10,11 +10,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { MigrationRunner } from '../../src/db/migrations.js';
-import { migration_1 } from '../../src/db/schema.js';
-import { migration_2, migration_4 } from '../../src/db/search.js';
-import { migration_3 } from '../../src/db/schema-phase2.js';
-import { migration_5 } from '../../src/db/schema-phase3.js';
-import { migration_6 } from '../../src/db/schema-phase10.js';
 import {
   getCheckpointState,
   upsertCheckpointState,
@@ -55,12 +50,7 @@ function setupDb(): Database.Database {
     )
   `);
   const runner = new MigrationRunner(db);
-  migration_1(runner);
-  migration_2(runner);
-  migration_3(runner);
-  migration_4(runner);
-  migration_5(runner);
-  migration_6(runner);
+  runner.run();
   return db;
 }
 

@@ -1,9 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { MigrationRunner } from '../../src/db/migrations.js';
-import { migration_1 } from '../../src/db/schema.js';
-import { migration_2, migration_4, searchAll } from '../../src/db/search.js';
-import { migration_3 } from '../../src/db/schema-phase2.js';
+import { searchAll } from '../../src/db/search.js';
 import { storeObservation } from '../../src/db/observations.js';
 import { insertReasoning } from '../../src/db/reasoning.js';
 import { insertConsensus } from '../../src/db/consensus.js';
@@ -52,10 +50,7 @@ function setupDb(): Database.Database {
   `);
 
   const runner = new MigrationRunner(db);
-  migration_1(runner);  // observations + sessions tables
-  migration_3(runner);  // reasoning_chains + consensus_decisions + pressure_scores
-  migration_2(runner);  // FTS5 for observations
-  migration_4(runner);  // FTS5 for reasoning + consensus
+  runner.run();
   return db;
 }
 
