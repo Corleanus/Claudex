@@ -24,6 +24,7 @@ import {
   updateThreadSummary,
   archiveStateFiles,
   cleanupOldArchives,
+  validateSessionId,
 } from '../../src/checkpoint/state-files.js';
 
 // =============================================================================
@@ -380,5 +381,230 @@ describe('session isolation', () => {
     expect(yQuestions).toHaveLength(5);
     expect(xQuestions[0]).toBe('Question X-0');
     expect(yQuestions[4]).toBe('Question Y-4');
+  });
+});
+
+// =============================================================================
+// Atomic Writes (C07)
+// =============================================================================
+
+describe('atomic writes', () => {
+  it('file exists and is valid YAML after appendDecision', () => {
+    const decision: Decision = {
+      id: 'atomic-1',
+      what: 'Atomic test',
+      why: 'Testing write-then-rename',
+      when: '2026-03-01T00:00:00Z',
+      reversible: true,
+    };
+    appendDecision(tmpDir, 'atomic-session', decision);
+
+    const filePath = path.join(tmpDir, 'context', 'state', 'atomic-session', 'decisions.yaml');
+    expect(fs.existsSync(filePath)).toBe(true);
+
+    const result = readDecisions(tmpDir, 'atomic-session');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe('atomic-1');
+  });
+
+  it('.tmp file does not persist after successful write', () => {
+    appendDecision(tmpDir, 'tmp-check', {
+      id: 'd1', what: 'Test', why: 'Tmp check', when: '2026-03-01T00:00:00Z', reversible: true,
+    });
+
+    const tmpPath = path.join(tmpDir, 'context', 'state', 'tmp-check', 'decisions.yaml.tmp');
+    expect(fs.existsSync(tmpPath)).toBe(false);
+  });
+
+  it('round-trip integrity: write then read back', () => {
+    const decision: Decision = {
+      id: 'round-trip',
+      what: 'Test with "special" chars & symbols',
+      why: 'Because: reasons',
+      when: '2026-03-01T12:00:00Z',
+      reversible: false,
+    };
+    appendDecision(tmpDir, 'rt-session', decision);
+
+    const result = readDecisions(tmpDir, 'rt-session');
+    expect(result[0]).toEqual(decision);
+  });
+
+  it('multiple sequential writes maintain data integrity', () => {
+    for (let i = 0; i < 10; i++) {
+      appendQuestion(tmpDir, 'seq-session', `Question ${i}`);
+    }
+    const questions = readQuestions(tmpDir, 'seq-session');
+    expect(questions).toHaveLength(10);
+    expect(questions[0]).toBe('Question 0');
+    expect(questions[9]).toBe('Question 9');
+  });
+});
+
+// =============================================================================
+// session_id Validation and Path Containment (C03)
+// =============================================================================
+
+describe('session_id validation and path containment', () => {
+  const decision: Decision = {
+    id: 'd-test',
+    what: 'Test decision',
+    why: 'Testing path traversal',
+    when: '2026-03-01T00:00:00Z',
+    reversible: true,
+  };
+
+  // --- Path traversal rejection ---
+
+  it('readDecisions returns empty for ../../../etc traversal', () => {
+    const result = readDecisions(tmpDir, '../../../etc');
+    expect(result).toEqual([]);
+  });
+
+  it('appendDecision with traversal writes inside state dir, not outside', () => {
+    // Snapshot files before
+    const stateRoot = path.join(tmpDir, 'context', 'state');
+    appendDecision(tmpDir, '../../../tmp/evil', decision);
+    // Sanitized ID is 'tmpevil' — should be inside state root
+    const sanitizedDir = path.join(stateRoot, 'tmpevil');
+    expect(fs.existsSync(sanitizedDir)).toBe(true);
+    // No 'evil' directory at project root
+    expect(fs.existsSync(path.join(tmpDir, 'evil'))).toBe(false);
+  });
+
+  it('readDecisions returns empty for backslash traversal', () => {
+    const result = readDecisions(tmpDir, '..\\..\\..\\windows');
+    expect(result).toEqual([]);
+  });
+
+  it('readDecisions returns empty for embedded traversal', () => {
+    const result = readDecisions(tmpDir, 'valid-session/../../escape');
+    expect(result).toEqual([]);
+  });
+
+  // --- Path containment enforcement ---
+
+  it('appendDecision with ../escape does not create files outside state root', () => {
+    appendDecision(tmpDir, '../escape', decision);
+    expect(fs.existsSync(path.join(tmpDir, '..', 'escape'))).toBe(false);
+  });
+
+  // --- Safe session_id passthrough ---
+
+  it('valid session_id round-trips correctly', () => {
+    appendDecision(tmpDir, 'normal-session-123', decision);
+    const result = readDecisions(tmpDir, 'normal-session-123');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe('d-test');
+  });
+
+  it('max-length session_id (64 chars) works', () => {
+    const longId = 'a'.repeat(64);
+    appendDecision(tmpDir, longId, decision);
+    const result = readDecisions(tmpDir, longId);
+    expect(result).toHaveLength(1);
+  });
+
+  // --- validateSessionId ---
+
+  it('validateSessionId accepts valid ID', () => {
+    expect(validateSessionId('abc-123_test')).toBe(true);
+  });
+
+  it('validateSessionId rejects path traversal', () => {
+    expect(validateSessionId('../etc')).toBe(false);
+  });
+
+  it('validateSessionId rejects empty string', () => {
+    expect(validateSessionId('')).toBe(false);
+  });
+
+  it('validateSessionId rejects over 64 chars', () => {
+    expect(validateSessionId('a'.repeat(65))).toBe(false);
+  });
+
+  it('validateSessionId rejects spaces', () => {
+    expect(validateSessionId('has spaces')).toBe(false);
+  });
+
+  it('validateSessionId rejects slashes', () => {
+    expect(validateSessionId('has/slash')).toBe(false);
+  });
+});
+
+// =============================================================================
+// R04: YAML element-level validation
+// =============================================================================
+
+describe('YAML element validation (R04)', () => {
+  it('readQuestions filters non-string elements', () => {
+    writeRawStateFile(tmpDir, 'r04-sess', 'questions.yaml',
+      '- "valid question"\n- 123\n- null\n- nested: true\n');
+    const result = readQuestions(tmpDir, 'r04-sess');
+    expect(result).toEqual(['valid question']);
+  });
+
+  it('readDecisions filters entries missing required fields', () => {
+    writeRawStateFile(tmpDir, 'r04-sess', 'decisions.yaml',
+      '- id: "d1"\n  what: "Valid"\n  why: "Reason"\n  when: "2026-01-01"\n  reversible: true\n' +
+      '- id: "d2"\n  what: null\n  why: "Reason"\n  when: "2026-01-01"\n  reversible: true\n' +
+      '- 42\n' +
+      '- id: "d3"\n  what: "Also valid"\n  why: "Another"\n  when: "2026-01-01"\n  reversible: false\n');
+    const result = readDecisions(tmpDir, 'r04-sess');
+    expect(result).toHaveLength(2);
+    expect(result[0]!.what).toBe('Valid');
+    expect(result[1]!.what).toBe('Also valid');
+  });
+
+  it('readThread filters key_exchanges missing gist or role', () => {
+    writeRawStateFile(tmpDir, 'r04-sess', 'thread.yaml',
+      'summary: "Test"\nkey_exchanges:\n' +
+      '  - role: "user"\n    gist: "Valid"\n' +
+      '  - role: "agent"\n' +
+      '  - gist: "no role"\n' +
+      '  - 42\n');
+    const result = readThread(tmpDir, 'r04-sess');
+    expect(result.key_exchanges).toHaveLength(1);
+    expect(result.key_exchanges[0]!.gist).toBe('Valid');
+  });
+
+  it('readFilesTouched filters invalid changed entries', () => {
+    writeRawStateFile(tmpDir, 'r04-sess', 'files-touched.yaml',
+      'changed:\n' +
+      '  - path: "src/a.ts"\n    action: "created"\n    summary: "New"\n' +
+      '  - noPath: true\n' +
+      '  - 42\n' +
+      'read:\n  - "valid.ts"\n  - 123\n' +
+      'hot:\n  - "hot.ts"\n  - null\n');
+    const result = readFilesTouched(tmpDir, 'r04-sess');
+    expect(result.changed).toHaveLength(1);
+    expect(result.changed[0]!.path).toBe('src/a.ts');
+    expect(result.read).toEqual(['valid.ts']);
+    expect(result.hot).toEqual(['hot.ts']);
+  });
+
+  it('readQuestions returns empty for all-invalid elements', () => {
+    writeRawStateFile(tmpDir, 'r04-sess', 'questions.yaml', '- 1\n- 2\n- 3\n');
+    const result = readQuestions(tmpDir, 'r04-sess');
+    expect(result).toEqual([]);
+  });
+});
+
+// =============================================================================
+// R29: Atomic write verification (already fixed, regression test)
+// =============================================================================
+
+describe('atomic write verification (R29)', () => {
+  it('no .tmp file remains after safeWriteYaml', () => {
+    appendDecision(tmpDir, 'atomic-r29', {
+      id: 'd1', what: 'Test', why: 'Reason', when: '2026-01-01T00:00:00Z', reversible: true,
+    });
+    const tmpPath = path.join(tmpDir, 'context', 'state', 'atomic-r29', 'decisions.yaml.tmp');
+    expect(fs.existsSync(tmpPath)).toBe(false);
+
+    const mainPath = path.join(tmpDir, 'context', 'state', 'atomic-r29', 'decisions.yaml');
+    expect(fs.existsSync(mainPath)).toBe(true);
+    const content = fs.readFileSync(mainPath, 'utf-8');
+    expect(content.length).toBeGreaterThan(0);
   });
 });

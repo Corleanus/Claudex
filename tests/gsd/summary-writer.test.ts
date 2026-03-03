@@ -272,3 +272,80 @@ describe('archivePhaseSummary', () => {
     expect(fs.existsSync(archiveDir)).toBe(true);
   });
 });
+
+// =============================================================================
+// Symlink Safety (C06)
+// =============================================================================
+
+function tryCreateSymlink(target: string, link: string): boolean {
+  try {
+    fs.symlinkSync(target, link);
+    return true;
+  } catch {
+    return false; // EPERM on Windows without admin
+  }
+}
+
+describe('symlink safety (C06)', () => {
+  it('writePhaseSummary rejects symlink at SUMMARY.md path', () => {
+    const contextDir = path.join(tmpDir, '.planning', 'context');
+    fs.mkdirSync(contextDir, { recursive: true });
+
+    // Create a target file outside context
+    const targetPath = path.join(tmpDir, 'outside-target.md');
+    fs.writeFileSync(targetPath, 'ORIGINAL', 'utf-8');
+
+    // Create symlink at SUMMARY.md pointing to target
+    const summaryPath = path.join(contextDir, 'SUMMARY.md');
+    const created = tryCreateSymlink(targetPath, summaryPath);
+    if (!created) {
+      // Windows without admin — skip
+      return;
+    }
+
+    const result = writePhaseSummary(tmpDir, 'test-project', fakeDb, makeGsdState());
+    expect(result).toBe(false);
+
+    // Target file must be unchanged
+    expect(fs.readFileSync(targetPath, 'utf-8')).toBe('ORIGINAL');
+  });
+
+  it('archivePhaseSummary rejects symlink at SUMMARY.md path', () => {
+    const contextDir = path.join(tmpDir, '.planning', 'context');
+    fs.mkdirSync(contextDir, { recursive: true });
+
+    const targetPath = path.join(tmpDir, 'outside-target-archive.md');
+    fs.writeFileSync(targetPath, 'ORIGINAL', 'utf-8');
+
+    const summaryPath = path.join(contextDir, 'SUMMARY.md');
+    const created = tryCreateSymlink(targetPath, summaryPath);
+    if (!created) {
+      return;
+    }
+
+    const result = archivePhaseSummary(tmpDir, 4, 'summary-generation');
+    expect(result).toBe(false);
+
+    // Target unchanged
+    expect(fs.readFileSync(targetPath, 'utf-8')).toBe('ORIGINAL');
+
+    // No archive created
+    const archivePath = path.join(contextDir, 'archive', '04-summary-generation.md');
+    expect(fs.existsSync(archivePath)).toBe(false);
+  });
+
+  it('archivePhaseSummary with traversal phaseName still writes inside archive dir', () => {
+    createSummaryFile('# Summary\n');
+
+    const result = archivePhaseSummary(tmpDir, 4, '../../../etc/evil');
+    // Should either return false (containment blocked) or write inside archive dir
+    if (result) {
+      // If it succeeded, verify archive is inside archive dir
+      const archiveDir = path.join(tmpDir, '.planning', 'context', 'archive');
+      const entries = fs.readdirSync(archiveDir);
+      expect(entries.length).toBeGreaterThan(0);
+    }
+    // Either way, no files should exist at the traversal target
+    expect(fs.existsSync(path.join(tmpDir, '..', '..', '..', 'etc', 'evil'))).toBe(false);
+  });
+});

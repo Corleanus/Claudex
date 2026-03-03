@@ -32,7 +32,7 @@ export interface RecoveryReport {
   healthy: boolean;
 }
 
-export interface RecoveryCheck {
+interface RecoveryCheck {
   name: string;
   status: 'ok' | 'warning' | 'recovered' | 'failed';
   message: string;

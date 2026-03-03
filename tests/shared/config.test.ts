@@ -5,8 +5,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadConfig } from '../../src/shared/config.js';
-import { DEFAULT_CONFIG } from '../../src/shared/types.js';
+import { loadConfig, validateConfig } from '../../src/shared/config.js';
+import { DEFAULT_CONFIG, type ClaudexConfig } from '../../src/shared/types.js';
 
 const TEST_CONFIG_DIR = path.join(process.cwd(), '.test-config');
 const TEST_CONFIG_PATH = path.join(TEST_CONFIG_DIR, 'config.json');
@@ -206,6 +206,79 @@ describe('loadConfig', () => {
     const config = loadConfig();
     expect(config.vector?.openai?.apiKey).toBeUndefined();
     expect(config.vector?.openai?.model).toBeUndefined();
+  });
+
+  it('rejects NaN for numeric fields — falls back to defaults', () => {
+    const config = structuredClone(DEFAULT_CONFIG) as ClaudexConfig;
+    config.hologram!.timeout_ms = NaN;
+    config.hooks!.latency_budget_ms = NaN;
+    config.wrapper!.warnThreshold = NaN;
+    config.wrapper!.cooldownMs = NaN;
+    config.observation!.retention_days = NaN;
+
+    const validated = validateConfig(config);
+    expect(validated.hologram?.timeout_ms).toBe(DEFAULT_CONFIG.hologram!.timeout_ms);
+    expect(validated.hooks?.latency_budget_ms).toBe(DEFAULT_CONFIG.hooks!.latency_budget_ms);
+    expect(validated.wrapper?.warnThreshold).toBe(DEFAULT_CONFIG.wrapper!.warnThreshold);
+    expect(validated.wrapper?.cooldownMs).toBe(DEFAULT_CONFIG.wrapper!.cooldownMs);
+    expect(validated.observation?.retention_days).toBe(DEFAULT_CONFIG.observation!.retention_days);
+  });
+
+  it('rejects Infinity for numeric fields — falls back to defaults', () => {
+    const config = structuredClone(DEFAULT_CONFIG) as ClaudexConfig;
+    config.hologram!.timeout_ms = Infinity;
+    config.hologram!.health_interval_ms = -Infinity;
+    config.wrapper!.flushThreshold = Infinity;
+
+    const validated = validateConfig(config);
+    expect(validated.hologram?.timeout_ms).toBe(DEFAULT_CONFIG.hologram!.timeout_ms);
+    expect(validated.hologram?.health_interval_ms).toBe(DEFAULT_CONFIG.hologram!.health_interval_ms);
+    expect(validated.wrapper?.flushThreshold).toBe(DEFAULT_CONFIG.wrapper!.flushThreshold);
+  });
+
+  it('preserves valid finite numbers unchanged', () => {
+    const config = structuredClone(DEFAULT_CONFIG) as ClaudexConfig;
+    config.hologram!.timeout_ms = 5000;
+    config.hooks!.latency_budget_ms = 3000;
+    config.wrapper!.warnThreshold = 0.85;
+    config.wrapper!.cooldownMs = 60000;
+
+    const validated = validateConfig(config);
+    expect(validated.hologram?.timeout_ms).toBe(5000);
+    expect(validated.hooks?.latency_budget_ms).toBe(3000);
+    expect(validated.wrapper?.warnThreshold).toBe(0.85);
+    expect(validated.wrapper?.cooldownMs).toBe(60000);
+  });
+
+  it('R30: invalid context_token_budget gets default (not deleted)', () => {
+    const config = structuredClone(DEFAULT_CONFIG) as ClaudexConfig;
+    config.hooks!.context_token_budget = -1; // invalid: < 500
+    const validated = validateConfig(config);
+    expect(validated.hooks?.context_token_budget).toBe(DEFAULT_CONFIG.hooks!.context_token_budget);
+    expect(validated.hooks?.context_token_budget).toBe(4000);
+  });
+
+  it('R30: context_token_budget too high gets default', () => {
+    const config = structuredClone(DEFAULT_CONFIG) as ClaudexConfig;
+    config.hooks!.context_token_budget = 999999; // invalid: > 50000
+    const validated = validateConfig(config);
+    expect(validated.hooks?.context_token_budget).toBe(4000);
+  });
+
+  it('R30: valid context_token_budget is preserved', () => {
+    const config = structuredClone(DEFAULT_CONFIG) as ClaudexConfig;
+    config.hooks!.context_token_budget = 2000;
+    const validated = validateConfig(config);
+    expect(validated.hooks?.context_token_budget).toBe(2000);
+  });
+
+  it('R30: context_token_budget field exists after invalid value (not deleted)', () => {
+    const config = structuredClone(DEFAULT_CONFIG) as ClaudexConfig;
+    config.hooks!.context_token_budget = NaN; // invalid
+    const validated = validateConfig(config);
+    // The key must exist (not undefined) — R30 fix assigns default instead of deleting
+    expect('context_token_budget' in validated.hooks!).toBe(true);
+    expect(validated.hooks?.context_token_budget).toBe(4000);
   });
 
   it('preserves valid values across all config sections', () => {

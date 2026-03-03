@@ -15,6 +15,7 @@ import { PATHS } from '../shared/paths.js';
 import { loadLatestCheckpoint } from '../checkpoint/loader.js';
 import { RESUME_LOAD } from '../checkpoint/types.js';
 import type { LoadOptions } from '../checkpoint/types.js';
+import { loadConfig } from '../shared/config.js';
 import type { SessionStartInput, Scope, ContextSources, HookStdout } from '../shared/types.js';
 
 const HOOK_NAME = 'session-start';
@@ -84,11 +85,14 @@ const LOCK_STALE_MS = 5000;
 /**
  * Acquire a file lock for index.json using an exclusive-create lock file.
  * Returns a release function. If the lock cannot be acquired, returns null.
+ *
+ * R26 fix: uses async setTimeout delay with exponential backoff instead of busy-wait.
+ *
+ * @internal — exported for testing
  */
-function acquireIndexLock(): (() => void) | null {
+export async function acquireIndexLock(): Promise<(() => void) | null> {
   const lockPath = PATHS.sessionIndex + '.lock';
   const maxRetries = 3;
-  const retryDelay = 50; // ms
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -113,10 +117,10 @@ function acquireIndexLock(): (() => void) | null {
         continue;
       }
 
-      // Lock is held and not stale — wait briefly before retry
+      // Lock is held and not stale — wait with exponential backoff before retry
       if (attempt < maxRetries - 1) {
-        const start = Date.now();
-        while (Date.now() - start < retryDelay) { /* busy wait */ }
+        const retryDelay = 50 * Math.pow(2, attempt); // 50ms, 100ms, 200ms
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
     }
   }
@@ -125,8 +129,8 @@ function acquireIndexLock(): (() => void) | null {
 }
 
 /** Step 3: Register session in index.json (append-only, v1 compatible). */
-function registerInIndex(entry: SessionIndexEntry): void {
-  const releaseLock = acquireIndexLock();
+async function registerInIndex(entry: SessionIndexEntry): Promise<void> {
+  const releaseLock = await acquireIndexLock();
   if (!releaseLock) {
     logToFile(HOOK_NAME, 'WARN', 'Could not acquire index.json lock, proceeding without lock');
   }
@@ -231,6 +235,9 @@ runHook(HOOK_NAME, async (input) => {
   const cwd = startInput.cwd || process.cwd();
   const source = startInput.source || 'unknown';
 
+  // Load config once for the entire hook invocation
+  const config = loadConfig();
+
   // Step 1: Bootstrap directories
   bootstrapDirectories();
   logToFile(HOOK_NAME, 'INFO', 'Directories bootstrapped');
@@ -253,70 +260,68 @@ runHook(HOOK_NAME, async (input) => {
     source,
     status: 'active',
   };
-  registerInIndex(entry);
+  await registerInIndex(entry);
   logToFile(HOOK_NAME, 'INFO', 'Session registered in index.json');
 
   // Step 4: SQLite registration (soft dependency)
   await registerInSqlite(scope, sessionId, cwd);
 
-  // Step 4.5: Health check + Recovery
+  // Open a single DB connection for Steps 4.5, 6, and 6.5
+  let db: import('better-sqlite3').Database | null = null;
   try {
-    const { loadConfig } = await import('../shared/config.js');
-    const { checkHealth } = await import('../shared/health.js');
     const { getDatabase } = await import('../db/connection.js');
-    const { runRecovery } = await import('../lib/recovery.js');
-
-    const config = loadConfig();
-    const db = getDatabase();
+    db = getDatabase();
     if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping recovery and health check');
-    } else {
-      try {
-        // Run recovery first — cleans up stale state before health check
-        const recovery = await runRecovery(config, db);
-        if (recovery.actionsPerformed.length > 0) {
-          logToFile(HOOK_NAME, 'INFO', `Recovery: ${recovery.actionsPerformed.join(', ')}`);
-        }
-
-        const health = await checkHealth(config, db);
-        health.recovery = recovery;
-        logToFile(HOOK_NAME, 'INFO', `System health: ${JSON.stringify(health)}`);
-      } finally {
-        db.close();
-      }
+      logToFile(HOOK_NAME, 'WARN', 'Database connection failed — DB-dependent steps will run degraded');
     }
-  } catch (healthErr) {
-    logToFile(HOOK_NAME, 'WARN', 'Health check / recovery failed (non-fatal)', healthErr);
+  } catch (dbErr) {
+    logToFile(HOOK_NAME, 'WARN', 'Database connection failed — DB-dependent steps will run degraded', dbErr);
   }
 
-  // Step 5: First-run detection
+  // Step 5: First-run detection (does not depend on DB)
   const isFirstRun = detectFirstRun();
   logToFile(HOOK_NAME, 'INFO', `First run: ${isFirstRun}`);
 
-  // Step 6: Context restoration from DB
   let additionalContext: string | undefined;
-  try {
-    const { getDatabase } = await import('../db/connection.js');
-    const { getRecentObservations } = await import('../db/observations.js');
-    const { getRecentReasoning } = await import('../db/reasoning.js');
-    const { getRecentConsensus } = await import('../db/consensus.js');
-    const { getPressureScores } = await import('../db/pressure.js');
-    const { assembleContext } = await import('../lib/context-assembler.js');
-    const { loadConfig } = await import('../shared/config.js');
 
-    const db = getDatabase();
-    if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping context restoration');
-    } else {
-      try {
-        // Query previous session state scoped appropriately:
-        // - Project scope: query that project's data
-        // - Global scope (project === null): query global-only data (WHERE project IS NULL or '__global__' sentinel)
-        const observations = getRecentObservations(db, 20, project);
-        const reasoningChains = getRecentReasoning(db, 5, project);
-        const consensusDecisions = getRecentConsensus(db, 5, project);
-        // Pressure scores use '__global__' sentinel instead of NULL due to UNIQUE constraint
-        const pressureScores = getPressureScores(db, project ?? '__global__');
+  try {
+  // Step 4.5: Health check + Recovery
+  if (db) {
+    try {
+      const { checkHealth } = await import('../shared/health.js');
+      const { runRecovery } = await import('../lib/recovery.js');
+
+      // Run recovery first — cleans up stale state before health check
+      const recovery = await runRecovery(config, db);
+      if (recovery.actionsPerformed.length > 0) {
+        logToFile(HOOK_NAME, 'INFO', `Recovery: ${recovery.actionsPerformed.join(', ')}`);
+      }
+
+      const health = await checkHealth(config, db);
+      health.recovery = recovery;
+      logToFile(HOOK_NAME, 'INFO', `System health: ${JSON.stringify(health)}`);
+    } catch (healthErr) {
+      logToFile(HOOK_NAME, 'WARN', 'Health check / recovery failed (non-fatal)', healthErr);
+    }
+  }
+
+  // Step 6: Context restoration from DB
+  if (db) {
+    try {
+      const { getRecentObservations } = await import('../db/observations.js');
+      const { getRecentReasoning } = await import('../db/reasoning.js');
+      const { getRecentConsensus } = await import('../db/consensus.js');
+      const { getPressureScores } = await import('../db/pressure.js');
+      const { assembleContext } = await import('../lib/context-assembler.js');
+
+      // Query previous session state scoped appropriately:
+      // - Project scope: query that project's data
+      // - Global scope (project === null): query global-only data (DB handles undefined/null as global scope)
+      const observations = getRecentObservations(db, 20, project);
+      const reasoningChains = getRecentReasoning(db, 5, project);
+      const consensusDecisions = getRecentConsensus(db, 5, project);
+      // Pressure scores: undefined maps to __global__ sentinel internally (UNIQUE constraint)
+      const pressureScores = getPressureScores(db, project ?? undefined);
 
       logToFile(HOOK_NAME, 'DEBUG',
         `DB restoration data: observations=${observations.length} reasoning=${reasoningChains.length} consensus=${consensusDecisions.length} pressure=${pressureScores.length}`);
@@ -324,7 +329,6 @@ runHook(HOOK_NAME, async (input) => {
       // Build hologram-like response from DB pressure scores (fallback)
       // If hologram is available, query it instead
       let hologramResponse: import('../shared/types.js').HologramResponse | null = null;
-      const config = loadConfig();
 
       if (config.hologram?.enabled) {
         try {
@@ -343,8 +347,8 @@ runHook(HOOK_NAME, async (input) => {
             // Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
             if (hologramResponse) {
               try {
-                const { upsertPressureScore } = await import('../db/pressure.js');
-                const projectKey = project ?? '__global__';
+                const { batchUpsertPressureScores } = await import('../db/pressure.js');
+                const projectKey = project ?? undefined;
                 const nowEpoch = Date.now();
 
                 const entries: Array<{ list: typeof hologramResponse.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
@@ -353,10 +357,10 @@ runHook(HOOK_NAME, async (input) => {
                   { list: hologramResponse.cold, temp: 'COLD', pressure: 0.1 },
                 ];
 
-                let persisted = 0;
+                const scores: Array<{ file_path: string; project?: string; raw_pressure: number; temperature: 'HOT' | 'WARM' | 'COLD'; last_accessed_epoch: number; decay_rate: number }> = [];
                 for (const { list, temp, pressure } of entries) {
                   for (const file of list) {
-                    upsertPressureScore(db, {
+                    scores.push({
                       file_path: file.path,
                       project: projectKey,
                       raw_pressure: file.raw_pressure ?? pressure,
@@ -364,11 +368,11 @@ runHook(HOOK_NAME, async (input) => {
                       last_accessed_epoch: nowEpoch,
                       decay_rate: 0.05,
                     });
-                    persisted++;
                   }
                 }
 
-                logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} hologram pressure scores to DB`);
+                batchUpsertPressureScores(db, scores);
+                logToFile(HOOK_NAME, 'DEBUG', `Persisted ${scores.length} hologram pressure scores to DB`);
               } catch (persistErr) {
                 logToFile(HOOK_NAME, 'WARN', 'Failed to persist hologram pressure scores (non-fatal)', persistErr);
               }
@@ -464,41 +468,37 @@ runHook(HOOK_NAME, async (input) => {
       } else {
         logToFile(HOOK_NAME, 'INFO', 'Context restoration: no restorable context found');
       }
-      } finally {
-        db.close();
-      }
+    } catch (restorationErr) {
+      logToFile(HOOK_NAME, 'WARN', 'Context restoration failed (non-fatal, continuing without restoration)', restorationErr);
     }
-  } catch (restorationErr) {
-    logToFile(HOOK_NAME, 'WARN', 'Context restoration failed (non-fatal, continuing without restoration)', restorationErr);
   }
 
   // Step 6.5: Audit log — session restoration
-  try {
-    const { getDatabase: getAuditDb } = await import('../db/connection.js');
-    const { logAudit } = await import('../db/audit.js');
-    const auditDb = getAuditDb();
-    if (!auditDb) {
-      logToFile(HOOK_NAME, 'WARN', 'Database connection failed, skipping audit logging');
-    } else {
-      try {
-        const auditNow = new Date();
-        logAudit(auditDb, {
-          timestamp: auditNow.toISOString(),
-          timestamp_epoch: auditNow.getTime(),
-          session_id: sessionId,
-          event_type: 'context_assembly',
-          actor: 'hook:session-start',
-          details: {
-            restored: !!additionalContext,
-            source,
-          },
-        });
-      } finally {
-        auditDb.close();
-      }
+  if (db) {
+    try {
+      const { logAudit } = await import('../db/audit.js');
+      const auditNow = new Date();
+      logAudit(db, {
+        timestamp: auditNow.toISOString(),
+        timestamp_epoch: auditNow.getTime(),
+        session_id: sessionId,
+        event_type: 'context_assembly',
+        actor: 'hook:session-start',
+        details: {
+          restored: !!additionalContext,
+          source,
+        },
+      });
+    } catch (auditErr) {
+      logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);
     }
-  } catch (auditErr) {
-    logToFile(HOOK_NAME, 'WARN', 'Audit logging failed (non-fatal)', auditErr);
+  }
+
+  } finally {
+    // Close the single shared DB connection
+    if (db) {
+      try { db.close(); } catch { /* already closed */ }
+    }
   }
 
   // Step 7: Final log summary

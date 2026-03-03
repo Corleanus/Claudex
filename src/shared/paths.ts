@@ -18,9 +18,34 @@ export const CLAUDEX_HOME = path.join(os.homedir(), '.claudex');
  * @param sessionId - Raw session_id from input
  * @returns Sanitized session_id safe for filesystem paths
  */
-function sanitizeSessionId(sessionId: string): string {
+export function sanitizeSessionId(sessionId: string): string {
   // Remove path separators and limit to safe characters
   return sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+/**
+ * Check if a file path is contained within a root directory.
+ * Uses realpathSync to resolve symlinks, falling back to path.resolve
+ * for paths that don't yet exist on disk.
+ *
+ * @param filePath - The path to check
+ * @param root - The root directory that must contain filePath
+ * @returns true if filePath is inside root (or equal to root)
+ */
+export function isContainedPath(filePath: string, root: string): boolean {
+  let resolved: string;
+  let resolvedRoot: string;
+  try {
+    resolved = fs.realpathSync(filePath);
+  } catch {
+    resolved = path.resolve(filePath);
+  }
+  try {
+    resolvedRoot = fs.realpathSync(root);
+  } catch {
+    resolvedRoot = path.resolve(root);
+  }
+  return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + path.sep);
 }
 
 /** All Claudex runtime paths */

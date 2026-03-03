@@ -30,6 +30,7 @@
  */
 
 import type Database from 'better-sqlite3';
+import { MS_PER_DAY } from '../shared/epoch.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
 
@@ -60,7 +61,7 @@ export function getHalfLife(importance: number): number {
 // EI Computation
 // =============================================================================
 
-export interface EIParams {
+interface EIParams {
   importance: number;
   accessCount: number;
   daysSinceAccess: number;
@@ -94,7 +95,7 @@ export function computeEI(params: EIParams): number {
 // Immunity Check
 // =============================================================================
 
-const IMMUNITY_WINDOW_MS = 180 * 86400 * 1000;
+const IMMUNITY_WINDOW_MS = 180 * MS_PER_DAY;
 
 /**
  * Returns true if an observation is immune from pruning.
@@ -176,7 +177,9 @@ export function pruneObservations(
     const nowMs = Date.now();
 
     // Pre-compute co-occurrence adjacency via files_modified self-join.
-    // Falls back to coOccurrences=0 on error or if query takes > 100ms.
+    // Executes the full query, then discards results if it exceeded 100ms
+    // (performance guard — large observation sets can make this query expensive).
+    // Falls back to coOccurrences=0 on error.
     let coOccurrenceMap: Map<number, number> = new Map();
     try {
       const coQueryStart = Date.now();
@@ -221,8 +224,8 @@ export function pruneObservations(
     // Compute EI for each, tag with immunity
     const scored = rows.map(row => {
       const daysSinceAccess = row.last_accessed_at_epoch !== null
-        ? (nowMs - row.last_accessed_at_epoch) / 86400000
-        : (nowMs - row.timestamp_epoch) / 86400000;
+        ? (nowMs - row.last_accessed_at_epoch) / MS_PER_DAY
+        : (nowMs - row.timestamp_epoch) / MS_PER_DAY;
 
       const coOccurrences = coOccurrenceMap.get(row.id) ?? 0;
 

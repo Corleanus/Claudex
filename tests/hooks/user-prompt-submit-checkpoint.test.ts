@@ -299,3 +299,163 @@ describe('user-prompt-submit checkpoint integration', () => {
     });
   });
 });
+
+// =============================================================================
+// Post-compact GSD restoration integration tests
+// =============================================================================
+
+import { assembleContext } from '../../src/lib/context-assembler.js';
+import type { ContextSources, ScoredFile, Scope } from '../../src/shared/types.js';
+import type { GsdCheckpointState } from '../../src/checkpoint/types.js';
+import type { GsdState } from '../../src/gsd/types.js';
+
+function makeGsdState(): GsdState {
+  return {
+    active: true,
+    position: {
+      phase: 7,
+      totalPhases: 8,
+      phaseName: 'Bidirectional State Sync',
+      plan: 2,
+      totalPlans: 2,
+      status: 'In progress',
+    },
+    phases: [
+      { number: 1, name: 'GSD State Reader', goal: 'Parse GSD state', dependsOn: null, requirements: ['PCTX-01'], successCriteria: [], roadmapComplete: true, plans: { total: 1, complete: 1 } },
+      { number: 2, name: 'Phase-Aware Context Injection', goal: 'Inject context', dependsOn: 'Phase 1', requirements: ['PCTX-02'], successCriteria: [], roadmapComplete: true, plans: { total: 2, complete: 2 } },
+      { number: 3, name: 'Phase-Weighted Scoring', goal: 'Weight by phase', dependsOn: 'Phase 1', requirements: ['PCTX-03'], successCriteria: [], roadmapComplete: true, plans: { total: 2, complete: 2 } },
+      { number: 4, name: 'Summary Generation', goal: 'Generate summaries', dependsOn: 'Phase 1', requirements: ['SUMM-01'], successCriteria: [], roadmapComplete: true, plans: { total: 2, complete: 2 } },
+      { number: 5, name: 'Cross-Phase Intelligence', goal: 'Cross-phase patterns', dependsOn: 'Phase 4', requirements: ['SUMM-03'], successCriteria: [], roadmapComplete: true, plans: { total: 2, complete: 2 } },
+      { number: 6, name: 'Phase Transition Hooks', goal: 'Phase lifecycle', dependsOn: 'Phase 1', requirements: ['LIFE-01'], successCriteria: [], roadmapComplete: true, plans: { total: 2, complete: 2 } },
+      { number: 7, name: 'Bidirectional State Sync', goal: 'STATE.md reflects metrics', dependsOn: 'Phase 1', requirements: ['LIFE-04'], successCriteria: [], roadmapComplete: false, plans: { total: 2, complete: 0 } },
+      { number: 8, name: 'Post-Compact GSD Restoration', goal: 'Restore GSD after compact', dependsOn: 'Phase 2', requirements: ['LIFE-06'], successCriteria: [], roadmapComplete: false, plans: { total: 2, complete: 0 } },
+    ],
+    warnings: [],
+  };
+}
+
+function makeCheckpointGsd(): GsdCheckpointState {
+  return {
+    active: true,
+    milestone: 'Claudex-GSD Integration',
+    phase: 7,
+    phase_name: 'Bidirectional State Sync',
+    phase_goal: 'STATE.md reflects Claudex metrics',
+    plan_status: '2 of 2',
+    plan_number: 2,
+    completion_pct: 75,
+    requirements: [],
+  };
+}
+
+function makeHotFile(p: string, pressure: number): ScoredFile {
+  return { path: p, raw_pressure: pressure, temperature: 'HOT', system_bucket: 1, pressure_bucket: 1 };
+}
+
+function makeWarmFile(p: string, pressure: number): ScoredFile {
+  return { path: p, raw_pressure: pressure, temperature: 'WARM', system_bucket: 2, pressure_bucket: 2 };
+}
+
+const PROJECT_SCOPE: Scope = { type: 'project', name: 'test-project', path: '/work/test' };
+
+describe('post-compact GSD restoration', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('first prompt after compact with GSD produces unified resume section', () => {
+    const sources: ContextSources = {
+      hologram: {
+        hot: [makeHotFile('src/state-sync.ts', 0.92)],
+        warm: [makeWarmFile('src/writer.ts', 0.55)],
+        cold: [],
+      },
+      searchResults: [],
+      recentObservations: [],
+      scope: PROJECT_SCOPE,
+      postCompaction: true,
+      gsdState: makeGsdState(),
+    };
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('## Resuming:');
+    expect(result.markdown).toContain('Phase 7');
+    expect(result.markdown).toContain('Bidirectional State Sync');
+    expect(result.markdown).toContain('state-sync.ts');
+    expect(result.markdown).not.toContain('## Project Phase');
+    expect(result.markdown).not.toContain('## Active Focus');
+    expect(result.markdown).not.toContain('## Session Continuity');
+  });
+
+  it('uses checkpoint GSD when live GSD unavailable', () => {
+    const sources: ContextSources = {
+      hologram: { hot: [makeHotFile('src/hot.ts', 0.88)], warm: [], cold: [] },
+      searchResults: [],
+      recentObservations: [],
+      scope: PROJECT_SCOPE,
+      postCompaction: true,
+      gsdState: undefined,
+      checkpointGsd: makeCheckpointGsd(),
+    };
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('## Resuming:');
+    expect(result.markdown).toContain('75%');
+    expect(result.markdown).toContain('Bidirectional State Sync');
+  });
+
+  it('without GSD produces standard sections (no unified section)', () => {
+    const sources: ContextSources = {
+      hologram: { hot: [makeHotFile('src/hot.ts', 0.88)], warm: [], cold: [] },
+      searchResults: [],
+      recentObservations: [],
+      scope: PROJECT_SCOPE,
+      postCompaction: true,
+    };
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).not.toContain('## Resuming:');
+    expect(result.markdown).toContain('## Active Focus');
+    expect(result.markdown).toContain('## Session Continuity');
+  });
+
+  it('non-post-compact prompt uses normal layout', () => {
+    const sources: ContextSources = {
+      hologram: { hot: [makeHotFile('src/hot.ts', 0.88)], warm: [], cold: [] },
+      searchResults: [],
+      recentObservations: [],
+      scope: PROJECT_SCOPE,
+      gsdState: makeGsdState(),
+    };
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).not.toContain('## Resuming:');
+    expect(result.markdown).toContain('## Project Phase');
+    expect(result.markdown).toContain('## Active Focus');
+  });
+
+  it('unified section shows progress percentage from live GSD', () => {
+    const gsd = makeGsdState();
+    // 6 of 8 phases complete = 75%
+    const sources: ContextSources = {
+      hologram: { hot: [], warm: [], cold: [] },
+      searchResults: [],
+      recentObservations: [],
+      scope: PROJECT_SCOPE,
+      postCompaction: true,
+      gsdState: gsd,
+    };
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('75%');
+  });
+});

@@ -203,7 +203,7 @@ describe('redactSensitive — entropy allowlist', () => {
 
   // H23 fix: URL/path fragments should not be redacted
   it('does NOT redact URLs with https:// prefix', () => {
-    const url = 'https://api.example.com/v1/users/abc123def456ghi789jkl';
+    const url = 'https://api.example.com/v1/users/list';
     const input = `Fetching from ${url}`;
     expect(redactSensitive(input)).toBe(input);
   });
@@ -226,10 +226,12 @@ describe('redactSensitive — entropy allowlist', () => {
     expect(redactSensitive(input)).toBe(input);
   });
 
-  it('does NOT redact base64-encoded legitimate content', () => {
+  it('DOES redact base64-encoded strings (R13 tightening — no longer allowlisted)', () => {
     const base64 = 'SGVsbG8gV29ybGQhIFRoaXMgaXMgYSB0ZXN0IHN0cmluZyB3aXRoIGJhc2U2NCBlbmNvZGluZw==';
     const input = `Data: ${base64}`;
-    expect(redactSensitive(input)).toBe(input);
+    const result = redactSensitive(input);
+    // High-entropy base64 is now redacted (no longer blanket-exempted)
+    expect(result).toContain('[REDACTED');
   });
 });
 
@@ -365,5 +367,93 @@ describe('sanitizePath', () => {
     );
     // Falls back to username redaction
     expect(result).toBe('C:\\Users\\[USER]\\OtherProject\\file.ts');
+  });
+
+  it('R19: sibling directory with matching prefix does NOT match project root', () => {
+    // /home/user/project-extra starts with /home/user/project but is NOT inside it
+    const result = sanitizePath(
+      '/home/user/project-extra/file.ts',
+      '/home/user/project'
+    );
+    // Should NOT be relativized — falls through to username redaction
+    expect(result).toBe('/home/[USER]/project-extra/file.ts');
+    expect(result).not.toContain('<project>');
+  });
+
+  it('R19: Windows sibling directory does NOT match project root', () => {
+    const result = sanitizePath(
+      'C:\\Users\\John\\project-2\\file.ts',
+      'C:\\Users\\John\\project'
+    );
+    expect(result).not.toContain('<project>');
+    expect(result).toContain('[USER]');
+  });
+
+  it('R19: exact project root path returns <project>/', () => {
+    const result = sanitizePath(
+      '/home/user/project',
+      '/home/user/project'
+    );
+    expect(result).toBe('<project>/');
+  });
+
+  it('R19: subdirectory of project root still matches', () => {
+    const result = sanitizePath(
+      '/home/user/project/src/file.ts',
+      '/home/user/project'
+    );
+    expect(result).toBe('<project>/src/file.ts');
+  });
+});
+
+// =============================================================================
+// Entropy allowlist tightening (R13)
+// =============================================================================
+
+describe('redactSensitive — R13 entropy allowlist tightening', () => {
+  it('does NOT redact short camelCase identifiers (under 40 chars)', () => {
+    const ident = 'myFunctionNameThatIsShort';
+    const input = `Call: ${ident}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('redacts identifier-like strings over 40 chars if high entropy', () => {
+    // 50-char string with mixed case and digits → high entropy, exceeds 40-char ident limit
+    // Context avoids triggering SECRET_PATTERNS (no token/key/secret/password words)
+    const longIdent = 'aB3dE5fG7hJ9nL1mN3pQ5rS7tU9vW1xYz0bC2dE4fG6hJ8n';
+    const input = `Value is ${longIdent} end`;
+    const result = redactSensitive(input);
+    expect(result).toContain('[REDACTED-ENTROPY]');
+    expect(result).not.toContain(longIdent);
+  });
+
+  it('does NOT redact snake_case identifiers under 40 chars', () => {
+    const ident = 'my_function_name_here';
+    const input = `Func: ${ident}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('still does NOT redact SHA-256 hex hashes', () => {
+    const sha = 'da893891a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d';
+    const input = `Hash: ${sha}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('still does NOT redact UUIDs', () => {
+    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+    const input = `ID: ${uuid}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('still does NOT redact URLs', () => {
+    const url = 'https://api.example.com/v1/users/list';
+    const input = `Url: ${url}`;
+    expect(redactSensitive(input)).toBe(input);
+  });
+
+  it('still does NOT redact file paths with extensions', () => {
+    const fp = '/home/user/projects/myapp/src/VeryLongComponentName.tsx';
+    const input = `File: ${fp}`;
+    expect(redactSensitive(input)).toBe(input);
   });
 });

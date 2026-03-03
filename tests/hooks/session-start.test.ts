@@ -262,6 +262,38 @@ describe('session-start hook logic', () => {
     });
   });
 
+  describe('R26: acquireIndexLock — async retry with backoff', () => {
+    it('acquireIndexLock is an async function (returns Promise)', async () => {
+      const { acquireIndexLock } = await import('../../src/hooks/session-start.js');
+      // acquireIndexLock should return a Promise
+      const result = acquireIndexLock();
+      expect(result).toBeInstanceOf(Promise);
+      // Clean up — resolve the promise and release the lock
+      const release = await result;
+      if (release) release();
+    });
+
+    it('session-start.ts does not contain busy-wait loop', () => {
+      const source = fs.readFileSync(
+        new URL('../../src/hooks/session-start.ts', import.meta.url),
+        'utf-8',
+      );
+      // Should not have the busy-wait pattern: while (Date.now() - start < ...)
+      expect(source).not.toMatch(/while\s*\(.*Date\.now\(\)/);
+      // Should have async setTimeout-based delay
+      expect(source).toMatch(/await new Promise.*setTimeout/);
+    });
+
+    it('acquireIndexLock uses exponential backoff delays', () => {
+      const source = fs.readFileSync(
+        new URL('../../src/hooks/session-start.ts', import.meta.url),
+        'utf-8',
+      );
+      // Should contain Math.pow(2, attempt) or equivalent for exponential backoff
+      expect(source).toMatch(/Math\.pow\(2,\s*attempt\)/);
+    });
+  });
+
   describe('section isolation', () => {
     it('directory bootstrap failure is catchable', () => {
       // Verify that directory creation errors can be caught

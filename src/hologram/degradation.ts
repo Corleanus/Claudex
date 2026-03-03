@@ -186,7 +186,8 @@ export async function rescoreWithFallback(
   if (db) {
     try {
       const hot = getHotFiles(db, project);
-      if (hot.length > 0) {
+      const warm = getWarmFiles(db, project);
+      if (hot.length > 0 || warm.length > 0) {
         log.info('Re-score falling back to DB pressure scores');
         return { source: 'db-pressure' };
       }

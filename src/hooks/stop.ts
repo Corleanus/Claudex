@@ -82,7 +82,7 @@ export function writeNudgeState(stateDir: string, state: NudgeState): void {
 // Transcript Signal Detection
 // =============================================================================
 
-export interface TranscriptSignals {
+interface TranscriptSignals {
   fileModifyCount: number;
   /** Tool names used during this turn (for gist extraction) */
   toolActions: Array<{ name: string; target?: string }>;
@@ -101,22 +101,29 @@ export function detectDecisionSignals(transcriptPath: string | undefined): Trans
   try {
     if (!fs.existsSync(transcriptPath)) return { fileModifyCount: 0, toolActions: [] };
 
+    // R24 fix: wrap fd in try/finally to prevent leak on exception
+    let text: string;
     const fd = fs.openSync(transcriptPath, 'r');
-    const stat = fs.fstatSync(fd);
-    const readSize = Math.min(10000, stat.size);
-    const buf = Buffer.alloc(readSize);
-    fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
-    fs.closeSync(fd);
+    try {
+      const stat = fs.fstatSync(fd);
+      const readSize = Math.min(10000, stat.size);
+      const buf = Buffer.alloc(readSize);
+      fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
+      text = buf.toString('utf-8');
+    } finally {
+      fs.closeSync(fd);
+    }
 
-    const text = buf.toString('utf-8');
     const lines = text.split('\n').filter(l => l.trim().length > 0);
 
-    let fileModifyCount = 0;
-    const toolActions: Array<{ name: string; target?: string }> = [];
+    // First pass: parse all entries and track turn boundaries
+    const parsedEntries: Array<{ role?: string; toolUseBlocks: Array<{ name: string; target?: string }> }> = [];
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
-        // Look for tool_use blocks in message.content arrays
+        const role = entry?.message?.role as string | undefined;
+        const toolUseBlocks: Array<{ name: string; target?: string }> = [];
+
         const content = entry?.message?.content;
         if (Array.isArray(content)) {
           for (const block of content) {
@@ -126,19 +133,42 @@ export function detectDecisionSignals(transcriptPath: string | undefined): Trans
               block.type === 'tool_use'
             ) {
               const toolName = block.name as string;
-              // Extract target file path from tool input when available
               const input = block.input as Record<string, unknown> | undefined;
               const target = (input?.file_path as string) || (input?.command as string) || undefined;
-              toolActions.push({ name: toolName, target });
-
-              if (['Write', 'Edit', 'Bash'].includes(toolName)) {
-                fileModifyCount++;
-              }
+              toolUseBlocks.push({ name: toolName, target });
             }
           }
         }
+
+        parsedEntries.push({ role, toolUseBlocks });
       } catch {
         // Skip malformed lines (includes partial first line from mid-buffer read)
+      }
+    }
+
+    // R22 fix: find last user turn boundary — only count tool_use from current turn
+    let lastUserIdx = -1;
+    for (let i = parsedEntries.length - 1; i >= 0; i--) {
+      if (parsedEntries[i]!.role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+
+    const currentTurnEntries = lastUserIdx >= 0
+      ? parsedEntries.slice(lastUserIdx + 1)
+      : parsedEntries; // No user message found — treat all as current turn
+
+    // Second pass: count signals from current turn only
+    let fileModifyCount = 0;
+    const toolActions: Array<{ name: string; target?: string }> = [];
+    for (const entry of currentTurnEntries) {
+      for (const block of entry.toolUseBlocks) {
+        toolActions.push(block);
+        // R23 fix: only Write and Edit count as file modifications (not Bash)
+        if (block.name === 'Write' || block.name === 'Edit') {
+          fileModifyCount++;
+        }
       }
     }
 

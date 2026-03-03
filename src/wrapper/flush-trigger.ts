@@ -16,10 +16,12 @@ import { recordMetric } from '../shared/metrics.js';
 
 const log = createLogger('flush-trigger');
 
+const MAX_REASONING_CHARS = 10_000;
+
 /** File-based cooldown marker so cooldown survives across hook process invocations. */
 const COOLDOWN_FILE = path.join(CLAUDEX_HOME, 'db', '.flush_cooldown');
 
-export interface FlushResult {
+interface FlushResult {
   reasoningCaptured: number;
   pressureScoresFlushed: number;
   hologramRescored: boolean;
@@ -27,7 +29,7 @@ export interface FlushResult {
   durationMs: number;
 }
 
-export interface FlushOptions {
+interface FlushOptions {
   db: Database.Database;
   sessionId: string;
   scope: Scope;
@@ -108,7 +110,7 @@ export async function executeFlush(options: FlushOptions): Promise<FlushResult> 
         timestamp_epoch: Date.now(),
         trigger: 'pre_compact',
         title: `Pre-flush reasoning — session ${options.sessionId}`,
-        reasoning: options.reasoningText.slice(-10000), // Last 10k chars
+        reasoning: options.reasoningText.slice(-MAX_REASONING_CHARS),
         importance: 3,
       };
 

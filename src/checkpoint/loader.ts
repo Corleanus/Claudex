@@ -16,9 +16,9 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as yaml from 'js-yaml';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
+import { normalizeYaml, safeLoadYaml as safeLoadYamlFile } from '../shared/yaml-utils.js';
 import type {
   Checkpoint,
   CheckpointSection,
@@ -27,10 +27,12 @@ import type {
 import {
   CHECKPOINT_SCHEMA,
   CHECKPOINT_VERSION,
-  ALWAYS_LOAD,
-  RESUME_LOAD,
-  GSD_LOAD,
 } from './types.js';
+import { resolveSections, formatCheckpointForInjection } from './formatter.js';
+import { numericCheckpointSort } from './sort.js';
+
+// Re-export formatting functions for backward compatibility
+export { formatCheckpointForInjection } from './formatter.js';
 
 const log = createLogger('checkpoint-loader');
 
@@ -38,7 +40,7 @@ const log = createLogger('checkpoint-loader');
 // Public Types
 // =============================================================================
 
-export interface LoadedCheckpoint {
+interface LoadedCheckpoint {
   checkpoint: Checkpoint;
   loadedSections: CheckpointSection[];
   markdown: string;
@@ -52,21 +54,6 @@ export interface LoadedCheckpoint {
 
 const MAX_RECOVERY_HOPS = 3;
 
-/**
- * Sort checkpoint filenames numerically.
- * Handles YYYY-MM-DD_cpN.yaml where N can be any number (cp10 > cp9).
- */
-function numericCheckpointSort(a: string, b: string): number {
-  const extractN = (f: string): number => {
-    const match = f.match(/_cp(\d+)\.yaml$/);
-    return match ? parseInt(match[1]!, 10) : 0;
-  };
-  const dateA = a.slice(0, 10);
-  const dateB = b.slice(0, 10);
-  if (dateA !== dateB) return dateA.localeCompare(dateB);
-  return extractN(a) - extractN(b);
-}
-
 /** Known top-level keys in a valid checkpoint */
 const KNOWN_KEYS = new Set([
   'schema', 'version', 'meta', 'working', 'decisions',
@@ -74,31 +61,6 @@ const KNOWN_KEYS = new Set([
   'pressure_snapshot', 'recent_observations', 'boost_state',
 ]);
 
-/**
- * Strip UTF-8 BOM and normalize CRLF before YAML parsing.
- */
-function normalizeYaml(raw: string): string {
-  let content = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
-  content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  return content;
-}
-
-/**
- * Safely parse a YAML file into an unknown value.
- * Returns null on any error.
- */
-function safeLoadYamlFile(filePath: string): unknown {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    if (!raw.trim()) return null;
-    const normalized = normalizeYaml(raw);
-    return yaml.load(normalized, { schema: yaml.JSON_SCHEMA });
-  } catch (e) {
-    log.warn(`Failed to parse YAML: ${filePath}`, e);
-    return null;
-  }
-}
 
 // =============================================================================
 // Validation
@@ -296,195 +258,6 @@ function recoverCheckpoint(
 }
 
 // =============================================================================
-// Selective Loading
-// =============================================================================
-
-/**
- * Determine which sections to load based on options and checkpoint state.
- */
-function resolveSections(checkpoint: Checkpoint, options: LoadOptions): CheckpointSection[] {
-  const sections = new Set<CheckpointSection>(ALWAYS_LOAD);
-
-  if (options.resumeMode) {
-    for (const s of RESUME_LOAD) {
-      sections.add(s);
-    }
-  }
-
-  // GSD section: only when gsd is active
-  if (checkpoint.gsd?.active) {
-    for (const s of GSD_LOAD) {
-      sections.add(s);
-    }
-  }
-
-  // Learnings are NEVER loaded (routed to memory system)
-  sections.delete('learnings');
-
-  // Also filter by explicitly requested sections if provided
-  if (options.sections.length > 0) {
-    const requested = new Set(options.sections);
-    for (const s of [...sections]) {
-      if (!requested.has(s)) {
-        sections.delete(s);
-      }
-    }
-    // Never include learnings regardless
-    sections.delete('learnings');
-  }
-
-  return [...sections];
-}
-
-// =============================================================================
-// Markdown Formatting
-// =============================================================================
-
-/**
- * Format the "Aider trick" — thread state as user perspective.
- */
-function formatAiderTrick(checkpoint: Checkpoint): string {
-  const parts: string[] = [];
-
-  // "I asked you to [working.task]."
-  if (checkpoint.working?.task) {
-    parts.push(`I asked you to ${checkpoint.working.task}.`);
-  }
-
-  // "You proposed [decisions[-1].what]."
-  if (checkpoint.decisions.length > 0) {
-    const lastDecision = checkpoint.decisions[checkpoint.decisions.length - 1]!;
-    parts.push(`You proposed ${lastDecision.what}.`);
-
-    // Check if the last exchange is an approval
-    const exchanges = checkpoint.thread?.key_exchanges ?? [];
-    if (exchanges.length > 0) {
-      const lastExchange = exchanges[exchanges.length - 1]!;
-      if (lastExchange.role === 'user') {
-        parts.push(`I ${lastExchange.gist.toLowerCase()}.`);
-      }
-    }
-  }
-
-  // "You created [files.changed[].path]."
-  if (checkpoint.files?.changed?.length > 0) {
-    const paths = checkpoint.files.changed.map(f => f.path);
-    if (paths.length <= 3) {
-      parts.push(`You created ${paths.join(', ')}.`);
-    } else {
-      parts.push(`You created ${paths.slice(0, 3).join(', ')} and ${paths.length - 3} more.`);
-    }
-  }
-
-  // "Next step: [working.next_action]."
-  if (checkpoint.working?.next_action) {
-    parts.push(`Next step: ${checkpoint.working.next_action}.`);
-  }
-
-  return parts.join(' ');
-}
-
-/**
- * Format a checkpoint into markdown for context injection.
- */
-export function formatCheckpointForInjection(
-  checkpoint: Checkpoint,
-  options: LoadOptions,
-): string {
-  const sections = resolveSections(checkpoint, options);
-  const lines: string[] = ['# Checkpoint (auto-injected by Claudex)', ''];
-
-  // Meta — gauge only
-  if (sections.includes('meta') && checkpoint.meta?.token_usage) {
-    const usage = checkpoint.meta.token_usage;
-    const pct = Math.round(usage.utilization * 100);
-    lines.push(`## Token Gauge`);
-    lines.push(`- Utilization: ${pct}% (${usage.input_tokens.toLocaleString()} / ${usage.window_size.toLocaleString()})`);
-    lines.push('');
-  }
-
-  // Working state
-  if (sections.includes('working') && checkpoint.working) {
-    lines.push(`## Working State`);
-    lines.push(`- Task: ${checkpoint.working.task}`);
-    lines.push(`- Status: ${checkpoint.working.status}`);
-    if (checkpoint.working.branch) {
-      lines.push(`- Branch: ${checkpoint.working.branch}`);
-    }
-    if (checkpoint.working.next_action) {
-      lines.push(`- Next: ${checkpoint.working.next_action}`);
-    }
-    lines.push('');
-  }
-
-  // Open questions
-  if (sections.includes('open_questions') && checkpoint.open_questions.length > 0) {
-    lines.push(`## Open Questions`);
-    for (const q of checkpoint.open_questions) {
-      lines.push(`- ${q}`);
-    }
-    lines.push('');
-  }
-
-  // Decisions (resume only)
-  if (sections.includes('decisions') && checkpoint.decisions.length > 0) {
-    lines.push(`## Decisions`);
-    for (const d of checkpoint.decisions) {
-      const rev = d.reversible ? ' (reversible)' : '';
-      lines.push(`- **${d.what}**${rev}: ${d.why}`);
-    }
-    lines.push('');
-  }
-
-  // Thread (resume only) — uses Aider trick
-  if (sections.includes('thread') && checkpoint.thread) {
-    const aider = formatAiderTrick(checkpoint);
-    if (aider) {
-      lines.push(`## Thread Continuity`);
-      lines.push(aider);
-      lines.push('');
-    }
-  }
-
-  // Files hot (resume only)
-  if (sections.includes('files') && checkpoint.files?.hot?.length > 0) {
-    lines.push(`## Active Files`);
-    for (const f of checkpoint.files.hot) {
-      lines.push(`- \`${f}\``);
-    }
-    lines.push('');
-  }
-
-  // GSD state
-  if (sections.includes('gsd') && checkpoint.gsd?.active) {
-    lines.push(`## Project Phase (GSD)`);
-    if (checkpoint.gsd.milestone) {
-      lines.push(`- Milestone: ${checkpoint.gsd.milestone}`);
-    }
-    if (checkpoint.gsd.phase_name) {
-      lines.push(`- Phase ${checkpoint.gsd.phase}: ${checkpoint.gsd.phase_name}`);
-    } else {
-      lines.push(`- Phase: ${checkpoint.gsd.phase}`);
-    }
-    if (checkpoint.gsd.phase_goal) {
-      lines.push(`- Goal: ${checkpoint.gsd.phase_goal}`);
-    }
-    if (checkpoint.gsd.plan_status) {
-      lines.push(`- Plan: ${checkpoint.gsd.plan_status}`);
-    }
-    if (checkpoint.gsd.requirements?.length > 0) {
-      lines.push(`- Requirements:`);
-      for (const r of checkpoint.gsd.requirements) {
-        lines.push(`  - ${r.id} [${r.status}]: ${r.description}`);
-      }
-    }
-    lines.push('');
-  }
-
-  return lines.join('\n').trimEnd() + '\n';
-}
-
-// =============================================================================
 // Token Estimation
 // =============================================================================
 
@@ -510,7 +283,7 @@ export function loadLatestCheckpoint(
   options?: LoadOptions,
 ): LoadedCheckpoint | null {
   const t0 = Date.now();
-  let recoveryTag: string | undefined;
+  let loadFailed = true;
 
   try {
     const effectiveOptions: LoadOptions = options ?? {
@@ -524,12 +297,12 @@ export function loadLatestCheckpoint(
       return null;
     }
 
-    recoveryTag = result.recoveryPath;
     const { checkpoint } = result;
     const loadedSections = resolveSections(checkpoint, effectiveOptions);
     const markdown = formatCheckpointForInjection(checkpoint, effectiveOptions);
     const tokenEstimate = estimateTokens(markdown);
 
+    loadFailed = false;
     return {
       checkpoint,
       loadedSections,
@@ -542,6 +315,6 @@ export function loadLatestCheckpoint(
     return null;
   } finally {
     const duration = Date.now() - t0;
-    recordMetric('checkpoint_load', duration, !!recoveryTag);
+    recordMetric('checkpoint_load', duration, loadFailed);
   }
 }

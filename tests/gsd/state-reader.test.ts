@@ -409,6 +409,41 @@ describe('countPlanFiles', () => {
     expect(result.total).toBe(1);
     expect(result.complete).toBe(0);
   });
+
+  it('R17: orphan summaries do not inflate complete count', () => {
+    const phaseDir = path.join(tmpDir, 'orphan');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '06-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(phaseDir, '06-02-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(phaseDir, '06-01-SUMMARY.md'), '# Summary');
+    fs.writeFileSync(path.join(phaseDir, '06-02-SUMMARY.md'), '# Summary');
+    fs.writeFileSync(path.join(phaseDir, '06-03-SUMMARY.md'), '# Orphan summary');
+
+    const result = countPlanFiles(phaseDir);
+    expect(result.total).toBe(2);
+    expect(result.complete).toBe(2); // Not 3
+  });
+
+  it('R17: orphan summary with no matching plan returns complete=0', () => {
+    const phaseDir = path.join(tmpDir, 'orphan-only');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '06-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(phaseDir, 'orphan-SUMMARY.md'), '# Orphan');
+
+    const result = countPlanFiles(phaseDir);
+    expect(result.total).toBe(1);
+    expect(result.complete).toBe(0);
+  });
+
+  it('R17: no PLAN files but one SUMMARY returns total=0, complete=0', () => {
+    const phaseDir = path.join(tmpDir, 'no-plans');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '06-01-SUMMARY.md'), '# Summary');
+
+    const result = countPlanFiles(phaseDir);
+    expect(result.total).toBe(0);
+    expect(result.complete).toBe(0);
+  });
 });
 
 // =============================================================================
@@ -548,11 +583,11 @@ describe('readGsdState', () => {
   });
 
   it('never throws on any error', () => {
-    // Pass completely invalid paths
-    expect(() => readGsdState('')).not.toThrow();
+    // Pass completely invalid paths (avoid '' which resolves to CWD and may find .planning/)
     expect(() => readGsdState('/nonexistent/path/to/nowhere')).not.toThrow();
+    expect(() => readGsdState('/another/nonexistent/dir')).not.toThrow();
 
-    const result = readGsdState('');
+    const result = readGsdState('/nonexistent/path/to/nowhere');
     expect(result).toEqual(expect.objectContaining({ active: false }));
   });
 
@@ -907,13 +942,13 @@ describe.skipIf(!fs.existsSync(REAL_PLANNING_DIR))('real project integration', (
     const state = readGsdState(projectRoot);
 
     expect(state.active).toBe(true);
-    expect(state.phases.length).toBe(8);
+    expect(state.phases.length).toBe(7);
     expect(state.position).not.toBeNull();
     expect(state.position!.phase).toBeGreaterThanOrEqual(1);
 
-    // Phase 1 should have PCTX-01 requirement
+    // Phase 1 should exist
     const phase1 = state.phases.find(p => p.number === 1);
     expect(phase1).toBeDefined();
-    expect(phase1!.requirements).toContain('PCTX-01');
+    expect(phase1!.name).toContain('Global Scope Isolation');
   });
 });

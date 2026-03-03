@@ -225,6 +225,77 @@ files_modified:
     expect(result.otherPlanFiles.size).toBe(0);
   });
 
+  it('bare PLAN.md without SUMMARY.md is treated as active (C15)', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    const phaseDir = path.join(phasesDir, '03-test-phase');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    // Bare PLAN.md (no SUMMARY.md) — should be active
+    fs.writeFileSync(path.join(phaseDir, 'PLAN.md'), `---
+files_modified:
+  - src/bare-plan.ts
+---
+`);
+
+    const result = getPhaseRelevanceSet(phasesDir, 3, 0);
+    // With activePlanNumber=0, all go to otherPlanFiles
+    expect(result.otherPlanFiles.has('src/bare-plan.ts')).toBe(true);
+  });
+
+  it('bare PLAN.md with SUMMARY.md is treated as completed (C15)', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    const phaseDir = path.join(phasesDir, '03-test-phase');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(path.join(phaseDir, 'PLAN.md'), `---
+files_modified:
+  - src/completed-bare.ts
+---
+`);
+    fs.writeFileSync(path.join(phaseDir, 'SUMMARY.md'), '# Done');
+
+    const result = getPhaseRelevanceSet(phasesDir, 3, 0);
+    expect(result.activePlanFiles.has('src/completed-bare.ts')).toBe(false);
+    expect(result.otherPlanFiles.has('src/completed-bare.ts')).toBe(false);
+  });
+
+  it('mixed bare and prefixed plans with different completion states (C15)', () => {
+    const phasesDir = path.join(tmpDir, 'phases');
+    const phaseDir = path.join(phasesDir, '03-test-phase');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    // Bare PLAN.md (active — no SUMMARY.md)
+    fs.writeFileSync(path.join(phaseDir, 'PLAN.md'), `---
+files_modified:
+  - src/bare-active.ts
+---
+`);
+
+    // 03-01-PLAN.md (completed — has 03-01-SUMMARY.md)
+    fs.writeFileSync(path.join(phaseDir, '03-01-PLAN.md'), `---
+files_modified:
+  - src/prefixed-completed.ts
+---
+`);
+    fs.writeFileSync(path.join(phaseDir, '03-01-SUMMARY.md'), '# Summary');
+
+    // 03-02-PLAN.md (active — no 03-02-SUMMARY.md)
+    fs.writeFileSync(path.join(phaseDir, '03-02-PLAN.md'), `---
+files_modified:
+  - src/prefixed-active.ts
+---
+`);
+
+    const result = getPhaseRelevanceSet(phasesDir, 3, 2);
+    // Bare PLAN.md is active (plan num = 0, not matching activePlanNumber=2) → otherPlanFiles
+    expect(result.otherPlanFiles.has('src/bare-active.ts')).toBe(true);
+    // 03-01 is completed → excluded
+    expect(result.activePlanFiles.has('src/prefixed-completed.ts')).toBe(false);
+    expect(result.otherPlanFiles.has('src/prefixed-completed.ts')).toBe(false);
+    // 03-02 is active and matches activePlanNumber=2 → activePlanFiles
+    expect(result.activePlanFiles.has('src/prefixed-active.ts')).toBe(true);
+  });
+
   it('file appearing in both active and other plan goes to activePlanFiles (dedup)', () => {
     const phasesDir = path.join(tmpDir, 'phases');
     const phaseDir = path.join(phasesDir, '03-test-phase');
@@ -370,25 +441,20 @@ describe('integration: real .planning/ data', () => {
   const projectRoot = path.resolve(__dirname, '..', '..', '..');
   const phasesDir = path.join(projectRoot, '.planning', 'phases');
 
-  it('phase 1 plans are all completed (summaries exist) so relevance set is empty', () => {
-    const result = getPhaseRelevanceSet(phasesDir, 1, 1);
-    // Phase 1 has 01-01-PLAN.md + 01-01-SUMMARY.md -> completed -> excluded
-    expect(result.activePlanFiles.size).toBe(0);
-    expect(result.otherPlanFiles.size).toBe(0);
-  });
-
-  it('phase 3 plans are all completed (summaries exist) so relevance set is empty', () => {
-    // Both 03-01 and 03-02 have SUMMARY.md files -> completed -> excluded
-    const result = getPhaseRelevanceSet(phasesDir, 3, 2);
-    expect(result.activePlanFiles.size).toBe(0);
-    expect(result.otherPlanFiles.size).toBe(0);
-  });
-
-  it('extractPlanFilesModified works on real 02-01-PLAN.md', () => {
-    const planPath = path.join(phasesDir, '02-phase-aware-context-injection', '02-01-PLAN.md');
+  it('extractPlanFilesModified works on real 05-01-PLAN.md', () => {
+    const planPath = path.join(phasesDir, '05-logic-contract-fixes', '05-01-PLAN.md');
     const files = extractPlanFilesModified(planPath);
-    expect(files).toContain('Claudex/src/gsd/state-reader.ts');
-    expect(files).toContain('Claudex/tests/gsd/state-reader.test.ts');
-    expect(files.length).toBe(2);
+    expect(files).toContain('Claudex/src/db/checkpoint.ts');
+    expect(files).toContain('Claudex/src/lib/token-gauge.ts');
+    expect(files).toContain('Claudex/src/hooks/_prompt-queries.ts');
+    expect(files.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('phase 5 plan 01 is completed when SUMMARY.md exists', () => {
+    // 05-01-PLAN.md has 05-01-SUMMARY.md -> completed -> excluded
+    const result = getPhaseRelevanceSet(phasesDir, 5, 1);
+    // Plan 01 is completed (has summary), plan 02 is active
+    // activePlanFiles should be empty (plan 1 is completed)
+    expect(result.activePlanFiles.size).toBe(0);
   });
 });

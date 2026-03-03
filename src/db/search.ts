@@ -2,19 +2,23 @@
  * Claudex v2 — FTS5 Search Layer
  *
  * Provides full-text search across observations using SQLite FTS5.
- * Migration 2 creates the FTS5 virtual table and auto-sync triggers.
  * searchObservations() returns ranked results with snippets.
+ *
+ * Migration functions live in search-migrations.ts; re-exported here
+ * for backward compatibility.
  *
  * Never throws — returns empty results on error.
  */
 
 import type Database from 'better-sqlite3';
 import type { Observation, ObservationCategory, SearchResult } from '../shared/types.js';
-import type { MigrationRunner } from './migrations.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
 import { normalizeFts5Query } from '../shared/fts5-utils.js';
 import { safeJsonParse } from '../shared/safe-json.js';
+
+// Re-export migration functions for backward compatibility
+export { migration_2, migration_4 } from './search-migrations.js';
 
 const log = createLogger('search');
 
@@ -22,125 +26,6 @@ const VALID_CATEGORIES: readonly string[] = [
   'decision', 'discovery', 'bugfix', 'feature',
   'refactor', 'change', 'error', 'configuration',
 ] as const;
-
-// =============================================================================
-// Migration 2: FTS5 virtual table + auto-sync triggers
-// =============================================================================
-
-/**
- * Migration 2: Create FTS5 virtual table for observations and triggers to keep it in sync.
- * Runs inside a transaction to ensure atomicity.
- */
-export function migration_2(runner: MigrationRunner): void {
-  if (runner.hasVersion(2)) {
-    log.debug('Migration 2 already applied, skipping');
-    return;
-  }
-
-  log.info('Applying migration 2: FTS5 virtual table + triggers');
-
-  runner.db.exec(`
-    CREATE VIRTUAL TABLE observations_fts USING fts5(
-      title, content, facts,
-      content='observations', content_rowid='id'
-    );
-
-    CREATE TRIGGER observations_ai AFTER INSERT ON observations BEGIN
-      INSERT INTO observations_fts(rowid, title, content, facts)
-      VALUES (new.id, new.title, new.content, new.facts);
-    END;
-
-    CREATE TRIGGER observations_ad AFTER DELETE ON observations BEGIN
-      INSERT INTO observations_fts(observations_fts, rowid, title, content, facts)
-      VALUES ('delete', old.id, old.title, old.content, old.facts);
-    END;
-
-    CREATE TRIGGER observations_au AFTER UPDATE ON observations BEGIN
-      INSERT INTO observations_fts(observations_fts, rowid, title, content, facts)
-      VALUES ('delete', old.id, old.title, old.content, old.facts);
-      INSERT INTO observations_fts(rowid, title, content, facts)
-      VALUES (new.id, new.title, new.content, new.facts);
-    END;
-  `);
-
-  // Backfill: rebuild FTS5 index from content table to capture pre-existing rows
-  // Content-sync FTS5 tables require 'rebuild' — manual INSERT doesn't work
-  runner.db.exec(`INSERT INTO observations_fts(observations_fts) VALUES('rebuild')`);
-
-  runner.recordVersion(2);
-  log.info('Migration 2 applied successfully');
-}
-
-// =============================================================================
-// Migration 4: FTS5 for reasoning_chains + consensus_decisions
-// =============================================================================
-
-/**
- * Migration 4: Create FTS5 virtual tables for reasoning_chains and consensus_decisions
- * with auto-sync triggers. Follows the same pattern as migration_2.
- * Runs inside a transaction to ensure atomicity.
- */
-export function migration_4(runner: MigrationRunner): void {
-  if (runner.hasVersion(4)) {
-    log.debug('Migration 4 already applied, skipping');
-    return;
-  }
-
-  log.info('Applying migration 4: FTS5 for reasoning_chains + consensus_decisions');
-
-  runner.db.exec(`
-    CREATE VIRTUAL TABLE reasoning_fts USING fts5(
-      title, reasoning, decisions,
-      content='reasoning_chains', content_rowid='id'
-    );
-
-    CREATE TRIGGER reasoning_ai AFTER INSERT ON reasoning_chains BEGIN
-      INSERT INTO reasoning_fts(rowid, title, reasoning, decisions)
-      VALUES (new.id, new.title, new.reasoning, new.decisions);
-    END;
-
-    CREATE TRIGGER reasoning_ad AFTER DELETE ON reasoning_chains BEGIN
-      INSERT INTO reasoning_fts(reasoning_fts, rowid, title, reasoning, decisions)
-      VALUES ('delete', old.id, old.title, old.reasoning, old.decisions);
-    END;
-
-    CREATE TRIGGER reasoning_au AFTER UPDATE ON reasoning_chains BEGIN
-      INSERT INTO reasoning_fts(reasoning_fts, rowid, title, reasoning, decisions)
-      VALUES ('delete', old.id, old.title, old.reasoning, old.decisions);
-      INSERT INTO reasoning_fts(rowid, title, reasoning, decisions)
-      VALUES (new.id, new.title, new.reasoning, new.decisions);
-    END;
-
-    CREATE VIRTUAL TABLE consensus_fts USING fts5(
-      title, description, claude_position, codex_position, human_verdict,
-      content='consensus_decisions', content_rowid='id'
-    );
-
-    CREATE TRIGGER consensus_ai AFTER INSERT ON consensus_decisions BEGIN
-      INSERT INTO consensus_fts(rowid, title, description, claude_position, codex_position, human_verdict)
-      VALUES (new.id, new.title, new.description, new.claude_position, new.codex_position, new.human_verdict);
-    END;
-
-    CREATE TRIGGER consensus_ad AFTER DELETE ON consensus_decisions BEGIN
-      INSERT INTO consensus_fts(consensus_fts, rowid, title, description, claude_position, codex_position, human_verdict)
-      VALUES ('delete', old.id, old.title, old.description, old.claude_position, old.codex_position, old.human_verdict);
-    END;
-
-    CREATE TRIGGER consensus_au AFTER UPDATE ON consensus_decisions BEGIN
-      INSERT INTO consensus_fts(consensus_fts, rowid, title, description, claude_position, codex_position, human_verdict)
-      VALUES ('delete', old.id, old.title, old.description, old.claude_position, old.codex_position, old.human_verdict);
-      INSERT INTO consensus_fts(rowid, title, description, claude_position, codex_position, human_verdict)
-      VALUES (new.id, new.title, new.description, new.claude_position, new.codex_position, new.human_verdict);
-    END;
-  `);
-
-  // Backfill: rebuild FTS5 indexes from content tables
-  runner.db.exec(`INSERT INTO reasoning_fts(reasoning_fts) VALUES('rebuild')`);
-  runner.db.exec(`INSERT INTO consensus_fts(consensus_fts) VALUES('rebuild')`);
-
-  runner.recordVersion(4);
-  log.info('Migration 4 applied successfully');
-}
 
 // =============================================================================
 // Search
@@ -218,8 +103,9 @@ export function searchObservations(
 
     const limit = options?.limit ?? 10;
     const minImportance = options?.minImportance ?? 1;
-    const project = options?.project ?? null;
+    const project = options?.project;
     const category = options?.category ?? null;
+    const useGlobalFilter = project === undefined || project === null;
 
     const sql = `
       SELECT o.id, o.session_id, o.project, o.timestamp, o.timestamp_epoch,
@@ -230,7 +116,7 @@ export function searchObservations(
       FROM observations_fts fts
       JOIN observations o ON o.id = fts.rowid
       WHERE observations_fts MATCH ?
-        AND (? IS NULL OR o.project = ?)
+        AND ${useGlobalFilter ? 'o.project IS NULL' : 'o.project = ?'}
         AND (? IS NULL OR o.category = ?)
         AND o.importance >= ?
         AND o.deleted_at_epoch IS NULL
@@ -239,13 +125,10 @@ export function searchObservations(
     `;
 
     const normalizedQuery = normalizeFts5Query(trimmed, { mode: options?.mode, prefix: options?.prefix });
-    const rows = db.prepare(sql).all(
-      normalizedQuery,
-      project, project,
-      category, category,
-      minImportance,
-      limit,
-    ) as SearchRow[];
+    const params = useGlobalFilter
+      ? [normalizedQuery, category, category, minImportance, limit]
+      : [normalizedQuery, project, category, category, minImportance, limit];
+    const rows = db.prepare(sql).all(...params) as SearchRow[];
 
     const result = rows.map(row => ({
       observation: rowToObservation(row),
@@ -320,7 +203,8 @@ export function searchReasoning(
     }
 
     const limit = options?.limit ?? 10;
-    const project = options?.project ?? null;
+    const project = options?.project;
+    const useGlobalFilter = project === undefined || project === null;
 
     const sql = `
       SELECT r.id, r.session_id, r.project, r.timestamp, r.timestamp_epoch,
@@ -331,17 +215,16 @@ export function searchReasoning(
       FROM reasoning_fts fts
       JOIN reasoning_chains r ON r.id = fts.rowid
       WHERE reasoning_fts MATCH ?
-        AND (? IS NULL OR r.project = ?)
+        AND ${useGlobalFilter ? 'r.project IS NULL' : 'r.project = ?'}
       ORDER BY fts.rank
       LIMIT ?
     `;
 
     const normalizedQuery = normalizeFts5Query(trimmed, { mode: options?.mode, prefix: options?.prefix });
-    const rows = db.prepare(sql).all(
-      normalizedQuery,
-      project, project,
-      limit,
-    ) as ReasoningSearchRow[];
+    const params = useGlobalFilter
+      ? [normalizedQuery, limit]
+      : [normalizedQuery, project, limit];
+    const rows = db.prepare(sql).all(...params) as ReasoningSearchRow[];
 
     const result = rows.map(reasoningRowToSearchResult);
     recordMetric('db.search_fts5', Date.now() - searchStart);
@@ -401,7 +284,7 @@ function consensusRowToSearchResult(row: ConsensusSearchRow): SearchResult {
  * Search consensus_decisions using FTS5 full-text search.
  * Returns results mapped to SearchResult[] with Observation-like shape.
  */
-export function searchConsensus(
+function searchConsensus(
   db: Database.Database,
   query: string,
   options?: { project?: string; limit?: number; mode?: 'AND' | 'OR'; prefix?: boolean },
@@ -414,7 +297,8 @@ export function searchConsensus(
     }
 
     const limit = options?.limit ?? 10;
-    const project = options?.project ?? null;
+    const project = options?.project;
+    const useGlobalFilter = project === undefined || project === null;
 
     const sql = `
       SELECT c.id, c.session_id, c.project, c.timestamp, c.timestamp_epoch,
@@ -426,17 +310,16 @@ export function searchConsensus(
       FROM consensus_fts fts
       JOIN consensus_decisions c ON c.id = fts.rowid
       WHERE consensus_fts MATCH ?
-        AND (? IS NULL OR c.project = ?)
+        AND ${useGlobalFilter ? 'c.project IS NULL' : 'c.project = ?'}
       ORDER BY fts.rank
       LIMIT ?
     `;
 
     const normalizedQuery = normalizeFts5Query(trimmed, { mode: options?.mode, prefix: options?.prefix });
-    const rows = db.prepare(sql).all(
-      normalizedQuery,
-      project, project,
-      limit,
-    ) as ConsensusSearchRow[];
+    const params = useGlobalFilter
+      ? [normalizedQuery, limit]
+      : [normalizedQuery, project, limit];
+    const rows = db.prepare(sql).all(...params) as ConsensusSearchRow[];
 
     const result = rows.map(consensusRowToSearchResult);
     recordMetric('db.search_fts5', Date.now() - searchStart);

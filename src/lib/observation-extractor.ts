@@ -20,7 +20,7 @@ const TRIVIAL_BASH_COMMANDS = new Set([
   'type', 'dir', 'cls', 'clear', 'which', 'where', 'whoami',
 ]);
 
-function str(val: unknown): string {
+function coerceString(val: unknown): string {
   if (typeof val === 'string') return val;
   if (val == null) return '';
   return String(val);
@@ -99,7 +99,7 @@ function extractRead(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const filePath = str(toolInput['file_path'] || toolInput['path']);
+  const filePath = coerceString(toolInput['file_path'] || toolInput['path']);
   if (!filePath) return null;
 
   const ext = fileExtension(filePath);
@@ -107,7 +107,7 @@ function extractRead(
 
   let contentSummary = `File type: ${fileType}`;
   if (toolResponse) {
-    const output = str(toolResponse['output'] || toolResponse['content'] || '');
+    const output = coerceString(toolResponse['output'] || toolResponse['content'] || '');
     if (output) {
       const preview = truncateLines(output, 8);
       contentSummary += `\n${preview}`;
@@ -140,11 +140,11 @@ function extractEdit(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const filePath = str(toolInput['file_path'] || toolInput['path']);
+  const filePath = coerceString(toolInput['file_path'] || toolInput['path']);
   if (!filePath) return null;
 
-  const oldStr = str(toolInput['old_string']);
-  const newStr = str(toolInput['new_string']);
+  const oldStr = coerceString(toolInput['old_string']);
+  const newStr = coerceString(toolInput['new_string']);
 
   const oldSummary = oldStr
     ? truncateLines(oldStr, 5)
@@ -174,7 +174,7 @@ function extractWrite(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const filePath = str(toolInput['file_path'] || toolInput['path']);
+  const filePath = coerceString(toolInput['file_path'] || toolInput['path']);
   if (!filePath) return null;
 
   const ext = fileExtension(filePath);
@@ -200,14 +200,14 @@ function extractBash(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const command = str(toolInput['command']);
+  const command = coerceString(toolInput['command']);
   if (!command) return null;
 
   // Filter trivial commands
   const base = baseCommand(command);
   if (TRIVIAL_BASH_COMMANDS.has(base)) return null;
 
-  const description = str(toolInput['description']);
+  const description = coerceString(toolInput['description']);
   const exitCode = toolResponse != null ? (toolResponse['exit_code'] ?? toolResponse['exitCode']) : undefined;
   const isError = exitCode != null && exitCode !== 0;
 
@@ -220,13 +220,13 @@ function extractBash(
   }
 
   if (toolResponse) {
-    const output = str(toolResponse['output'] || toolResponse['stdout'] || '');
+    const output = coerceString(toolResponse['output'] || toolResponse['stdout'] || '');
     if (output) {
       const preview = truncateLines(output, 10);
       content += content ? '\n' : '';
       content += preview;
     }
-    const stderr = str(toolResponse['stderr'] || '');
+    const stderr = coerceString(toolResponse['stderr'] || '');
     if (stderr && isError) {
       const errPreview = truncateLines(stderr, 3);
       content += content ? '\n' : '';
@@ -249,13 +249,34 @@ function extractBash(
   );
 }
 
+/**
+ * Parse file path from a grep output line, handling Windows drive-letter paths,
+ * UNC paths, and Unix paths. Falls back to returning the full line.
+ */
+function parseGrepFilePath(line: string): string {
+  // Windows drive-letter paths: C:\repo\file.ts:10:match or C:/repo/file.ts:10:match
+  const winDrive = line.match(/^([A-Za-z]:[\\\/][^:]*):\d+:/);
+  if (winDrive) return winDrive[1]!;
+
+  // Windows UNC paths: \\server\share\file.ts:10:match
+  const winUnc = line.match(/^(\\\\[^:]+):\d+:/);
+  if (winUnc) return winUnc[1]!;
+
+  // Unix-style paths: src/foo.ts:10:match
+  const unix = line.match(/^([^:]+):\d+:/);
+  if (unix) return unix[1]!;
+
+  // No colon-delimited structure — return as-is
+  return line;
+}
+
 function extractGrep(
   toolInput: Record<string, unknown>,
   toolResponse: Record<string, unknown> | undefined,
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const pattern = str(toolInput['pattern']);
+  const pattern = coerceString(toolInput['pattern']);
   if (!pattern) return null;
 
   let matchCount = 0;
@@ -265,12 +286,11 @@ function extractGrep(
     const files = toolResponse['files'] || toolResponse['matches'] || toolResponse['output'];
     if (Array.isArray(files)) {
       matchCount = files.length;
-      topFiles = files.slice(0, 5).map((f) => str(typeof f === 'object' && f != null ? (f as Record<string, unknown>)['path'] || f : f));
+      topFiles = files.slice(0, 5).map((f) => coerceString(typeof f === 'object' && f != null ? (f as Record<string, unknown>)['path'] || f : f));
     } else if (typeof files === 'string') {
       const lines = files.split('\n').filter(Boolean);
       matchCount = lines.length;
-      // Strip :line:content suffixes from grep output lines (e.g. "src/foo.ts:10:matched")
-      topFiles = lines.slice(0, 5).map(line => line.split(':')[0] || line);
+      topFiles = lines.slice(0, 5).map(parseGrepFilePath);
     }
   }
 
@@ -311,7 +331,7 @@ function extractWebFetch(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const url = str(toolInput['url']);
+  const url = coerceString(toolInput['url']);
   if (!url) return null;
 
   let summary = `URL: ${url}`;
@@ -320,7 +340,7 @@ function extractWebFetch(
     if (status != null) {
       summary += `\nStatus: ${status}`;
     }
-    const body = str(toolResponse['output'] || toolResponse['content'] || toolResponse['body'] || '');
+    const body = coerceString(toolResponse['output'] || toolResponse['content'] || toolResponse['body'] || '');
     if (body) {
       summary += '\n' + truncateLines(body, 3);
     }
@@ -343,10 +363,10 @@ function extractTask(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const prompt = str(toolInput['prompt']);
+  const prompt = coerceString(toolInput['prompt']);
   if (!prompt) return null;
 
-  const subagentType = str(toolInput['subagent_type'] || 'general');
+  const subagentType = coerceString(toolInput['subagent_type'] || 'general');
   const promptSummary = prompt.length > 100 ? prompt.slice(0, 97) + '...' : prompt;
   const content = `Task (${subagentType}): ${promptSummary}`;
 
@@ -367,7 +387,7 @@ function extractWebSearch(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const query = str(toolInput['query']);
+  const query = coerceString(toolInput['query']);
   if (!query) return null;
 
   const content = `WebSearch: ${query}`;
@@ -389,10 +409,10 @@ function extractNotebookEdit(
   sessionId: string,
   scope: Scope,
 ): Observation | null {
-  const notebookPath = str(toolInput['notebook_path']);
+  const notebookPath = coerceString(toolInput['notebook_path']);
   if (!notebookPath) return null;
 
-  const newSource = str(toolInput['new_source']);
+  const newSource = coerceString(toolInput['new_source']);
   const preview = newSource ? truncateLines(newSource, 5) : '(empty)';
   const content = `NotebookEdit ${basename(notebookPath)}: ${preview}`;
 
@@ -448,7 +468,7 @@ export function extractObservation(
       // For Glob with >= 3 results, we treat it like a discovery
       if (!extractGlob(toolInput, toolResponse)) return null;
       {
-        const pattern = str(toolInput['pattern']);
+        const pattern = coerceString(toolInput['pattern']);
         return makeObservation(
           sessionId,
           scope,

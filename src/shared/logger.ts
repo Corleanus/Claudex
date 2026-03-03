@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { PATHS } from './paths.js';
 import { redactSensitive } from '../lib/redaction.js';
 
-export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
 /**
  * Create a logger for a specific hook or module.

@@ -27,6 +27,23 @@ describe('normalizeFts5Query', () => {
     expect(normalizeFts5Query('"exact phrase"')).toBe('"exact phrase"');
   });
 
+  it('R15: preserves multi-word quoted phrases as single tokens', () => {
+    expect(normalizeFts5Query('"error handling"')).toBe('"error handling"');
+    expect(normalizeFts5Query('"tree shaking" bundler')).toBe('"tree shaking" bundler');
+  });
+
+  it('R15: multiple quoted phrases with unquoted terms', () => {
+    // Multiple quoted phrases should each be preserved as single tokens
+    const result = normalizeFts5Query('"error handling" "async await" bugs');
+    expect(result).toBe('"error handling" "async await" bugs');
+  });
+
+  it('R15: handles hyphens inside quoted phrases (sanitization runs first)', () => {
+    // Sanitization replaces hyphens with spaces before tokenization
+    const result = normalizeFts5Query('"multi-word phrase"');
+    expect(result).toBe('"multi word phrase"');
+  });
+
   it('preserves asterisk for prefix searches', () => {
     expect(normalizeFts5Query('type*')).toBe('type*');
   });

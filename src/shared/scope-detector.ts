@@ -51,6 +51,8 @@ export function detectScope(cwd: string): Scope {
     }
 
     const normalizedCwd = normalizePath(cwd);
+    let bestMatch: Scope | null = null;
+    let bestLength = 0;
 
     for (const projectName of Object.keys(data.projects)) {
       const entry = data.projects[projectName];
@@ -62,11 +64,14 @@ export function detectScope(cwd: string): Scope {
         normalizedCwd === normalizedProjectPath ||
         normalizedCwd.startsWith(normalizedProjectPath + '/')
       ) {
-        return { type: 'project', name: projectName, path: entry.path };
+        if (normalizedProjectPath.length > bestLength) {
+          bestMatch = { type: 'project', name: projectName, path: entry.path };
+          bestLength = normalizedProjectPath.length;
+        }
       }
     }
 
-    return { type: 'global' };
+    return bestMatch ?? { type: 'global' };
   } catch {
     // Missing projects.json or any filesystem error — global is the safe default
     return { type: 'global' };

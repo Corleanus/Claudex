@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { ResilientHologramClient } from '../../src/hologram/degradation.js';
+import { ResilientHologramClient, rescoreWithFallback } from '../../src/hologram/degradation.js';
 import type { HologramClient } from '../../src/hologram/client.js';
 import type { ClaudexConfig, HologramResponse } from '../../src/shared/types.js';
 import { HologramUnavailableError } from '../../src/shared/errors.js';
@@ -278,6 +278,95 @@ describe('ResilientHologramClient', () => {
       'prompt', 1, 'sess-1', [],
     );
 
+    expect(result.source).toBe('hologram');
+  });
+});
+
+// =============================================================================
+// R01: rescoreWithFallback checks WARM-only scores
+// =============================================================================
+
+describe('rescoreWithFallback', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = setupDb();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('returns db-pressure when only WARM scores exist (no HOT)', async () => {
+    // Insert only WARM scores — no HOT
+    upsertPressureScore(db, {
+      file_path: 'src/warm-only.ts',
+      project: 'test-project',
+      raw_pressure: 0.45,
+      temperature: 'WARM',
+      decay_rate: 0.05,
+    });
+
+    const mockClient = {
+      requestRescore: vi.fn().mockRejectedValue(new Error('sidecar down')),
+      query: vi.fn(),
+      notifyFileChanges: vi.fn(),
+      ping: vi.fn(),
+      isAvailable: vi.fn().mockReturnValue(false),
+      persistScores: vi.fn(),
+    } as unknown as HologramClient;
+
+    const result = await rescoreWithFallback(mockClient, 'sess-1', db, 'test-project');
+    expect(result.source).toBe('db-pressure');
+  });
+
+  it('returns db-pressure when HOT scores exist', async () => {
+    upsertPressureScore(db, {
+      file_path: 'src/hot.ts',
+      project: 'test-project',
+      raw_pressure: 0.9,
+      temperature: 'HOT',
+      decay_rate: 0.05,
+    });
+
+    const mockClient = {
+      requestRescore: vi.fn().mockRejectedValue(new Error('sidecar down')),
+      query: vi.fn(),
+      notifyFileChanges: vi.fn(),
+      ping: vi.fn(),
+      isAvailable: vi.fn().mockReturnValue(false),
+      persistScores: vi.fn(),
+    } as unknown as HologramClient;
+
+    const result = await rescoreWithFallback(mockClient, 'sess-1', db, 'test-project');
+    expect(result.source).toBe('db-pressure');
+  });
+
+  it('returns none when no DB scores exist', async () => {
+    const mockClient = {
+      requestRescore: vi.fn().mockRejectedValue(new Error('sidecar down')),
+      query: vi.fn(),
+      notifyFileChanges: vi.fn(),
+      ping: vi.fn(),
+      isAvailable: vi.fn().mockReturnValue(false),
+      persistScores: vi.fn(),
+    } as unknown as HologramClient;
+
+    const result = await rescoreWithFallback(mockClient, 'sess-1', db);
+    expect(result.source).toBe('none');
+  });
+
+  it('returns hologram when sidecar succeeds', async () => {
+    const mockClient = {
+      requestRescore: vi.fn().mockResolvedValue(true),
+      query: vi.fn(),
+      notifyFileChanges: vi.fn(),
+      ping: vi.fn(),
+      isAvailable: vi.fn().mockReturnValue(true),
+      persistScores: vi.fn(),
+    } as unknown as HologramClient;
+
+    const result = await rescoreWithFallback(mockClient, 'sess-1', db);
     expect(result.source).toBe('hologram');
   });
 });

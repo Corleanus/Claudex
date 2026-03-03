@@ -298,24 +298,25 @@ describe('executeFlush', () => {
   it('returns correct FlushResult with counts', async () => {
     const db = setupDb();
 
+    // Scores use undefined project to match the global TEST_SCOPE
     const scores: PressureScore[] = [
       {
         file_path: '/src/a.ts',
-        project: 'test-project',
+        project: '__global__',
         raw_pressure: 0.7,
         temperature: 'HOT',
         decay_rate: 0.05,
       },
       {
         file_path: '/src/b.ts',
-        project: 'test-project',
+        project: '__global__',
         raw_pressure: 0.3,
         temperature: 'WARM',
         decay_rate: 0.05,
       },
       {
         file_path: '/src/c.ts',
-        project: 'test-project',
+        project: '__global__',
         raw_pressure: 0.1,
         temperature: 'COLD',
         decay_rate: 0.05,

@@ -95,11 +95,11 @@ describe('rescoreWithFallback', () => {
     expect(result.source).toBe('db-pressure');
   });
 
-  it('returns none when sidecar fails and DB has no hot scores', async () => {
+  it('returns db-pressure when sidecar fails and DB has only WARM scores (R01)', async () => {
     const client = makeMockClient();
     client.requestRescore.mockRejectedValueOnce(new Error('sidecar down'));
 
-    // Insert only WARM scores (no HOT)
+    // Insert only WARM scores (no HOT) — R01 fix: WARM scores are valid fallback
     upsertPressureScore(db, {
       file_path: 'src/warm-file.ts',
       raw_pressure: 0.4,
@@ -109,7 +109,7 @@ describe('rescoreWithFallback', () => {
 
     const result = await rescoreWithFallback(client, 'sess-1', db);
 
-    expect(result.source).toBe('none');
+    expect(result.source).toBe('db-pressure');
   });
 
   it('returns none when sidecar fails and no DB provided', async () => {

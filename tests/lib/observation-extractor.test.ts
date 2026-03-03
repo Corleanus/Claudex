@@ -519,6 +519,91 @@ describe('extractObservation', () => {
 });
 
 // =============================================================================
+// Grep tool — Windows path parsing (C09 fix)
+// =============================================================================
+
+describe('Grep tool — Windows path parsing', () => {
+  it('extracts Windows absolute path from grep output line', () => {
+    const result = extractObservation(
+      'Grep',
+      { pattern: 'test' },
+      { output: 'C:\\repo\\file.ts:10:match' },
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toContain('C:\\repo\\file.ts');
+  });
+
+  it('extracts Windows UNC path from grep output line', () => {
+    const result = extractObservation(
+      'Grep',
+      { pattern: 'test' },
+      { output: '\\\\server\\share\\file.ts:10:match' },
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toContain('\\\\server\\share\\file.ts');
+  });
+
+  it('Unix path still works correctly', () => {
+    const result = extractObservation(
+      'Grep',
+      { pattern: 'test' },
+      { output: 'src/foo.ts:10:match' },
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toContain('src/foo.ts');
+  });
+
+  it('handles path-only line (no line number)', () => {
+    const result = extractObservation(
+      'Grep',
+      { pattern: 'test' },
+      { output: 'src/foo.ts' },
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toContain('src/foo.ts');
+  });
+
+  it('extracts multiple Windows paths correctly', () => {
+    const output = [
+      'C:\\repo\\src\\a.ts:1:import',
+      'C:\\repo\\src\\b.ts:5:export',
+      'C:\\repo\\src\\c.ts:10:const',
+    ].join('\n');
+    const result = extractObservation(
+      'Grep',
+      { pattern: 'test' },
+      { output },
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toContain('C:\\repo\\src\\a.ts');
+    expect(result!.files_read).toContain('C:\\repo\\src\\b.ts');
+    expect(result!.files_read).toContain('C:\\repo\\src\\c.ts');
+  });
+
+  it('handles forward-slash Windows paths (C:/repo/file.ts)', () => {
+    const result = extractObservation(
+      'Grep',
+      { pattern: 'test' },
+      { output: 'C:/repo/file.ts:10:match' },
+      SESSION_ID,
+      GLOBAL_SCOPE,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.files_read).toContain('C:/repo/file.ts');
+  });
+});
+
+// =============================================================================
 // Secret redaction tests
 // =============================================================================
 

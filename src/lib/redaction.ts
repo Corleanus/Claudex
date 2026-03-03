@@ -3,7 +3,7 @@
  *
  * PII/secret/entropy-based redaction. Two public entry points:
  * - redactSensitive(): Full redaction (secrets + PII + entropy) — for ingestion
- * - redactAssemblyOutput(): Light redaction (secrets + entropy) — for assembly safety-net
+ * - redactAssemblyOutput(): Full redaction (delegates to redactSensitive) — assembly safety-net
  */
 
 // =============================================================================
@@ -64,8 +64,7 @@ const ENTROPY_ALLOWLIST: RegExp[] = [
   /^[A-Za-z]:\\|^\/[a-z]/,                                 // File paths (Windows or Unix)
   /^https?:\/\//,                                          // URLs (http:// or https:// prefixed)
   /https?:\/\/[^\s]+/,                                     // URLs anywhere in string
-  /^[A-Za-z_][A-Za-z0-9_]*$/,                              // Identifiers (camelCase, snake_case)
-  /^[A-Za-z0-9+/]+=*$/,                                    // Base64-encoded data (ends with 0-2 '=')
+  /^[A-Za-z_][A-Za-z0-9_]{0,39}$/,                         // Identifiers — max 40 chars total
   /\.[a-zA-Z]{2,}$/,                                       // File paths with extensions
 ];
 
@@ -125,8 +124,8 @@ export function redactSensitive(text: string): string {
 }
 
 /**
- * Safety-net for context assembly output (FULL redaction — secrets + PII + entropy).
- * Even though PII should be redacted at ingestion, the assembly safety-net must catch any leaks.
+ * Full redaction safety-net for context assembly output.
+ * Delegates to redactSensitive() to catch any PII/secret leaks at the output boundary.
  */
 export function redactAssemblyOutput(text: string): string {
   // Use the full redactSensitive() to ensure PII patterns are caught
@@ -145,7 +144,8 @@ export function sanitizePath(path: string, projectRoot?: string): string {
   if (projectRoot) {
     const normalized = path.replace(/\\/g, '/');
     const rootNormalized = projectRoot.replace(/\\/g, '/');
-    if (normalized.startsWith(rootNormalized)) {
+    const rootWithSep = rootNormalized.endsWith('/') ? rootNormalized : rootNormalized + '/';
+    if (normalized === rootNormalized || normalized.startsWith(rootWithSep)) {
       const relative = normalized.slice(rootNormalized.length).replace(/^\/+/, '');
       return `<project>/${relative}`;
     }

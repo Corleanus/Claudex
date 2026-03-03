@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import {
   searchReasoning,
-  searchConsensus,
   searchAll,
   rebuildSearchIndex,
   optimizeSearchIndex,
@@ -165,54 +164,7 @@ describe('searchReasoning', () => {
   });
 });
 
-describe('searchConsensus', () => {
-  it('returns empty array for empty query', () => {
-    insertConsensus(db, makeConsensus());
-    const results = searchConsensus(db, '');
-    expect(results).toEqual([]);
-  });
-
-  it('finds consensus by title keyword', () => {
-    insertConsensus(db, makeConsensus({ title: 'Use SQLite for storage layer' }));
-    insertConsensus(db, makeConsensus({ title: 'Adopt vitest for testing' }));
-
-    const results = searchConsensus(db, 'SQLite');
-    expect(results.length).toBe(1);
-    expect(results[0]!.observation.title).toBe('Use SQLite for storage layer');
-  });
-
-  it('finds consensus by description keyword', () => {
-    insertConsensus(db, makeConsensus({
-      title: 'Decision A',
-      description: 'Hologram sidecar communicates over TCP socket protocol',
-    }));
-    insertConsensus(db, makeConsensus({
-      title: 'Decision B',
-      description: 'Hooks use esbuild for fast bundling',
-    }));
-
-    const results = searchConsensus(db, 'TCP');
-    expect(results.length).toBe(1);
-    expect(results[0]!.observation.title).toBe('Decision A');
-  });
-
-  it('respects project filter', () => {
-    insertConsensus(db, makeConsensus({
-      title: 'Alpha consensus pattern',
-      description: 'Shared keyword deployment',
-      project: 'alpha',
-    }));
-    insertConsensus(db, makeConsensus({
-      title: 'Beta consensus pattern',
-      description: 'Shared keyword deployment',
-      project: 'beta',
-    }));
-
-    const results = searchConsensus(db, 'deployment', { project: 'beta' });
-    expect(results.length).toBe(1);
-    expect(results[0]!.observation.project).toBe('beta');
-  });
-});
+// searchConsensus is internal (not exported) — tested indirectly via searchAll
 
 describe('searchAll', () => {
   it('returns results from all three tables', () => {

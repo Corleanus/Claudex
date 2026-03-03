@@ -9,7 +9,7 @@ import { createLogger } from '../shared/logger.js';
 
 const log = createLogger('context-monitor');
 
-export interface ContextUtilization {
+interface ContextUtilization {
   currentTokens: number;
   maxTokens: number;
   utilization: number;        // 0.0 to 1.0

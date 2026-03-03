@@ -8,6 +8,7 @@
 
 import type Database from 'better-sqlite3';
 import { redactSensitive } from '../lib/redaction.js';
+import { MS_PER_DAY } from '../shared/epoch.js';
 import { createLogger } from '../shared/logger.js';
 import { safeJsonParse } from '../shared/safe-json.js';
 
@@ -24,7 +25,12 @@ export type AuditEventType =
   | 'context_assembly'
   | 'retention_cleanup'
   | 'observation_store'
-  | 'pressure_update';
+  | 'pressure_update'
+  | 'unknown';
+
+const VALID_EVENT_TYPES: Set<string> = new Set([
+  'search', 'context_assembly', 'retention_cleanup', 'observation_store', 'pressure_update',
+]);
 
 export interface AuditEntry {
   id?: number;
@@ -59,16 +65,16 @@ export function logAudit(
       const cappedDetails = truncateDeep(entry.details, 500);
       let raw = JSON.stringify(cappedDetails);
 
-      // If still too long after stringify, aggressively truncate
+      // R14 fix: Redact FIRST — redaction can expand strings (e.g., short token → [REDACTED_KEY_32chars])
+      raw = redactSensitive(raw);
+
+      // Length check AFTER redaction to guarantee stored size
       if (raw.length > MAX_DETAILS_LENGTH) {
         raw = JSON.stringify({
           _truncated: true,
-          _preview: raw.slice(0, MAX_DETAILS_LENGTH - 100)
+          _preview: raw.slice(0, MAX_DETAILS_LENGTH - 100),
         });
       }
-
-      // H4 fix: Apply redaction to stringified JSON to catch JSON-encoded secrets
-      raw = redactSensitive(raw);
       detailsStr = raw;
     }
 
@@ -195,7 +201,9 @@ export function getAuditLog(
         timestamp: row.timestamp,
         timestamp_epoch: row.timestamp_epoch,
         session_id: row.session_id,
-        event_type: row.event_type as AuditEventType,
+        event_type: VALID_EVENT_TYPES.has(row.event_type)
+          ? row.event_type as AuditEventType
+          : 'unknown' as AuditEventType,
         actor: row.actor,
         details,
         created_at: row.created_at,
@@ -220,7 +228,7 @@ export function cleanOldAuditLogs(
   retentionDays = 30,
 ): number {
   try {
-    const cutoff = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
+    const cutoff = Date.now() - (retentionDays * MS_PER_DAY);
     return db.prepare('DELETE FROM audit_log WHERE timestamp_epoch < ?').run(cutoff).changes;
   } catch (err) {
     log.error('Failed to clean old audit logs:', err);

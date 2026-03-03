@@ -1,6 +1,54 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 
+// =============================================================================
+// R25: Single DB connection test
+// =============================================================================
+
+describe('session-end hook - R25: single DB connection', () => {
+  it('session-end.ts source uses getDatabase() at most once', () => {
+    // Read session-end.ts source and count getDatabase() calls
+    // After R25 fix, there should be exactly 1 getDatabase() call
+    const source = fs.readFileSync(
+      new URL('../../src/hooks/session-end.ts', import.meta.url),
+      'utf-8',
+    );
+
+    // Count actual getDatabase() invocations (not imports or type references)
+    // Pattern: getDatabase() with parens, but not inside import statements
+    const lines = source.split('\n');
+    let callCount = 0;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      // Skip import lines and type annotations
+      if (trimmed.startsWith('import') || trimmed.startsWith('const {') || trimmed.startsWith('//')) continue;
+      // Count actual invocations: db = getDatabase() or similar
+      const matches = trimmed.match(/getDatabase\(\)/g);
+      if (matches) callCount += matches.length;
+    }
+
+    expect(callCount).toBeLessThanOrEqual(1);
+  });
+
+  it('session-end.ts has a single db.close() in a finally block', () => {
+    const source = fs.readFileSync(
+      new URL('../../src/hooks/session-end.ts', import.meta.url),
+      'utf-8',
+    );
+
+    // Count db.close() calls — should be exactly 1 (in finally block)
+    const closeMatches = source.match(/db\.close\(\)/g) || [];
+    expect(closeMatches.length).toBe(1);
+
+    // Verify it's in a finally block
+    expect(source).toContain('finally');
+    // The close should be near a finally
+    const finallyIdx = source.lastIndexOf('finally');
+    const closeIdx = source.indexOf('db.close()', finallyIdx);
+    expect(closeIdx).toBeGreaterThan(finallyIdx);
+  });
+});
+
 describe('session-end hook - error handling', () => {
   describe('H14: Retention audit error logging', () => {
     it('verifies audit functions never throw (follow "never throw" pattern)', async () => {

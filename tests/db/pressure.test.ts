@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { MigrationRunner } from '../../src/db/migrations.js';
 import {
   upsertPressureScore,
+  batchUpsertPressureScores,
   getPressureScores,
   getHotFiles,
   getWarmFiles,
@@ -117,18 +118,17 @@ describe('upsertPressureScore', () => {
     expect(beta[0]!.raw_pressure).toBe(0.7);
   });
 
-  it('rejects project name "__global__" to avoid sentinel collision', () => {
-    // Attempt to insert with reserved project name
+  it('accepts project="__global__" as valid sentinel value', () => {
     upsertPressureScore(db, makeScore({
       file_path: 'src/reserved.ts',
       project: '__global__',
       raw_pressure: 0.8
     }));
 
-    // Should NOT create a row because the project name is reserved
     const rows = getPressureScores(db, '__global__');
-    // Only the sentinel-based entries (project: undefined) should exist, not user-provided '__global__'
-    expect(rows).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.file_path).toBe('src/reserved.ts');
+    expect(rows[0]!.raw_pressure).toBe(0.8);
   });
 });
 
@@ -137,15 +137,17 @@ describe('getPressureScores', () => {
     expect(getPressureScores(db)).toEqual([]);
   });
 
-  it('returns all scores when no project filter (ordered by raw_pressure DESC)', () => {
+  it('returns only __global__ rows when no project filter (ordered by raw_pressure DESC)', () => {
     upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'alpha', raw_pressure: 0.2 }));
     upsertPressureScore(db, makeScore({ file_path: 'b.ts', project: 'beta', raw_pressure: 0.9 }));
     upsertPressureScore(db, makeScore({ file_path: 'c.ts', raw_pressure: 0.5 }));
 
     const rows = getPressureScores(db);
-    expect(rows).toHaveLength(3);
-    expect(rows[0]!.raw_pressure).toBe(0.9);
-    expect(rows[2]!.raw_pressure).toBe(0.2);
+    // Should only return the __global__ row (c.ts), not alpha or beta
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.file_path).toBe('c.ts');
+    expect(rows[0]!.raw_pressure).toBe(0.5);
+    expect(rows[0]!.project).toBe('__global__');
   });
 
   it('filters by project', () => {
@@ -175,13 +177,16 @@ describe('getHotFiles', () => {
     expect(getHotFiles(db, 'p')).toEqual([]);
   });
 
-  it('returns all HOT files across projects when no filter', () => {
+  it('returns only __global__ HOT files when no project filter', () => {
     upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'alpha', temperature: 'HOT' }));
     upsertPressureScore(db, makeScore({ file_path: 'b.ts', project: 'beta', temperature: 'HOT' }));
-    upsertPressureScore(db, makeScore({ file_path: 'c.ts', project: 'alpha', temperature: 'WARM' }));
+    upsertPressureScore(db, makeScore({ file_path: 'c.ts', temperature: 'HOT' })); // global scope
 
     const rows = getHotFiles(db);
-    expect(rows).toHaveLength(2);
+    // Only the __global__ HOT row
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.file_path).toBe('c.ts');
+    expect(rows[0]!.project).toBe('__global__');
   });
 });
 
@@ -200,6 +205,81 @@ describe('getWarmFiles', () => {
   it('returns empty when no WARM files exist', () => {
     upsertPressureScore(db, makeScore({ file_path: 'hot.ts', project: 'p', temperature: 'HOT' }));
     expect(getWarmFiles(db, 'p')).toEqual([]);
+  });
+});
+
+describe('batchUpsertPressureScores', () => {
+  it('produces same results as individual upsertPressureScore calls', () => {
+    const scores = [
+      makeScore({ file_path: 'a.ts', project: 'proj', raw_pressure: 0.3, temperature: 'COLD' }),
+      makeScore({ file_path: 'b.ts', project: 'proj', raw_pressure: 0.6, temperature: 'WARM' }),
+      makeScore({ file_path: 'c.ts', project: 'proj', raw_pressure: 0.9, temperature: 'HOT' }),
+    ];
+
+    // DB1: batch insert
+    const db1 = setupDb();
+    batchUpsertPressureScores(db1, scores);
+    const batchRows = getPressureScores(db1, 'proj');
+    db1.close();
+
+    // DB2: individual inserts
+    const db2 = setupDb();
+    for (const s of scores) upsertPressureScore(db2, s);
+    const individualRows = getPressureScores(db2, 'proj');
+    db2.close();
+
+    expect(batchRows).toHaveLength(individualRows.length);
+    for (let i = 0; i < batchRows.length; i++) {
+      expect(batchRows[i]!.file_path).toBe(individualRows[i]!.file_path);
+      expect(batchRows[i]!.raw_pressure).toBe(individualRows[i]!.raw_pressure);
+      expect(batchRows[i]!.temperature).toBe(individualRows[i]!.temperature);
+      expect(batchRows[i]!.project).toBe(individualRows[i]!.project);
+    }
+  });
+
+  it('handles empty array without error', () => {
+    expect(() => batchUpsertPressureScores(db, [])).not.toThrow();
+    expect(getPressureScores(db)).toEqual([]);
+  });
+
+  it('handles single item', () => {
+    batchUpsertPressureScores(db, [
+      makeScore({ file_path: 'only.ts', project: 'p', raw_pressure: 0.7, temperature: 'HOT' }),
+    ]);
+    const rows = getPressureScores(db, 'p');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.file_path).toBe('only.ts');
+    expect(rows[0]!.raw_pressure).toBe(0.7);
+  });
+
+  it('updates existing rows on conflict', () => {
+    upsertPressureScore(db, makeScore({ file_path: 'x.ts', project: 'p', raw_pressure: 0.2, temperature: 'COLD' }));
+
+    batchUpsertPressureScores(db, [
+      makeScore({ file_path: 'x.ts', project: 'p', raw_pressure: 0.8, temperature: 'HOT' }),
+    ]);
+
+    const rows = getPressureScores(db, 'p');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.raw_pressure).toBe(0.8);
+    expect(rows[0]!.temperature).toBe('HOT');
+  });
+
+  it('uses __global__ sentinel when project is undefined', () => {
+    batchUpsertPressureScores(db, [
+      makeScore({ file_path: 'g.ts', raw_pressure: 0.4 }),
+    ]);
+    const rows = getPressureScores(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.project).toBe('__global__');
+  });
+
+  it('handles closed DB gracefully', () => {
+    const closedDb = setupDb();
+    closedDb.close();
+    expect(() => batchUpsertPressureScores(closedDb, [
+      makeScore({ file_path: 'a.ts', project: 'p' }),
+    ])).not.toThrow();
   });
 });
 
@@ -422,15 +502,112 @@ describe('decayAllScores', () => {
     expect(beta[0]!.raw_pressure).toBe(1.0);
   });
 
-  it('decays all scores when no project filter', () => {
+  it('decays only __global__ scores when no project filter', () => {
     upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'alpha', raw_pressure: 1.0, decay_rate: 0.1 }));
     upsertPressureScore(db, makeScore({ file_path: 'b.ts', project: 'beta', raw_pressure: 1.0, decay_rate: 0.1 }));
+    upsertPressureScore(db, makeScore({ file_path: 'c.ts', raw_pressure: 1.0, decay_rate: 0.1 })); // global
 
     const changed = decayAllScores(db);
-    expect(changed).toBe(2);
+    // Only the __global__ row should be decayed
+    expect(changed).toBe(1);
+
+    // Verify alpha and beta are untouched
+    const alpha = getPressureScores(db, 'alpha');
+    const beta = getPressureScores(db, 'beta');
+    expect(alpha[0]!.raw_pressure).toBe(1.0);
+    expect(beta[0]!.raw_pressure).toBe(1.0);
   });
 
   it('returns 0 when no scores exist', () => {
     expect(decayAllScores(db)).toBe(0);
+  });
+});
+
+describe('global scope isolation', () => {
+  it('upsertPressureScore accepts project="__global__" and persists the row', () => {
+    upsertPressureScore(db, makeScore({
+      file_path: 'a.ts',
+      project: '__global__',
+      raw_pressure: 0.8,
+    }));
+
+    const row = db.prepare(`SELECT * FROM pressure_scores WHERE project = '__global__'`).get() as any;
+    expect(row).toBeTruthy();
+    expect(row.file_path).toBe('a.ts');
+    expect(row.raw_pressure).toBe(0.8);
+  });
+
+  it('accumulatePressureScore accepts project="__global__" and persists', () => {
+    accumulatePressureScore(db, 'b.ts', '__global__', 0.5);
+
+    const row = db.prepare(`SELECT * FROM pressure_scores WHERE project = '__global__'`).get() as any;
+    expect(row).toBeTruthy();
+    expect(row.file_path).toBe('b.ts');
+  });
+
+  it('getPressureScores with project=undefined returns only __global__ rows', () => {
+    upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'my-project', raw_pressure: 0.3 }));
+    upsertPressureScore(db, makeScore({ file_path: 'b.ts', raw_pressure: 0.6 })); // global
+    upsertPressureScore(db, makeScore({ file_path: 'c.ts', project: 'other-project', raw_pressure: 0.9 }));
+
+    const rows = getPressureScores(db); // no project arg = undefined
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.file_path).toBe('b.ts');
+    expect(rows[0]!.project).toBe('__global__');
+  });
+
+  it('getHotFiles with project=undefined returns only __global__ HOT rows', () => {
+    upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'my-project', temperature: 'HOT' }));
+    upsertPressureScore(db, makeScore({ file_path: 'b.ts', temperature: 'HOT' })); // global
+
+    const rows = getHotFiles(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.file_path).toBe('b.ts');
+    expect(rows[0]!.project).toBe('__global__');
+  });
+
+  it('getWarmFiles with project=undefined returns only __global__ WARM rows', () => {
+    upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'my-project', temperature: 'WARM' }));
+    upsertPressureScore(db, makeScore({ file_path: 'b.ts', temperature: 'WARM' })); // global
+
+    const rows = getWarmFiles(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.file_path).toBe('b.ts');
+    expect(rows[0]!.project).toBe('__global__');
+  });
+
+  it('decayAllScores with project=undefined decays only __global__ rows', () => {
+    upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'proj-a', raw_pressure: 1.0 }));
+    upsertPressureScore(db, makeScore({ file_path: 'b.ts', project: 'proj-b', raw_pressure: 1.0 }));
+    upsertPressureScore(db, makeScore({ file_path: 'c.ts', raw_pressure: 1.0 })); // global
+
+    const changed = decayAllScores(db);
+    expect(changed).toBe(1);
+
+    // proj-a and proj-b untouched
+    expect(getPressureScores(db, 'proj-a')[0]!.raw_pressure).toBe(1.0);
+    expect(getPressureScores(db, 'proj-b')[0]!.raw_pressure).toBe(1.0);
+    // global decayed
+    expect(getPressureScores(db, '__global__')[0]!.raw_pressure).toBeLessThan(1.0);
+  });
+
+  it('cross-project isolation: project-A data never appears in project-B queries', () => {
+    upsertPressureScore(db, makeScore({ file_path: 'a.ts', project: 'alpha', raw_pressure: 0.3 }));
+    upsertPressureScore(db, makeScore({ file_path: 'b.ts', project: 'beta', raw_pressure: 0.7 }));
+    upsertPressureScore(db, makeScore({ file_path: 'g.ts', raw_pressure: 0.5 })); // global
+
+    const alpha = getPressureScores(db, 'alpha');
+    const beta = getPressureScores(db, 'beta');
+    const global = getPressureScores(db); // undefined = global
+
+    expect(alpha).toHaveLength(1);
+    expect(alpha[0]!.file_path).toBe('a.ts');
+
+    expect(beta).toHaveLength(1);
+    expect(beta[0]!.file_path).toBe('b.ts');
+
+    expect(global).toHaveLength(1);
+    expect(global[0]!.file_path).toBe('g.ts');
+    expect(global[0]!.project).toBe('__global__');
   });
 });

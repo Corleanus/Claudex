@@ -15,14 +15,14 @@ import { recordMetric } from '../shared/metrics.js';
 // Types
 // =============================================================================
 
-export interface TokenUsage {
+interface TokenUsage {
   input_tokens: number;
   output_tokens: number;
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
 }
 
-export type GaugeThreshold = 'normal' | 'approaching' | 'checkpoint' | 'critical' | 'unavailable';
+type GaugeThreshold = 'normal' | 'approaching' | 'checkpoint' | 'critical' | 'unavailable';
 
 export interface GaugeReading {
   status: 'ok' | 'unavailable';
@@ -79,7 +79,8 @@ function classifyThreshold(utilization: number): GaugeThreshold {
  */
 export function formatGauge(utilization: number, inputTokens: number, windowSize: number): string {
   const pct = Math.round(utilization * 100);
-  const filled = Math.round(utilization * GAUGE_BAR_WIDTH);
+  const clampedUtil = Math.min(Math.max(utilization, 0), 1);
+  const filled = Math.round(clampedUtil * GAUGE_BAR_WIDTH);
   const empty = GAUGE_BAR_WIDTH - filled;
   const bar = '█'.repeat(filled) + '░'.repeat(empty);
 

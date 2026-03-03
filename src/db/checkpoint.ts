@@ -70,8 +70,11 @@ export function upsertCheckpointState(
   const startMs = Date.now();
   try {
     db.prepare(`
-      INSERT OR REPLACE INTO checkpoint_state (session_id, last_epoch, active_files)
+      INSERT INTO checkpoint_state (session_id, last_epoch, active_files)
       VALUES (?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        last_epoch = excluded.last_epoch,
+        active_files = excluded.active_files
     `).run(sessionId, lastEpoch, JSON.stringify(activeFiles));
 
     recordMetric('db.insert', Date.now() - startMs);

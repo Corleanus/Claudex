@@ -126,14 +126,14 @@ describe('Session Lifecycle E2E', () => {
       incrementObservationCount(db, 'e2e-test-001');
 
       // 4. User-prompt-submit: search and assemble context
-      const searchResults = searchAll(db, 'auth');
+      const searchResults = searchAll(db, 'auth', { project: 'test' });
       expect(searchResults.length).toBeGreaterThan(0);
       expect(searchResults.some(r => r.observation.title === 'Found auth module')).toBe(true);
 
       const assembled = assembleContext({
         hologram: null,
         searchResults,
-        recentObservations: getRecentObservations(db, 5),
+        recentObservations: getRecentObservations(db, 5, 'test'),
         scope: { type: 'project', name: 'test', path: '/test' },
       }, { maxTokens: 4000 });
       expect(assembled.markdown).toContain('auth');
@@ -215,16 +215,16 @@ describe('Session Lifecycle E2E', () => {
       }
 
       // All three database observations should be found
-      const dbResults = searchObservations(db, 'Database');
+      const dbResults = searchObservations(db, 'Database', { project: 'accum' });
       expect(dbResults.length).toBe(3);
 
       // API observation should be found
-      const apiResults = searchObservations(db, 'RESTful');
+      const apiResults = searchObservations(db, 'RESTful', { project: 'accum' });
       expect(apiResults.length).toBe(1);
       expect(apiResults[0]!.observation.title).toBe('API endpoint design');
 
       // Frontend observation should be found
-      const feResults = searchObservations(db, 'React');
+      const feResults = searchObservations(db, 'React', { project: 'accum' });
       expect(feResults.length).toBe(1);
       expect(feResults[0]!.observation.title).toBe('Frontend component hierarchy');
 
@@ -275,7 +275,7 @@ describe('Session Lifecycle E2E', () => {
       });
 
       // Unified search finds observation from session 1
-      const results = searchAll(db, 'injection');
+      const results = searchAll(db, 'injection', { project: 'cross' });
       expect(results.length).toBeGreaterThan(0);
 
       // At least one result from session 1
@@ -335,7 +335,7 @@ describe('Session Lifecycle E2E', () => {
       });
 
       // Unified search finds consensus from session 1
-      const results = searchAll(db, 'microservices');
+      const results = searchAll(db, 'microservices', { project: 'cons' });
       expect(results.length).toBeGreaterThan(0);
       expect(results[0]!.observation.title).toBe('Adopted microservices architecture');
 
@@ -589,7 +589,7 @@ describe('Session Lifecycle E2E', () => {
       updateSessionStatus(db, 'e2e-fail-002', 'failed', new Date().toISOString());
 
       // Data survives session failure
-      const results = searchObservations(db, 'allocator');
+      const results = searchObservations(db, 'allocator', { project: 'failsearch' });
       expect(results.length).toBe(1);
       expect(results[0]!.observation.title).toContain('memory allocation');
     });
@@ -622,9 +622,9 @@ describe('Session Lifecycle E2E', () => {
       expect(betaObs.length).toBe(1);
       expect(betaObs[0]!.content).toContain('Pino');
 
-      // Unscoped retrieval returns both
-      const allObs = getRecentObservations(db, 10);
-      expect(allObs.length).toBe(2);
+      // Unscoped retrieval now returns only global (no global observations inserted)
+      const globalObs = getRecentObservations(db, 10);
+      expect(globalObs.length).toBe(0);
 
       // Project-scoped search
       const alphaSearch = searchObservations(db, 'logging', { project: 'alpha' });
@@ -657,9 +657,9 @@ describe('Session Lifecycle E2E', () => {
       expect(betaScores.length).toBe(1);
       expect(betaScores[0]!.raw_pressure).toBe(0.3);
 
-      // Same file_path, different projects — both exist
-      const allScores = getPressureScores(db);
-      expect(allScores.length).toBe(2);
+      // Unscoped retrieval returns only __global__ rows (none inserted here)
+      const globalScores = getPressureScores(db);
+      expect(globalScores.length).toBe(0);
     });
   });
 });

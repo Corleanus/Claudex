@@ -15,7 +15,7 @@ const log = createLogger('health');
 // Types
 // =============================================================================
 
-export interface HealthReport {
+interface HealthReport {
   database: { ok: boolean; observationCount: number; sessionCount: number };
   hologram: { ok: boolean; port: number | null };
   wrapper: { enabled: boolean; lastFlushEpoch: number };
@@ -59,17 +59,15 @@ async function checkDatabase(db?: import('better-sqlite3').Database | null): Pro
     }
 
     try {
-      const obsRow = conn.prepare('SELECT COUNT(*) as c FROM observations').get() as
-        | { c: number }
-        | undefined;
-      const sessRow = conn.prepare('SELECT COUNT(*) as c FROM sessions').get() as
-        | { c: number }
-        | undefined;
+      // O11: single combined query instead of two separate COUNT(*) queries
+      const row = conn.prepare(
+        'SELECT (SELECT COUNT(*) FROM observations) as obs, (SELECT COUNT(*) FROM sessions) as sess'
+      ).get() as { obs: number; sess: number } | undefined;
 
       return {
         ok: true,
-        observationCount: obsRow?.c ?? 0,
-        sessionCount: sessRow?.c ?? 0,
+        observationCount: row?.obs ?? 0,
+        sessionCount: row?.sess ?? 0,
       };
     } finally {
       if (ownedDb) {
@@ -94,19 +92,17 @@ function checkHologram(config: ClaudexConfig): HealthReport['hologram'] {
   try {
     const enabled = config.hologram?.enabled ?? false;
     let port: number | null = null;
-    let portFileExists = false;
 
     if (fs.existsSync(PATHS.hologramPort)) {
       const content = fs.readFileSync(PATHS.hologramPort, 'utf-8').trim();
       const parsed = Number(content);
       if (Number.isFinite(parsed) && parsed > 0) {
         port = parsed;
-        portFileExists = true;
       }
     }
 
     return {
-      ok: portFileExists && enabled,
+      ok: port !== null && enabled,
       port,
     };
   } catch (err) {

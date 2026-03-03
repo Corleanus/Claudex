@@ -278,7 +278,7 @@ describe('post-tool-use hook logic', () => {
 
       // Verify observation was still stored (Step 3 wasn't affected)
       const { getRecentObservations } = await import('../../src/db/observations.js');
-      const stored = getRecentObservations(db, 5);
+      const stored = getRecentObservations(db, 5, 'test-project');
       expect(stored.length).toBeGreaterThan(0);
       expect(stored.some(o => o.title.includes('critical.ts'))).toBe(true);
     });

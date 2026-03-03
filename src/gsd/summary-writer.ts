@@ -12,6 +12,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createLogger } from '../shared/logger.js';
+import { isContainedPath } from '../shared/paths.js';
 import { getPressureScores } from '../db/pressure.js';
 import { getPhaseRelevanceSet, applyPhaseBoost } from './phase-relevance.js';
 import type { GsdState } from './types.js';
@@ -26,6 +27,23 @@ const log = createLogger('gsd-summary-writer');
 
 /** Minimum time between SUMMARY.md rewrites (5 minutes) */
 const DEBOUNCE_MS = 5 * 60 * 1000;
+
+/** Maximum rows per table in SUMMARY.md output (O14) */
+const MAX_PHASE_FILES = 50;
+const MAX_OTHER_FILES = 100;
+
+/**
+ * Check if a path is a symlink. Returns true if symlink, false if regular file or doesn't exist.
+ */
+function isSymlink(filePath: string): boolean {
+  try {
+    const stat = fs.lstatSync(filePath);
+    return stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 
 // =============================================================================
 // writePhaseSummary
@@ -86,13 +104,16 @@ export function writePhaseSummary(
     const boostedFiles = applyPhaseBoost(scoredFiles, relevanceSet);
 
     // Split into phase-relevant (boosted) and other notable (WARM+ non-boosted)
+    // O14: cap row counts to prevent unbounded output
     const phaseFiles = boostedFiles
       .filter(f => f.phase_boosted === true)
-      .sort((a, b) => b.raw_pressure - a.raw_pressure);
+      .sort((a, b) => b.raw_pressure - a.raw_pressure)
+      .slice(0, MAX_PHASE_FILES);
 
     const otherFiles = boostedFiles
       .filter(f => f.phase_boosted !== true && f.temperature !== 'COLD')
-      .sort((a, b) => b.raw_pressure - a.raw_pressure);
+      .sort((a, b) => b.raw_pressure - a.raw_pressure)
+      .slice(0, MAX_OTHER_FILES);
 
     // Count WARM+ files total
     const warmPlusCount = boostedFiles.filter(f => f.temperature !== 'COLD').length;
@@ -134,6 +155,17 @@ export function writePhaseSummary(
 
     // Write to disk
     fs.mkdirSync(contextDir, { recursive: true });
+
+    // Symlink + containment safety (C06)
+    if (isSymlink(summaryPath)) {
+      log.warn(`SUMMARY.md is a symlink — refusing to write: ${summaryPath}`);
+      return false;
+    }
+    if (fs.existsSync(summaryPath) && !isContainedPath(summaryPath, contextDir)) {
+      log.warn(`SUMMARY.md path escapes context directory — refusing to write: ${summaryPath}`);
+      return false;
+    }
+
     fs.writeFileSync(summaryPath, content, 'utf-8');
 
     return true;
@@ -168,9 +200,25 @@ export function archivePhaseSummary(
 
     if (!fs.existsSync(summaryPath)) return false;
 
+    // Symlink + containment safety (C06)
+    if (isSymlink(summaryPath)) {
+      log.warn(`SUMMARY.md is a symlink — refusing to archive: ${summaryPath}`);
+      return false;
+    }
+    if (!isContainedPath(summaryPath, contextDir)) {
+      log.warn(`SUMMARY.md path escapes context directory: ${summaryPath}`);
+      return false;
+    }
+
     const archiveDir = path.join(contextDir, 'archive');
     const paddedPhase = String(phaseNumber).padStart(2, '0');
     const archivePath = path.join(archiveDir, `${paddedPhase}-${phaseName}.md`);
+
+    // Verify archive destination is contained
+    if (!isContainedPath(archivePath, path.resolve(contextDir, 'archive'))) {
+      log.warn(`Archive path escapes archive directory: ${archivePath}`);
+      return false;
+    }
 
     fs.mkdirSync(archiveDir, { recursive: true });
     fs.copyFileSync(summaryPath, archivePath);

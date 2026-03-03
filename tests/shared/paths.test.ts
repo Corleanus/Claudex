@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import {
@@ -6,6 +7,7 @@ import {
   completionMarkerPath,
   globalSessionLogPath,
   sessionDir,
+  isContainedPath,
   PATHS,
 } from '../../src/shared/paths.js';
 
@@ -119,5 +121,82 @@ describe('paths - path traversal protection', () => {
       const result = sessionDir('session-123_abc/../../etc');
       expect(result).toBe(path.join(PATHS.sessions, 'session-123_abcetc'));
     });
+  });
+});
+
+describe('isContainedPath', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'contained-test-'));
+    // Create nested structure for testing
+    fs.mkdirSync(path.join(tmpDir, 'root', 'child'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'root', 'child', 'file.txt'), 'test');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns true for a file inside the root', () => {
+    const filePath = path.join(tmpDir, 'root', 'child', 'file.txt');
+    expect(isContainedPath(filePath, path.join(tmpDir, 'root'))).toBe(true);
+  });
+
+  it('returns true when filePath equals root', () => {
+    const root = path.join(tmpDir, 'root');
+    expect(isContainedPath(root, root)).toBe(true);
+  });
+
+  it('rejects .. traversal', () => {
+    const filePath = path.join(tmpDir, 'root', '..', 'outside.txt');
+    expect(isContainedPath(filePath, path.join(tmpDir, 'root'))).toBe(false);
+  });
+
+  it('rejects sibling directory with shared prefix', () => {
+    // /foo/bar must NOT match /foo/bar-archive
+    fs.mkdirSync(path.join(tmpDir, 'bar'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, 'bar-archive'), { recursive: true });
+    expect(isContainedPath(
+      path.join(tmpDir, 'bar-archive', 'file.txt'),
+      path.join(tmpDir, 'bar'),
+    )).toBe(false);
+  });
+
+  it('handles non-existent paths via path.resolve fallback', () => {
+    const filePath = path.join(tmpDir, 'root', 'nonexistent', 'deep', 'file.txt');
+    expect(isContainedPath(filePath, path.join(tmpDir, 'root'))).toBe(true);
+  });
+
+  it('handles non-existent paths that escape root', () => {
+    const filePath = path.join(tmpDir, 'root', '..', 'other', 'file.txt');
+    expect(isContainedPath(filePath, path.join(tmpDir, 'root'))).toBe(false);
+  });
+
+  it('resolves symlinks for containment check', () => {
+    // Create a symlink that points outside root
+    const outsideDir = path.join(tmpDir, 'outside');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'secret');
+
+    const linkPath = path.join(tmpDir, 'root', 'link');
+    try {
+      fs.symlinkSync(outsideDir, linkPath, 'junction');
+    } catch {
+      // Symlink creation may fail without admin on Windows — skip
+      return;
+    }
+
+    // The symlink appears inside root, but resolves outside
+    expect(isContainedPath(
+      path.join(linkPath, 'secret.txt'),
+      path.join(tmpDir, 'root'),
+    )).toBe(false);
+  });
+
+  it('normalizes trailing separator', () => {
+    const filePath = path.join(tmpDir, 'root', 'child', 'file.txt');
+    // Root with trailing separator should still work
+    expect(isContainedPath(filePath, path.join(tmpDir, 'root') + path.sep)).toBe(true);
   });
 });

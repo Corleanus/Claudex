@@ -10,6 +10,7 @@ import type {
   ConsensusDecision,
 } from '../../src/shared/types.js';
 import type { GsdState } from '../../src/gsd/types.js';
+import type { GsdCheckpointState } from '../../src/checkpoint/types.js';
 
 // Mock logger
 vi.mock('../../src/shared/logger.js', () => ({
@@ -1082,5 +1083,237 @@ describe('search result reservation', () => {
     // Both should be present with plenty of budget
     expect(result.sources).toContain('fts5');
     expect(result.sources).toContain('recency');
+  });
+});
+
+// =============================================================================
+// Unified resume section (post-compact GSD restoration) — Phase 8
+// =============================================================================
+
+function makeCheckpointGsd(overrides: Partial<GsdCheckpointState> = {}): GsdCheckpointState {
+  return {
+    active: true,
+    milestone: 'Claudex-GSD Integration',
+    phase: 7,
+    phase_name: 'Bidirectional State Sync',
+    phase_goal: 'GSD STATE.md reflects Claudex cognitive metrics',
+    plan_status: '2 of 2',
+    plan_number: 2,
+    completion_pct: 75,
+    requirements: [
+      { id: 'LIFE-04', status: 'pending', description: 'GSD STATE.md includes Claudex metrics' },
+      { id: 'LIFE-05', status: 'pending', description: 'Claudex checkpoint includes GSD progress' },
+    ],
+    ...overrides,
+  };
+}
+
+describe('Unified resume section (post-compact GSD restoration)', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders unified section with live GSD + HOT/WARM files', () => {
+    const sources = emptySources({
+      postCompaction: true,
+      gsdState: makeGsdState(),
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts', raw_pressure: 0.92 })],
+        warm: [makeScoredFile({ path: '/src/warm.ts', raw_pressure: 0.55, temperature: 'WARM' })],
+        cold: [],
+      },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('## Resuming: Phase 2');
+    expect(result.markdown).toContain('Phase-Aware Context Injection');
+    expect(result.markdown).toContain('Progress:');
+    expect(result.markdown).toContain('/src/hot.ts');
+    // Unified section replaces individual sections
+    expect(result.markdown).not.toContain('## Project Phase');
+    expect(result.markdown).not.toContain('## Active Focus');
+    expect(result.markdown).not.toContain('## Warm Context');
+    expect(result.markdown).not.toContain('## Session Continuity');
+  });
+
+  it('renders unified section with checkpoint GSD fallback', () => {
+    const sources = emptySources({
+      postCompaction: true,
+      gsdState: undefined,
+      checkpointGsd: makeCheckpointGsd(),
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts', raw_pressure: 0.88 })],
+        warm: [],
+        cold: [],
+      },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('## Resuming: Phase 7');
+    expect(result.markdown).toContain('Bidirectional State Sync');
+    expect(result.markdown).toContain('75%');
+  });
+
+  it('omits unified section when no GSD available (falls back to separate sections)', () => {
+    const sources = emptySources({
+      postCompaction: true,
+      gsdState: undefined,
+      checkpointGsd: undefined,
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts', raw_pressure: 0.88 })],
+        warm: [],
+        cold: [],
+      },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('## Active Focus');
+    expect(result.markdown).toContain('## Session Continuity');
+    expect(result.markdown).not.toContain('## Resuming:');
+  });
+
+  it('non-post-compact prompts unchanged (regression guard)', () => {
+    const sources = emptySources({
+      gsdState: makeGsdState(),
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts', raw_pressure: 0.9 })],
+        warm: [],
+        cold: [],
+      },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('## Project Phase');
+    expect(result.markdown).toContain('## Active Focus');
+    expect(result.markdown).not.toContain('## Resuming:');
+  });
+
+  it('live GSD preferred over checkpoint GSD', () => {
+    const sources = emptySources({
+      postCompaction: true,
+      gsdState: makeGsdState(), // phase 2
+      checkpointGsd: makeCheckpointGsd(), // phase 7
+      hologram: { hot: [], warm: [], cold: [] },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('Phase 2');
+    expect(result.markdown).not.toContain('Phase 7');
+  });
+
+  it('unified section includes compaction notice', () => {
+    const sources = emptySources({
+      postCompaction: true,
+      gsdState: makeGsdState(),
+      hologram: { hot: [], warm: [], cold: [] },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('Context was compacted');
+  });
+
+  it('token budget respected by unified section', () => {
+    const sources = emptySources({
+      postCompaction: true,
+      gsdState: makeGsdState(),
+      hologram: {
+        hot: Array.from({ length: 20 }, (_, i) =>
+          makeScoredFile({ path: `/src/hot-${i}.ts`, raw_pressure: 0.9 }),
+        ),
+        warm: Array.from({ length: 20 }, (_, i) =>
+          makeScoredFile({ path: `/src/warm-${i}.ts`, raw_pressure: 0.5, temperature: 'WARM' }),
+        ),
+        cold: [],
+      },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 200 });
+
+    expect(result.tokenEstimate).toBeLessThanOrEqual(200);
+  });
+
+  it('WARM files appear in unified section as compact list', () => {
+    const sources = emptySources({
+      postCompaction: true,
+      gsdState: makeGsdState(),
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts', raw_pressure: 0.9 })],
+        warm: [
+          makeScoredFile({ path: '/src/warm1.ts', raw_pressure: 0.55, temperature: 'WARM' }),
+          makeScoredFile({ path: '/src/warm2.ts', raw_pressure: 0.50, temperature: 'WARM' }),
+          makeScoredFile({ path: '/src/warm3.ts', raw_pressure: 0.45, temperature: 'WARM' }),
+        ],
+        cold: [],
+      },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    expect(result.markdown).toContain('/src/warm1.ts');
+    expect(result.markdown).toContain('/src/warm2.ts');
+    expect(result.markdown).toContain('/src/warm3.ts');
+  });
+});
+
+describe('R18: post-redaction reclaim deduplication', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(1700000000000);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does not duplicate a source that was already contributed', () => {
+    // Set up sources with search results and identity — both will be contributed.
+    // Use a tight budget so search gets skipped initially, then reservation adds it.
+    // After redaction reclaim, the same source should not appear twice.
+    const searchResults = Array.from({ length: 5 }, (_, i) =>
+      makeSearchResult({
+        observation: makeObservation({
+          title: `Search result ${i}`,
+          content: `Content for result ${i} with safe text only`,
+        }),
+      }),
+    );
+
+    const sources = emptySources({
+      searchResults,
+      identity: { agent: 'Test Agent' },
+      hologram: {
+        hot: [makeScoredFile({ path: '/src/hot.ts', raw_pressure: 0.9 })],
+        warm: [],
+        cold: [],
+      },
+      scope: PROJECT_SCOPE,
+    });
+
+    const result = assembleContext(sources, { maxTokens: 4000 });
+
+    // Count occurrences of search-related headers
+    const searchHeaderCount = (result.markdown.match(/## Relevant Observations/g) || []).length;
+    expect(searchHeaderCount).toBeLessThanOrEqual(1);
+
+    // Source list should not contain duplicate entries
+    const uniqueSources = new Set(result.sources);
+    expect(uniqueSources.size).toBe(result.sources.length);
   });
 });

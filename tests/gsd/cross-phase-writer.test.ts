@@ -438,3 +438,172 @@ describe('writeCrossPhaseSummary', () => {
     expect(result).toBe(true);
   });
 });
+
+// =============================================================================
+// Decision text sanitization (R07 + R08)
+// =============================================================================
+
+describe('decision text sanitization (R07 + R08)', () => {
+  it('escapes markdown injection in decision text', () => {
+    // Need both pattern data (for non-empty output) AND decision data
+    createSummary('01-test', '01', {
+      created: ['src/a.ts'],
+      title: 'Plan A',
+    });
+    createSummary('02-test', '01', {
+      modified: ['src/a.ts'],
+      title: 'Plan B',
+    });
+
+    createSessionLog('2026-02-21_session-1.md', {
+      handoffId: 'claudex-v2-gsd-phase2',
+      decisions: ['## Inject heading into output'],
+    });
+
+    const result = writeCrossPhaseSummary(projectDir, claudexDir);
+    expect(result).toBe(true);
+
+    const outputPath = path.join(projectDir, '.planning', 'context', 'CROSS-PHASE.md');
+    const content = fs.readFileSync(outputPath, 'utf-8');
+
+    // The raw ## should be escaped (fullwidth #)
+    expect(content).not.toMatch(/^## Inject heading/m);
+    expect(content).toContain('\uFF03');
+  });
+
+  it('redacts secrets in decision text', () => {
+    createSummary('01-test', '01', {
+      created: ['src/a.ts'],
+      title: 'Plan A',
+    });
+    createSummary('02-test', '01', {
+      modified: ['src/a.ts'],
+      title: 'Plan B',
+    });
+
+    createSessionLog('2026-02-21_session-1.md', {
+      handoffId: 'claudex-v2-gsd-phase2',
+      decisions: ['Used api_key = sk-abc123xyz456789012345 for auth'],
+    });
+
+    const result = writeCrossPhaseSummary(projectDir, claudexDir);
+    expect(result).toBe(true);
+
+    const outputPath = path.join(projectDir, '.planning', 'context', 'CROSS-PHASE.md');
+    const content = fs.readFileSync(outputPath, 'utf-8');
+
+    // The secret should be redacted
+    expect(content).not.toContain('sk-abc123xyz456789012345');
+    expect(content).toContain('[REDACTED]');
+  });
+
+  it('escapes phase labels containing injection', () => {
+    createSummary('01-test', '01', {
+      created: ['src/a.ts'],
+      title: 'Plan A',
+    });
+    createSummary('02-test', '01', {
+      modified: ['src/a.ts'],
+      title: 'Plan B',
+    });
+
+    // Create a handoff with a manipulated handoff_id that maps to a label
+    createHandoff('context/handoffs/ACTIVE.md', {
+      handoffId: null,
+      decisions: ['Normal decision'],
+    });
+
+    const result = writeCrossPhaseSummary(projectDir, claudexDir);
+    expect(result).toBe(true);
+
+    const outputPath = path.join(projectDir, '.planning', 'context', 'CROSS-PHASE.md');
+    const content = fs.readFileSync(outputPath, 'utf-8');
+    expect(content).toContain('Normal decision');
+  });
+
+  it('sanitizes pattern file paths in output', () => {
+    createSummary('01-test', '01', {
+      created: ['## Injected path'],
+      title: 'Plan A',
+    });
+    createSummary('02-test', '01', {
+      modified: ['## Injected path'],
+      title: 'Plan B',
+    });
+
+    const result = writeCrossPhaseSummary(projectDir, claudexDir);
+    expect(result).toBe(true);
+
+    const outputPath = path.join(projectDir, '.planning', 'context', 'CROSS-PHASE.md');
+    const content = fs.readFileSync(outputPath, 'utf-8');
+
+    // Should be escaped, not raw ## heading
+    expect(content).not.toMatch(/^## Injected path/m);
+    expect(content).toContain('\uFF03');
+  });
+});
+
+// =============================================================================
+// R27: Decimal phase number parsing in handoff IDs
+// =============================================================================
+
+describe('R27: decimal phase parsing in handoff IDs', () => {
+  it('attributes decisions from gsd-phase2 to Phase 2', () => {
+    createSessionLog('2026-02-21_session-1.md', {
+      handoffId: 'claudex-v2-gsd-phase2',
+      decisions: ['Integer phase decision'],
+    });
+
+    const result = extractDecisionHistory(claudexDir);
+    const keys = Array.from(result.keys());
+    expect(keys).toContain('Phase 2');
+  });
+
+  it('attributes decisions from gsd-phase2.1 to Phase 2.1', () => {
+    createSessionLog('2026-02-21_session-1.md', {
+      handoffId: 'claudex-v2-gsd-phase2.1',
+      decisions: ['Decimal phase decision'],
+    });
+
+    const result = extractDecisionHistory(claudexDir);
+    const keys = Array.from(result.keys());
+    expect(keys).toContain('Phase 2.1');
+
+    const decisions = result.get('Phase 2.1')!;
+    expect(decisions.length).toBe(1);
+    expect(decisions[0]!.decision).toBe('Decimal phase decision');
+  });
+
+  it('attributes decisions from gsd-phase10.3 to Phase 10.3', () => {
+    createSessionLog('2026-02-21_session-1.md', {
+      handoffId: 'claudex-v2-gsd-phase10.3',
+      decisions: ['High decimal phase'],
+    });
+
+    const result = extractDecisionHistory(claudexDir);
+    const keys = Array.from(result.keys());
+    expect(keys).toContain('Phase 10.3');
+  });
+
+  it('gsd-integration still maps to GSD Integration', () => {
+    createSessionLog('2026-02-21_session-1.md', {
+      handoffId: 'claudex-v2-gsd-integration',
+      decisions: ['Integration decision'],
+    });
+
+    const result = extractDecisionHistory(claudexDir);
+    const keys = Array.from(result.keys());
+    expect(keys).toContain('GSD Integration');
+  });
+
+  it('null handoff maps to General', () => {
+    createSessionLog('2026-02-21_session-1.md', {
+      handoffId: null,
+      decisions: ['General decision'],
+    });
+
+    const result = extractDecisionHistory(claudexDir);
+    const keys = Array.from(result.keys());
+    expect(keys).toContain('General');
+  });
+});

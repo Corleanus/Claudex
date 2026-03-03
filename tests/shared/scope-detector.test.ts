@@ -211,6 +211,50 @@ describe('detectScope', () => {
     expect(result).toEqual({ type: 'global' });
   });
 
+  it('R20: returns the longest matching project path when multiple overlap', () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      projects: {
+        'parent': { path: 'C:\\Code', status: 'active' },
+        'child': { path: 'C:\\Code\\Sub', status: 'active' },
+      },
+    }));
+
+    const result = detectScope('C:\\Code\\Sub\\src');
+    expect(result).toEqual({
+      type: 'project',
+      name: 'child',
+      path: 'C:\\Code\\Sub',
+    });
+  });
+
+  it('R20: falls back to parent when cwd is not inside child', () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      projects: {
+        'parent': { path: 'C:\\Code', status: 'active' },
+        'child': { path: 'C:\\Code\\Sub', status: 'active' },
+      },
+    }));
+
+    const result = detectScope('C:\\Code\\Other');
+    expect(result).toEqual({
+      type: 'project',
+      name: 'parent',
+      path: 'C:\\Code',
+    });
+  });
+
+  it('R20: returns global when cwd matches neither project', () => {
+    mockReadFileSync.mockReturnValue(JSON.stringify({
+      projects: {
+        'parent': { path: 'C:\\Code', status: 'active' },
+        'child': { path: 'C:\\Code\\Sub', status: 'active' },
+      },
+    }));
+
+    const result = detectScope('D:\\Unrelated');
+    expect(result).toEqual({ type: 'global' });
+  });
+
   it('skips project entries with missing path', () => {
     mockReadFileSync.mockReturnValue(JSON.stringify({
       projects: {

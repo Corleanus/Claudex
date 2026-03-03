@@ -68,6 +68,10 @@ export function validateInput(
   // Common required fields (all versions) — ALL hooks require session_id
   if (!input.session_id) {
     errors.push('Missing required field: session_id');
+  } else if (typeof input.session_id !== 'string') {
+    errors.push('session_id must be a string');
+  } else if (!/^[A-Za-z0-9_-]{1,128}$/.test(input.session_id)) {
+    errors.push('session_id has invalid format: must be 1-128 alphanumeric/hyphen/underscore characters');
   }
 
   // Version-specific validations

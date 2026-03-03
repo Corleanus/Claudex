@@ -9,7 +9,7 @@
 import type Database from 'better-sqlite3';
 import { createLogger } from '../shared/logger.js';
 import { migration_1 } from './schema.js';
-import { migration_2, migration_4 } from './search.js';
+import { migration_2, migration_4 } from './search-migrations.js';
 import { migration_3 } from './schema-phase2.js';
 import { migration_5 } from './schema-phase3.js';
 import { migration_6 } from './schema-phase10.js';

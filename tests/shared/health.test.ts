@@ -294,3 +294,33 @@ describe('checkHealth — hologram, wrapper, metrics', () => {
     expect(report.wrapper).toBeDefined();
   });
 });
+
+// =============================================================================
+// O11: Verify single combined query pattern in checkDatabase
+// =============================================================================
+
+describe('checkHealth — O11 single query pattern', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetMetrics.mockReturnValue({});
+    resetFsMocksToReal();
+  });
+
+  it('calls db.prepare exactly once for observation + session counts', async () => {
+    const preparedQueries: string[] = [];
+    const mockDb = {
+      prepare: vi.fn((sql: string) => {
+        preparedQueries.push(sql);
+        return { get: vi.fn(() => ({ obs: 10, sess: 3 })) };
+      }),
+    };
+
+    const report = await checkHealth(makeConfig(), mockDb as any);
+    // Must prepare exactly 1 statement (combined query), not 2 separate ones
+    expect(mockDb.prepare).toHaveBeenCalledTimes(1);
+    expect(preparedQueries[0]).toContain('observations');
+    expect(preparedQueries[0]).toContain('sessions');
+    expect(report.database.observationCount).toBe(10);
+    expect(report.database.sessionCount).toBe(3);
+  });
+});

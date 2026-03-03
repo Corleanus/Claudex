@@ -43,20 +43,39 @@ function isProcessAlive(pid: number): boolean {
  * Verify if a PID belongs to a Python sidecar process.
  * Returns true if the process command line contains 'python' and 'sidecar',
  * false if the PID is stale/reused or can't be verified.
+ *
+ * @internal — exported for testing
  */
-function isPythonSidecar(pid: number): boolean {
+export function isPythonSidecar(pid: number): boolean {
   try {
     if (process.platform === 'win32') {
-      // Windows: use wmic to get command line
-      const output = execSync(`wmic process where ProcessId=${pid} get CommandLine`, {
-        encoding: 'utf-8',
-        timeout: 2000,
-        windowsHide: true,
-      }).toString();
+      // Try wmic first (available on older Windows, being deprecated)
+      try {
+        const output = execSync(`wmic process where ProcessId=${pid} get CommandLine`, {
+          encoding: 'utf-8',
+          timeout: 2000,
+          windowsHide: true,
+        }).toString();
+        const lowerOutput = output.toLowerCase();
+        return lowerOutput.includes('python') && lowerOutput.includes('sidecar');
+      } catch {
+        // wmic unavailable (modern Windows 11) — fall back to PowerShell/CIM
+      }
 
-      // Check if command line contains python and sidecar indicators
-      const lowerOutput = output.toLowerCase();
-      return lowerOutput.includes('python') && lowerOutput.includes('sidecar');
+      // PowerShell fallback: Get-CimInstance is the modern replacement for wmic
+      try {
+        const psCommand = `powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"ProcessId=${pid}\\" | Select-Object -ExpandProperty CommandLine"`;
+        const output = execSync(psCommand, {
+          encoding: 'utf-8',
+          timeout: 3000,
+          windowsHide: true,
+        }).toString();
+        const lowerOutput = output.toLowerCase();
+        return lowerOutput.includes('python') && lowerOutput.includes('sidecar');
+      } catch {
+        // PowerShell also failed — can't verify
+        return false;
+      }
     } else {
       // Unix: read /proc/PID/cmdline or use ps
       try {
@@ -108,7 +127,7 @@ function safeUnlink(filePath: string): void {
  * Returns 'ours' if the sidecar responds correctly, 'foreign' if the port is occupied
  * by something else, or 'dead' if nothing is listening.
  */
-async function verifySidecarPing(port: number): Promise<'ours' | 'foreign' | 'dead'> {
+export async function verifySidecarPing(port: number): Promise<'ours' | 'foreign' | 'dead'> {
   try {
     const protocol = new ProtocolHandler(PING_PROBE_TIMEOUT_MS);
     const request = buildRequest('ping');

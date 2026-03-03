@@ -21,223 +21,27 @@
 import type {
   ContextSources,
   AssembledContext,
-  ScoredFile,
-  Observation,
-  SearchResult,
-  ReasoningChain,
-  ConsensusDecision,
 } from '../shared/types.js';
-import type { GsdState } from '../gsd/types.js';
 import { redactAssemblyOutput } from './redaction.js';
-
-// =============================================================================
-// Token estimation
-// =============================================================================
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
-// =============================================================================
-// Time formatting
-// =============================================================================
-
-// timestamp_epoch is always milliseconds (epoch ms)
-function formatTimeAgo(epochMs: number): string {
-  const diffMs = Date.now() - epochMs;
-  const minutes = Math.floor(diffMs / 60_000);
-
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes}m ago`;
-
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
-// =============================================================================
-// Section builders
-// =============================================================================
-
-function buildIdentitySection(sources: ContextSources): string {
-  const parts: string[] = [];
-  if (sources.identity?.agent) {
-    parts.push(`- Agent: ${sources.identity.agent}`);
-  }
-  if (sources.identity?.user) {
-    parts.push(`- User: ${sources.identity.user}`);
-  }
-  if (parts.length === 0) return '';
-  return `## Identity\n${parts.join('\n')}\n`;
-}
-
-function buildProjectSection(sources: ContextSources): string {
-  if (sources.scope.type !== 'project') return '';
-  const parts: string[] = [];
-  if (sources.projectContext?.primer) {
-    parts.push(`- Primer: ${sources.projectContext.primer}`);
-  }
-  if (sources.projectContext?.handoff) {
-    parts.push(`- Handoff: ${sources.projectContext.handoff}`);
-  }
-  if (parts.length === 0) return '';
-  return `## Project (${sources.scope.name})\n${parts.join('\n')}\n`;
-}
-
-function buildHotSection(hotFiles: ScoredFile[]): string {
-  if (hotFiles.length === 0) return '';
-  const lines = hotFiles.map(f => {
-    const boost = f.phase_boosted ? ' [phase]' : '';
-    return `- \`${f.path}\` — HOT (pressure: ${f.raw_pressure.toFixed(2)})${boost}`;
-  });
-  return `## Active Focus\n${lines.join('\n')}\n`;
-}
-
-function buildGsdSection(
-  gsdState: GsdState,
-  planMustHaves?: string[],
-  requirementStatus?: { complete: number; total: number },
-): string {
-  if (!gsdState.active || !gsdState.position) return '';
-
-  const pos = gsdState.position;
-  const lines: string[] = [];
-
-  // Milestone progress
-  const completedCount = gsdState.phases.filter(p => p.roadmapComplete).length;
-  const totalCount = pos.totalPhases;
-  const pct = totalCount > 0 ? Math.round(completedCount / totalCount * 100) : 0;
-  lines.push(`Phase ${pos.phase} of ${totalCount}, ${pct}% complete`);
-
-  // Current phase name
-  const currentPhase = gsdState.phases.find(p => p.number === pos.phase);
-  const phaseName = pos.phaseName ?? currentPhase?.name ?? 'Unknown';
-  lines.push(`**Current:** ${phaseName}`);
-
-  // Goal
-  if (currentPhase?.goal) {
-    lines.push(`**Goal:** ${currentPhase.goal}`);
-  }
-
-  // Success criteria (up to 5, truncated to 100 chars)
-  if (currentPhase?.successCriteria?.length) {
-    lines.push('**Success Criteria:**');
-    for (const criterion of currentPhase.successCriteria.slice(0, 5)) {
-      const truncated = criterion.length > 100 ? criterion.slice(0, 100) + '...' : criterion;
-      lines.push(`- ${truncated}`);
-    }
-  }
-
-  // Plan must-haves
-  if (planMustHaves?.length) {
-    lines.push('**Active Plan:**');
-    for (const truth of planMustHaves.slice(0, 3)) {
-      lines.push(`- ${truth}`);
-    }
-  }
-
-  // Requirement status
-  if (requirementStatus && requirementStatus.total > 0) {
-    lines.push(`**Requirements:** ${requirementStatus.complete} of ${requirementStatus.total} complete`);
-  }
-
-  return `## Project Phase\n${lines.join('\n')}\n`;
-}
-
-function buildSearchSection(results: SearchResult[]): string {
-  if (results.length === 0) return '';
-  const lines = results.map(r => {
-    const ago = formatTimeAgo(r.observation.timestamp_epoch);
-    const cat = r.observation.category.charAt(0).toUpperCase() + r.observation.category.slice(1);
-    return `- [${ago}] ${cat}: ${r.observation.title}`;
-  });
-  return `## Related Observations\n${lines.join('\n')}\n`;
-}
-
-function buildReasoningSection(chains: ReasoningChain[]): string {
-  if (chains.length === 0) return '';
-  const lines = chains.map(c => {
-    const ago = formatTimeAgo(c.timestamp_epoch);
-    const truncated =
-      c.reasoning.length > 500 ? c.reasoning.slice(0, 500) + '...' : c.reasoning;
-    return `### ${c.title} (${ago})\n${truncated}\n`;
-  });
-  return `## Flow Reasoning\n${lines.join('\n')}\n`;
-}
-
-function buildConsensusSection(decisions: ConsensusDecision[]): string {
-  if (decisions.length === 0) return '';
-  const lines = decisions.map(d => {
-    const ago = formatTimeAgo(d.timestamp_epoch);
-    const truncated =
-      d.description.length > 300 ? d.description.slice(0, 300) + '...' : d.description;
-    return `### ${d.title} [${d.status}] (${ago})\n${truncated}\n`;
-  });
-  return `## Consensus Decisions\n${lines.join('\n')}\n`;
-}
-
-function buildPostCompactionSection(): string {
-  return `## Session Continuity\n- Context was recently compacted. Prior conversation state has been summarized.\n`;
-}
-
-function buildWarmSection(warmFiles: ScoredFile[]): string {
-  if (warmFiles.length === 0) return '';
-  const paths = warmFiles.map(f => {
-    const boost = f.phase_boosted ? ' [phase]' : '';
-    return `\`${f.path}\`${boost}`;
-  }).join(', ');
-  return `## Warm Context\n- ${paths}\n`;
-}
-
-function buildRecentObservationsSection(observations: Observation[]): string {
-  if (observations.length === 0) return '';
-  const lines = observations.map(o => {
-    const ago = formatTimeAgo(o.timestamp_epoch);
-    const cat = o.category.charAt(0).toUpperCase() + o.category.slice(1);
-    return `- [${ago}] ${cat}: ${o.title}`;
-  });
-  return `## Recent Activity\n${lines.join('\n')}\n`;
-}
-
-// =============================================================================
-// Reference builders (compact mode — emitted when token budget is tight)
-// =============================================================================
-
-function buildSearchSectionRef(results: SearchResult[]): string {
-  if (results.length === 0) return '';
-  const top = results[0]!;
-  const ago = formatTimeAgo(top.observation.timestamp_epoch);
-  return `## Related Observations (refs)\n- [${results.length} observations, top: "${top.observation.title}" (${ago})]\n`;
-}
-
-function buildRecentSectionRef(observations: Observation[]): string {
-  if (observations.length === 0) return '';
-  const latest = observations[0]!;
-  const ago = formatTimeAgo(latest.timestamp_epoch);
-  return `## Recent Activity (refs)\n- [${observations.length} observations, latest: "${latest.title}" (${ago})]\n`;
-}
-
-function buildReasoningSectionRef(chains: ReasoningChain[]): string {
-  if (chains.length === 0) return '';
-  const latest = chains[0]!;
-  const ago = formatTimeAgo(latest.timestamp_epoch);
-  return `## Flow Reasoning (refs)\n- [${chains.length} chains, latest: "${latest.title}" (${ago})]\n`;
-}
-
-function buildConsensusSectionRef(decisions: ConsensusDecision[]): string {
-  if (decisions.length === 0) return '';
-  const latest = decisions[0]!;
-  const ago = formatTimeAgo(latest.timestamp_epoch);
-  return `## Consensus Decisions (refs)\n- [${decisions.length} decisions, latest: "${latest.title}" [${latest.status}] (${ago})]\n`;
-}
-
-function buildWarmSectionRef(warmFiles: ScoredFile[]): string {
-  if (warmFiles.length === 0) return '';
-  const top = warmFiles[0]!;
-  return `## Warm Context (refs)\n- [${warmFiles.length} files, top: \`${top.path}\` (${top.raw_pressure.toFixed(2)})]\n`;
-}
+import {
+  estimateTokens,
+  buildIdentitySection,
+  buildProjectSection,
+  buildHotSection,
+  buildGsdSection,
+  buildSearchSection,
+  buildReasoningSection,
+  buildConsensusSection,
+  buildPostCompactionSection,
+  buildWarmSection,
+  buildRecentObservationsSection,
+  buildUnifiedResumeSection,
+  buildSearchSectionRef,
+  buildRecentSectionRef,
+  buildReasoningSectionRef,
+  buildConsensusSectionRef,
+  buildWarmSectionRef,
+} from './context-sections.js';
 
 // =============================================================================
 // Main assembler
@@ -261,8 +65,9 @@ export function assembleContext(
     const hasReasoning = !!(sources.reasoningChains?.length);
     const hasConsensus = !!(sources.consensusDecisions?.length);
     const hasGsd = !!(sources.gsdState?.active);
+    const hasCheckpointGsd = !!(sources.checkpointGsd?.active);
 
-    if (!hasHologram && !hasSearch && !hasRecent && !hasIdentity && !hasProject && !sources.postCompaction && !hasReasoning && !hasConsensus && !hasGsd) {
+    if (!hasHologram && !hasSearch && !hasRecent && !hasIdentity && !hasProject && !sources.postCompaction && !hasReasoning && !hasConsensus && !hasGsd && !hasCheckpointGsd) {
       return { markdown: '', tokenEstimate: 0, sources: [] };
     }
 
@@ -290,63 +95,120 @@ export function assembleContext(
       return true;
     }
 
-    // 1. Identity (lightweight, always fits)
-    if (hasIdentity) {
-      tryAppend(buildIdentitySection(sources), 'identity');
+    // Unified post-compact GSD restoration path
+    // When postCompaction + GSD available, render a single merged section
+    // that replaces individual GSD + HOT + WARM + Session Continuity sections
+    const useUnifiedPath = sources.postCompaction && (hasGsd || hasCheckpointGsd);
+
+    if (useUnifiedPath) {
+      const hotFiles = sources.hologram?.hot ?? [];
+      const warmFiles = sources.hologram?.warm ?? [];
+      const unified = buildUnifiedResumeSection(
+        sources.gsdState,
+        sources.checkpointGsd,
+        hotFiles,
+        warmFiles,
+      );
+
+      if (unified) {
+        // 1. Identity + Project (same as normal)
+        if (hasIdentity) tryAppend(buildIdentitySection(sources), 'identity');
+        if (hasProject) tryAppend(buildProjectSection(sources), 'project');
+
+        // 2. Unified resume section (replaces GSD + HOT + WARM + Session Continuity)
+        tryAppend(unified, 'gsd');
+        if (hotFiles.length > 0 && !contributedSources.includes('hologram')) {
+          contributedSources.push('hologram');
+        }
+        if (!contributedSources.includes('session')) {
+          contributedSources.push('session');
+        }
+
+        // 3. Remaining non-replaced sections
+        const remainingTokensU = config.maxTokens - estimateTokens(assembled);
+        const useReferencesU = remainingTokensU < 500;
+
+        if (hasReasoning) {
+          const builder = useReferencesU ? buildReasoningSectionRef : buildReasoningSection;
+          tryAppend(builder(sources.reasoningChains!), 'reasoning');
+        }
+        if (hasSearch) {
+          const builder = useReferencesU ? buildSearchSectionRef : buildSearchSection;
+          tryAppend(builder(sources.searchResults), 'fts5');
+        }
+        if (hasRecent) {
+          const builder = useReferencesU ? buildRecentSectionRef : buildRecentObservationsSection;
+          tryAppend(builder(sources.recentObservations), 'recency');
+        }
+        if (hasConsensus) {
+          const builder = useReferencesU ? buildConsensusSectionRef : buildConsensusSection;
+          tryAppend(builder(sources.consensusDecisions!), 'consensus');
+        }
+        // HOT, WARM, Session Continuity are folded into unified — skip them
+      }
     }
 
-    // 2. Project context
-    if (hasProject) {
-      tryAppend(buildProjectSection(sources), 'project');
-    }
+    // Standard path (non-post-compact, or no GSD available for unified section)
+    if (!useUnifiedPath) {
+      // 1. Identity (lightweight, always fits)
+      if (hasIdentity) {
+        tryAppend(buildIdentitySection(sources), 'identity');
+      }
 
-    // 3. HOT files
-    if (hasHologram && sources.hologram!.hot.length > 0) {
-      tryAppend(buildHotSection(sources.hologram!.hot), 'hologram');
-    }
+      // 2. Project context
+      if (hasProject) {
+        tryAppend(buildProjectSection(sources), 'project');
+      }
 
-    // 3.5. GSD Project Phase
-    if (hasGsd) {
-      tryAppend(buildGsdSection(sources.gsdState!, sources.gsdPlanMustHaves, sources.gsdRequirementStatus), 'gsd');
-    }
+      // 3. HOT files
+      const hologram = sources.hologram;
+      if (hasHologram && hologram && hologram.hot.length > 0) {
+        tryAppend(buildHotSection(hologram.hot), 'hologram');
+      }
 
-    // Compute remaining budget after priority sections (1-3.5)
-    const remainingTokens = config.maxTokens - estimateTokens(assembled);
-    const useReferences = remainingTokens < 500;
+      // 3.5. GSD Project Phase
+      if (hasGsd) {
+        tryAppend(buildGsdSection(sources.gsdState!, sources.gsdPlanMustHaves, sources.gsdRequirementStatus), 'gsd');
+      }
 
-    // 4. Flow Reasoning
-    if (hasReasoning) {
-      const builder = useReferences ? buildReasoningSectionRef : buildReasoningSection;
-      tryAppend(builder(sources.reasoningChains!), 'reasoning');
-    }
+      // Compute remaining budget after priority sections (1-3.5)
+      const remainingTokens = config.maxTokens - estimateTokens(assembled);
+      const useReferences = remainingTokens < 500;
 
-    // 5. FTS5 search results
-    if (hasSearch) {
-      const builder = useReferences ? buildSearchSectionRef : buildSearchSection;
-      tryAppend(builder(sources.searchResults), 'fts5');
-    }
+      // 4. Flow Reasoning
+      if (hasReasoning) {
+        const builder = useReferences ? buildReasoningSectionRef : buildReasoningSection;
+        tryAppend(builder(sources.reasoningChains!), 'reasoning');
+      }
 
-    // 6. Recent observations (temporal context — what just happened)
-    if (hasRecent) {
-      const builder = useReferences ? buildRecentSectionRef : buildRecentObservationsSection;
-      tryAppend(builder(sources.recentObservations), 'recency');
-    }
+      // 5. FTS5 search results
+      if (hasSearch) {
+        const builder = useReferences ? buildSearchSectionRef : buildSearchSection;
+        tryAppend(builder(sources.searchResults), 'fts5');
+      }
 
-    // 7. Consensus Decisions
-    if (hasConsensus) {
-      const builder = useReferences ? buildConsensusSectionRef : buildConsensusSection;
-      tryAppend(builder(sources.consensusDecisions!), 'consensus');
-    }
+      // 6. Recent observations (temporal context — what just happened)
+      if (hasRecent) {
+        const builder = useReferences ? buildRecentSectionRef : buildRecentObservationsSection;
+        tryAppend(builder(sources.recentObservations), 'recency');
+      }
 
-    // 8. Post-compaction continuity — ALWAYS inline, never reference mode
-    if (sources.postCompaction) {
-      tryAppend(buildPostCompactionSection(), 'session');
-    }
+      // 7. Consensus Decisions
+      if (hasConsensus) {
+        const builder = useReferences ? buildConsensusSectionRef : buildConsensusSection;
+        tryAppend(builder(sources.consensusDecisions!), 'consensus');
+      }
 
-    // 9. WARM files
-    if (hasHologram && sources.hologram!.warm.length > 0) {
-      const builder = useReferences ? buildWarmSectionRef : buildWarmSection;
-      tryAppend(builder(sources.hologram!.warm), 'hologram');
+      // 8. Post-compaction continuity — ALWAYS inline, never reference mode
+      if (sources.postCompaction) {
+        tryAppend(buildPostCompactionSection(), 'session');
+      }
+
+      // 9. WARM files
+      if (hasHologram && hologram && hologram.warm.length > 0) {
+        const builder = useReferences ? buildWarmSectionRef : buildWarmSection;
+        tryAppend(builder(hologram.warm), 'hologram');
+      }
     }
 
     // 9.5. Search result reservation: ensure FTS5 results get at least a ref slot
@@ -395,13 +257,21 @@ export function assembleContext(
     // (which respects priority order)
     if (skipped.length > 0 && estimateTokens(markdown) < config.maxTokens) {
       let tempAssembled = markdown.trimEnd();
+      // Track which sources have already been appended (prevents duplication)
+      const appendedSources = new Set(contributedSources);
 
       for (const { section, source } of skipped) {
+        // Skip if this source was already appended
+        if (source && appendedSources.has(source)) continue;
+
         const withNewline = '\n' + section + '\n';
         if (estimateTokens(tempAssembled + withNewline) <= config.maxTokens) {
           tempAssembled += withNewline;
-          if (source && !contributedSources.includes(source)) {
-            contributedSources.push(source);
+          if (source) {
+            appendedSources.add(source);
+            if (!contributedSources.includes(source)) {
+              contributedSources.push(source);
+            }
           }
         }
       }

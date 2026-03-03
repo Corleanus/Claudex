@@ -121,7 +121,7 @@ export function getObservationsBySession(db: Database.Database, sessionId: strin
 /**
  * Get the most recent observations, optionally filtered by project.
  *
- * @param project - undefined: all records, string: specific project, null: global-scope only (WHERE project IS NULL)
+ * @param project - undefined/null: global-scope only (WHERE project IS NULL), string: specific project
  */
 export function getRecentObservations(db: Database.Database, limit: number, project?: string | null): Observation[] {
   const startMs = Date.now();
@@ -150,12 +150,12 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
              LIMIT ?`;
       rows = db.prepare(sql).all(project, limit) as ObservationRow[];
     } else {
-      // All records (no filter)
+      // Global scope: only records with project IS NULL (same as null)
       sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
-             WHERE deleted_at_epoch IS NULL
+             WHERE project IS NULL AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT ?`;
       rows = db.prepare(sql).all(limit) as ObservationRow[];
@@ -174,7 +174,7 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
  * Get observations since a given epoch, optionally filtered by project.
  *
  * @param epochMs - Only return observations with timestamp_epoch > this value (milliseconds)
- * @param project - undefined: all records, string: specific project, null: global-scope only (WHERE project IS NULL)
+ * @param project - undefined/null: global-scope only (WHERE project IS NULL), string: specific project
  */
 export function getObservationsSince(db: Database.Database, epochMs: number, project?: string | null): Observation[] {
   const startMs = Date.now();
@@ -203,12 +203,12 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
              LIMIT 50`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs), project) as ObservationRow[];
     } else {
-      // All records (no project filter)
+      // Global scope: only records with project IS NULL (same as null)
       sql = `SELECT id, session_id, project, timestamp, timestamp_epoch,
                     tool_name, category, title, content,
                     facts, files_read, files_modified, importance
              FROM observations
-             WHERE timestamp_epoch > ? AND deleted_at_epoch IS NULL
+             WHERE timestamp_epoch > ? AND project IS NULL AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
              LIMIT 50`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs)) as ObservationRow[];

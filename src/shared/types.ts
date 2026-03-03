@@ -6,6 +6,7 @@
  */
 
 import type { GsdState } from '../gsd/types.js';
+import type { GsdCheckpointState } from '../checkpoint/types.js';
 
 // =============================================================================
 // Hook I/O
@@ -79,7 +80,7 @@ export type Scope =
   | { type: 'project'; name: string; path: string };
 
 /** Project entry in ~/.claudex/projects.json (object-map format) */
-export interface ProjectEntry {
+interface ProjectEntry {
   path: string;
   status: 'active' | 'archived';
 }
@@ -302,6 +303,7 @@ export interface ContextSources {
   gsdState?: GsdState;
   gsdPlanMustHaves?: string[];
   gsdRequirementStatus?: { complete: number; total: number };
+  checkpointGsd?: GsdCheckpointState;  // Fallback GSD from checkpoint when live GSD unavailable
 }
 
 export interface AssembledContext {

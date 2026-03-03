@@ -1,0 +1,46 @@
+{
+  "assessments": {
+    "naming_quality": 85,
+    "error_consistency": 90,
+    "abstraction_fitness": 87,
+    "logic_clarity": 86,
+    "ai_generated_debt": 83,
+    "type_safety": 88,
+    "contract_coherence": 88
+  },
+  "findings": [
+    {
+      "file": "src/db/observations.ts",
+      "dimension": "abstraction_fitness",
+      "identifier": "project filter pattern",
+      "summary": "3-branch project filter (null/string/undefined) repeated in 4 CRUD modules without shared helper",
+      "evidence_lines": [126, 132, 142, 152],
+      "evidence": ["getRecentObservations, getObservationsSince, getRecentConsensus, getRecentReasoning all repeat the same if/else-if/else project filter pattern"],
+      "suggestion": "Extract a shared `buildProjectFilter(project?: string | null): { clause: string; params: unknown[] }` helper in a db/utils.ts module",
+      "reasoning": "The pattern is identical across 4 files: observations.ts, consensus.ts, reasoning.ts, and partly in pressure.ts. Each repeats the same SELECT columns 3 times with only the WHERE clause differing.",
+      "confidence": "medium"
+    },
+    {
+      "file": "src/hooks/session-end.ts",
+      "dimension": "abstraction_fitness",
+      "identifier": "session-end handler",
+      "summary": "9 independent sections with separate DB connections — each section opens and closes its own connection",
+      "evidence_lines": [230, 267, 313, 362],
+      "evidence": ["Sections 5, 6, 7, 8, 9 each call getDatabase() and db.close() independently"],
+      "suggestion": "Open a single DB connection at the top of the handler and pass it to each section",
+      "reasoning": "Each getDatabase() call runs migrations (idempotent but not free). A single connection shared across sections would be more efficient.",
+      "confidence": "medium"
+    },
+    {
+      "file": "src/shared/logger.ts",
+      "dimension": "abstraction_fitness",
+      "identifier": "createLogger",
+      "summary": "Logger message formatting duplicated between logger.ts and _infrastructure.ts logToFile()",
+      "evidence_lines": [48, 50, 51, 52],
+      "evidence": ["Both logger.ts and _infrastructure.ts have identical Error/object/string message formatting logic"],
+      "suggestion": "Extract the shared message formatting into a formatLogArgs helper",
+      "reasoning": "The formatting logic is character-for-character identical. When one is updated the other must be too.",
+      "confidence": "high"
+    }
+  ]
+}

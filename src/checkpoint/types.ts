@@ -85,6 +85,8 @@ export interface GsdCheckpointState {
   phase_name: string | null;
   phase_goal: string | null;
   plan_status: string | null;
+  plan_number: number | null;
+  completion_pct: number;
   requirements: Array<{
     id: string;
     status: string;

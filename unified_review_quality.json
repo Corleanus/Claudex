@@ -1,0 +1,61 @@
+{
+  "assessments": {
+    "naming_quality": 86,
+    "error_consistency": 72,
+    "abstraction_fitness": 84,
+    "logic_clarity": 74,
+    "ai_generated_debt": 70,
+    "type_safety": 62,
+    "contract_coherence": 54
+  },
+  "findings": [
+    {
+      "id": "quality-101",
+      "dimension": "contract_coherence",
+      "file": "src/checkpoint/writer.ts",
+      "line": 54,
+      "severity": "high",
+      "description": "Public type exports were removed (e.g., WriteCheckpointInput/WriteCheckpointResult). This changes the module contract and breaks typed consumers that import these names."
+    },
+    {
+      "id": "quality-102",
+      "dimension": "contract_coherence",
+      "file": "src/db/search.ts",
+      "line": 289,
+      "severity": "medium",
+      "description": "searchConsensus changed from exported to internal with no compatibility shim; any direct caller loses API access."
+    },
+    {
+      "id": "quality-103",
+      "dimension": "logic_clarity",
+      "file": "src/lib/context-assembler.ts",
+      "line": 119,
+      "severity": "medium",
+      "description": "In unified mode, source attribution is updated even when tryAppend(unified, 'gsd') may fail due token budget, which can produce misleading source metadata."
+    },
+    {
+      "id": "quality-104",
+      "dimension": "error_consistency",
+      "file": "src/hooks/user-prompt-submit.ts",
+      "line": 354,
+      "severity": "medium",
+      "description": "Any exception during STATE.md stat/read forces shouldWriteMetrics=false, silently skipping metrics writes instead of degrading gracefully like nearby non-fatal paths."
+    },
+    {
+      "id": "quality-105",
+      "dimension": "type_safety",
+      "file": "src/gsd/phase-transition-cli.ts",
+      "line": 234,
+      "severity": "low",
+      "description": "The exhaustive default branch casts never to { event: string }, which weakens strict exhaustiveness guarantees and introduces an unnecessary unsafe cast."
+    },
+    {
+      "id": "quality-106",
+      "dimension": "type_safety",
+      "file": "src/wrapper/context-monitor.ts",
+      "line": 12,
+      "severity": "high",
+      "description": "ContextUtilization is no longer exported while typed imports still exist in consumer code/tests, weakening type-contract stability and likely breaking strict type-check workflows."
+    }
+  ]
+}

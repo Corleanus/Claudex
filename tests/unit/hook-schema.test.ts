@@ -181,6 +181,54 @@ describe('validateInput', () => {
     expect(result.valid).toBe(true);
     expect(result.errors).toHaveLength(0);
   });
+
+  // O08: session_id format validation
+  it('accepts valid alphanumeric session_id', () => {
+    const result = validateInput('session-start', { session_id: 'abc-123_XYZ' }, 2);
+    expect(result.valid).toBe(true);
+  });
+
+  it('accepts session_id with hyphens and underscores', () => {
+    const result = validateInput('session-start', { session_id: 'my-session_01' }, 2);
+    expect(result.valid).toBe(true);
+  });
+
+  it('accepts session_id up to 128 chars', () => {
+    const longId = 'a'.repeat(128);
+    const result = validateInput('session-start', { session_id: longId }, 2);
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects whitespace-only session_id', () => {
+    const result = validateInput('session-start', { session_id: '   ' }, 2);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('invalid format');
+  });
+
+  it('rejects session_id with path traversal characters', () => {
+    const result = validateInput('session-start', { session_id: '../etc/passwd' }, 2);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('invalid format');
+  });
+
+  it('rejects session_id with special characters', () => {
+    const result = validateInput('session-start', { session_id: 'sess;rm -rf /' }, 2);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('invalid format');
+  });
+
+  it('rejects session_id longer than 128 chars', () => {
+    const tooLong = 'a'.repeat(129);
+    const result = validateInput('session-start', { session_id: tooLong }, 2);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('invalid format');
+  });
+
+  it('rejects non-string session_id', () => {
+    const result = validateInput('session-start', { session_id: 12345 }, 2);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('must be a string');
+  });
 });
 
 // =============================================================================

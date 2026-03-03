@@ -261,6 +261,32 @@ describe('readTokenGauge', () => {
     expect(result.threshold).toBe('checkpoint');
   });
 
+  it('formatGauge handles >100% utilization without crashing (C08)', () => {
+    // 150% — should show 150% in text, full bar, no RangeError
+    const bar150 = formatGauge(1.5, 300_000, 200_000);
+    expect(bar150).toContain('150%');
+    expect(bar150).toContain('██████████'); // full bar (clamped to 100%)
+    expect(bar150).toContain('300k/200k');
+  });
+
+  it('formatGauge handles negative utilization without crashing (C08)', () => {
+    // Negative — should clamp to 0%, empty bar
+    const barNeg = formatGauge(-0.1, 0, 200_000);
+    expect(barNeg).toContain('-10%'); // actual pct shown
+    expect(barNeg).toContain('░░░░░░░░░░'); // empty bar (clamped to 0%)
+  });
+
+  it('formatGauge at exactly 100% shows full bar', () => {
+    const bar = formatGauge(1.0, 200_000, 200_000);
+    expect(bar).toBe('[██████████ 100% | 200k/200k]');
+  });
+
+  it('formatGauge at 200% shows 200% text with full bar', () => {
+    const bar = formatGauge(2.0, 400_000, 200_000);
+    expect(bar).toContain('200%');
+    expect(bar).toContain('██████████');
+  });
+
   it('returns unavailable for zero-length file', () => {
     const filePath = path.join(tmpDir, 'empty.jsonl');
     fs.writeFileSync(filePath, '', 'utf-8');

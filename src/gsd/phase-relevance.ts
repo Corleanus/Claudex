@@ -113,7 +113,9 @@ export function getPhaseRelevanceSet(
 
     for (const planFileName of planFiles) {
       // Check if this plan is completed (matching SUMMARY.md exists)
-      const summaryName = planFileName.replace('-PLAN.md', '-SUMMARY.md');
+      const summaryName = planFileName === 'PLAN.md'
+        ? 'SUMMARY.md'
+        : planFileName.replace('-PLAN.md', '-SUMMARY.md');
       if (entries.includes(summaryName)) {
         log.debug(`Skipping completed plan: ${planFileName}`);
         continue;

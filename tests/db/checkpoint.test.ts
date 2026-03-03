@@ -140,6 +140,45 @@ describe('checkpoint_state CRUD (Test #14)', () => {
     expect(result).toBe(false);
   });
 
+  it('upsert preserves boost state (C04 — ON CONFLICT DO UPDATE)', () => {
+    // 1. Insert checkpoint
+    upsertCheckpointState(db, 'sess-boost', 1704067200000, ['a.ts']);
+
+    // 2. Set boost state
+    updateBoostState(db, 'sess-boost', 1704067300000, 1);
+
+    // Verify boost was set
+    const before = getCheckpointState(db, 'sess-boost');
+    expect(before!.boost_applied_at).toBe(1704067300000);
+    expect(before!.boost_turn_count).toBe(1);
+
+    // 3. Re-upsert with new epoch and files
+    upsertCheckpointState(db, 'sess-boost', 1704067400000, ['b.ts', 'c.ts']);
+
+    // 4. Assert boost state survived the upsert
+    const after = getCheckpointState(db, 'sess-boost');
+    expect(after!.last_epoch).toBe(1704067400000);
+    expect(after!.active_files).toEqual(['b.ts', 'c.ts']);
+    expect(after!.boost_applied_at).toBe(1704067300000);
+    expect(after!.boost_turn_count).toBe(1);
+  });
+
+  it('upsert preserves boost across multiple cycles', () => {
+    upsertCheckpointState(db, 'sess-multi', 1000000000000, ['a.ts']);
+    updateBoostState(db, 'sess-multi', 1000000100000, 2);
+
+    // Multiple upserts
+    upsertCheckpointState(db, 'sess-multi', 1000000200000, ['b.ts']);
+    upsertCheckpointState(db, 'sess-multi', 1000000300000, ['c.ts']);
+    upsertCheckpointState(db, 'sess-multi', 1000000400000, ['d.ts']);
+
+    const state = getCheckpointState(db, 'sess-multi');
+    expect(state!.last_epoch).toBe(1000000400000);
+    expect(state!.active_files).toEqual(['d.ts']);
+    expect(state!.boost_applied_at).toBe(1000000100000);
+    expect(state!.boost_turn_count).toBe(2);
+  });
+
   it('multiple sessions are independent', () => {
     upsertCheckpointState(db, 'sess-1', 1000000000000, ['a.ts']);
     upsertCheckpointState(db, 'sess-2', 2000000000000, ['b.ts']);
@@ -192,12 +231,14 @@ describe('getObservationsSince — delta query (Test #13)', () => {
     expect(results[0]!.title).toBe('ProjectA');
   });
 
-  it('returns all projects when project is undefined', () => {
+  it('returns only global rows when project is undefined', () => {
     storeObservation(db, makeObservation({ title: 'ProjA', project: 'projA', timestamp_epoch: 1704067300000 }));
     storeObservation(db, makeObservation({ title: 'ProjB', project: 'projB', timestamp_epoch: 1704067300000 }));
+    storeObservation(db, makeObservation({ title: 'Global', project: undefined, timestamp_epoch: 1704067400000 }));
 
     const results = getObservationsSince(db, 0, undefined);
-    expect(results.length).toBe(2);
+    expect(results.length).toBe(1);
+    expect(results[0]!.title).toBe('Global');
   });
 });
 

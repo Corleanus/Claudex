@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { EventEmitter } from 'node:events';
 
 // Mock logger to prevent filesystem writes during tests
 vi.mock('../../src/shared/logger.js', () => ({
@@ -23,8 +24,86 @@ vi.mock('../../src/shared/config.js', () => ({
   })),
 }));
 
-// We'll test the isPythonSidecar function indirectly through SidecarManager behavior
-// by creating scenarios where PID files exist but point to non-Python processes.
+// Mock paths to use temp directory (set in beforeEach)
+let tempPidFile = '/fake/sidecar.pid';
+let tempPortFile = '/fake/sidecar.port';
+vi.mock('../../src/shared/paths.js', () => ({
+  PATHS: {
+    get hologramPid() { return tempPidFile; },
+    get hologramPort() { return tempPortFile; },
+    hookLogs: '/fake/logs',
+    config: '/fake/config.json',
+  },
+}));
+
+// We need vi.mock for child_process since ESM doesn't allow spyOn for module exports.
+// Use a dynamic approach: mock the module, then import after.
+const mockExecSync = vi.fn();
+const mockSpawn = vi.fn();
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    execSync: (...args: unknown[]) => mockExecSync(...args),
+    spawn: (...args: unknown[]) => mockSpawn(...args),
+  };
+});
+
+// Import isPythonSidecar and SidecarManager AFTER mocking child_process
+const { isPythonSidecar, SidecarManager } = await import('../../src/hologram/launcher.js');
+
+describe('isPythonSidecar — identity verification with fallback', () => {
+  afterEach(() => {
+    mockExecSync.mockReset();
+  });
+
+  if (process.platform === 'win32') {
+    it('returns true when wmic succeeds and output contains python+sidecar', () => {
+      mockExecSync.mockReturnValueOnce(
+        'CommandLine\npython -m hologram.sidecar --port-file test\n\n'
+      );
+      expect(isPythonSidecar(12345)).toBe(true);
+      expect(mockExecSync).toHaveBeenCalledTimes(1);
+      expect(mockExecSync.mock.calls[0]![0]).toContain('wmic');
+    });
+
+    it('falls back to PowerShell when wmic fails, succeeds', () => {
+      // wmic throws
+      mockExecSync.mockImplementationOnce(() => { throw new Error('wmic not found'); });
+      // PowerShell succeeds
+      mockExecSync.mockReturnValueOnce(
+        'python -m hologram.sidecar --port-file test'
+      );
+      expect(isPythonSidecar(12345)).toBe(true);
+      expect(mockExecSync).toHaveBeenCalledTimes(2);
+      expect(mockExecSync.mock.calls[1]![0]).toContain('powershell');
+    });
+
+    it('returns false when both wmic and PowerShell fail', () => {
+      mockExecSync.mockImplementationOnce(() => { throw new Error('wmic not found'); });
+      mockExecSync.mockImplementationOnce(() => { throw new Error('powershell failed'); });
+      expect(isPythonSidecar(12345)).toBe(false);
+      expect(mockExecSync).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns false when wmic output does not contain python+sidecar', () => {
+      mockExecSync.mockReturnValueOnce('CommandLine\nnotepad.exe\n\n');
+      expect(isPythonSidecar(12345)).toBe(false);
+    });
+  } else {
+    it('uses /proc or ps on Unix (no PowerShell path taken)', () => {
+      // On Unix, isPythonSidecar reads /proc/PID/cmdline or falls back to ps
+      // For a non-existent PID, it should return false
+      mockExecSync.mockImplementation(() => { throw new Error('no such process'); });
+      expect(isPythonSidecar(999999)).toBe(false);
+    });
+  }
+
+  it('returns false when execSync always fails', () => {
+    mockExecSync.mockImplementation(() => { throw new Error('command failed'); });
+    expect(isPythonSidecar(999999)).toBe(false);
+  });
+});
 
 describe('SidecarManager PID Identity Verification', () => {
   let tempDir: string;
@@ -32,14 +111,13 @@ describe('SidecarManager PID Identity Verification', () => {
   let portFile: string;
 
   beforeEach(() => {
-    // Create temp directory for test PID/port files
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudex-launcher-test-'));
     pidFile = path.join(tempDir, 'sidecar.pid');
     portFile = path.join(tempDir, 'sidecar.port');
   });
 
   afterEach(() => {
-    // Clean up temp directory
+    mockExecSync.mockReset();
     try {
       if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
       if (fs.existsSync(portFile)) fs.unlinkSync(portFile);
@@ -49,161 +127,141 @@ describe('SidecarManager PID Identity Verification', () => {
     }
   });
 
-  it('should not kill a process if PID verification fails', async () => {
-    // This test verifies that when a PID file exists but points to a non-Python process,
-    // the launcher discards the PID file without attempting to kill the process.
-
-    // Write a PID file pointing to a known system process (e.g., PID 1 on Unix, System process on Windows)
-    // that is definitely not our Python sidecar
-    const systemPid = process.platform === 'win32' ? 4 : 1; // System/init process
+  it('should not kill a process if PID verification returns false', () => {
+    const systemPid = process.platform === 'win32' ? 4 : 1;
     fs.writeFileSync(pidFile, String(systemPid), 'utf-8');
-
-    // In a real scenario, the SidecarManager would:
-    // 1. Read the PID file
-    // 2. Check if process is alive (yes, it's the system)
-    // 3. Verify if it's a Python sidecar (no, it's not)
-    // 4. Discard the PID file without killing
-    // 5. Spawn a new sidecar
-
-    // For this unit test, we verify the logic would handle this correctly
-    // by checking that isPythonSidecar(systemPid) returns false
-
-    // Since isPythonSidecar is not exported, we test the observable behavior:
-    // The launcher should detect a stale PID file and not attempt to kill the process
-
-    expect(fs.existsSync(pidFile)).toBe(true);
+    // Mock execSync to simulate system process (not python sidecar)
+    mockExecSync.mockReturnValue('System\n');
+    expect(isPythonSidecar(systemPid)).toBe(false);
   });
 
-  it('should handle PID file pointing to reused PID gracefully', () => {
-    // This test documents the scenario:
-    // 1. Sidecar crashes with PID 12345
-    // 2. OS reuses PID 12345 for a different process (e.g., notepad.exe)
-    // 3. Launcher reads PID file with 12345
-    // 4. Launcher verifies process 12345 is NOT a Python sidecar
-    // 5. Launcher discards PID file without killing process 12345
-
-    // Write arbitrary PID
-    const arbitraryPid = 99999;
-    fs.writeFileSync(pidFile, String(arbitraryPid), 'utf-8');
-
-    // The isPythonSidecar function would check the command line
-    // and determine this is not our sidecar, preventing accidental kill
-
-    expect(fs.existsSync(pidFile)).toBe(true);
-  });
-
-  it('should verify process identity before killing in stop()', () => {
-    // This test verifies that stop() also performs PID verification
-    // before attempting to kill a process
-
-    // Scenario: PID file exists with reused PID
-    const reusedPid = 88888;
-    fs.writeFileSync(pidFile, String(reusedPid), 'utf-8');
-
-    // In stop():
-    // 1. Read PID file
-    // 2. Check if alive
-    // 3. Verify if Python sidecar (new check)
-    // 4. If not verified, discard PID file without kill
-    // 5. If verified, proceed with graceful shutdown
-
-    expect(fs.existsSync(pidFile)).toBe(true);
-  });
-
-  it('should use platform-specific commands for process verification', () => {
-    // Windows: wmic process where ProcessId=PID get CommandLine
-    // Linux/Unix: /proc/PID/cmdline or ps -p PID -o command=
-
-    // The isPythonSidecar function checks:
-    // - Command line contains 'python'
-    // - Command line contains 'sidecar'
-    // Both must be present for verification to pass
-
-    const currentPlatform = process.platform;
-    expect(['win32', 'linux', 'darwin'].includes(currentPlatform)).toBe(true);
-  });
-
-  it('should return false for isPythonSidecar on verification failure', () => {
-    // If execSync fails (timeout, command error, etc.), isPythonSidecar returns false
-    // This ensures we err on the side of caution — if we can't verify, we don't kill
-
-    // Expected behavior:
-    // - execSync throws → catch block returns false
-    // - Process doesn't exist → command fails → returns false
-    // - Process exists but command line doesn't match → returns false
-    // - Only returns true if verification succeeds with matching command line
-
-    expect(true).toBe(true); // Placeholder for behavioral test
+  it('should return false for isPythonSidecar on non-existent process', () => {
+    mockExecSync.mockImplementation(() => { throw new Error('no such process'); });
+    expect(isPythonSidecar(999999)).toBe(false);
   });
 });
 
 describe('SidecarManager Spawn Error Handling', () => {
-  it('should handle spawn errors gracefully (ENOENT, EACCES)', async () => {
-    // This test verifies that spawn() errors (e.g., Python not found, permission denied)
-    // are caught and handled without crashing the hook process.
+  let tempDir: string;
 
-    // Scenario:
-    // 1. spawn() is called with invalid Python path
-    // 2. Node emits 'error' event on ChildProcess (ENOENT)
-    // 3. Error handler logs error, cleans up PID/port files
-    // 4. start() throws HologramUnavailableError with diagnostic message
-    // 5. Hook process continues and exits with status 0
+  /** Create a fake ChildProcess-like EventEmitter returned by mocked spawn() */
+  function createFakeProc(pid: number | undefined = 12345): EventEmitter & { pid?: number; unref: ReturnType<typeof vi.fn>; kill: ReturnType<typeof vi.fn> } {
+    const proc = new EventEmitter() as EventEmitter & { pid?: number; unref: ReturnType<typeof vi.fn>; kill: ReturnType<typeof vi.fn> };
+    proc.pid = pid;
+    proc.unref = vi.fn();
+    proc.kill = vi.fn();
+    return proc;
+  }
 
-    // Expected behavior:
-    // - ChildProcess 'error' event has a registered handler
-    // - Handler cleans up PID and port files
-    // - start() method propagates spawn error as HologramUnavailableError
-    // - Error message includes Python path for debugging
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claudex-spawn-test-'));
+    tempPidFile = path.join(tempDir, 'sidecar.pid');
+    tempPortFile = path.join(tempDir, 'sidecar.port');
 
-    // Without this fix, unhandled 'error' events crash Node with:
-    // "Error: spawn python ENOENT"
-    // "events.js:xxx throw er; // Unhandled 'error' event"
+    // Ensure directories for PID/port files exist
+    fs.mkdirSync(path.dirname(tempPidFile), { recursive: true });
 
-    expect(true).toBe(true); // Behavioral test — actual spawn() mocking is complex
+    // Mock fs.openSync for stderr log (spawn uses it)
+    mockExecSync.mockReset();
+    mockSpawn.mockReset();
   });
 
-  it('should propagate spawn errors with diagnostic context', () => {
-    // When spawn() fails, the error should include:
-    // - Original error message (ENOENT, EACCES, etc.)
-    // - Python path that was attempted
-    // - Suggestion to check configuration
-
-    // Example error message:
-    // "Failed to spawn sidecar: spawn python ENOENT (check Python path: python)"
-
-    // This helps users diagnose:
-    // - Python not installed
-    // - Python not in PATH
-    // - Incorrect python_path in config
-
-    expect(true).toBe(true);
+  afterEach(() => {
+    mockSpawn.mockReset();
+    mockExecSync.mockReset();
+    // Reset paths
+    tempPidFile = '/fake/sidecar.pid';
+    tempPortFile = '/fake/sidecar.port';
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch { /* ignore */ }
   });
 
-  it('should clean up PID/port files on spawn error', () => {
-    // If spawn() fails after PID file is written, cleanup must happen:
-    // 1. PID file written with proc.pid
-    // 2. spawn() emits 'error' (e.g., Python binary not executable)
-    // 3. Error handler removes PID file
-    // 4. Error handler removes port file (if exists)
-    // 5. this.proc set to null
+  it('should handle spawn errors gracefully (ENOENT)', async () => {
+    // Create a fake ChildProcess that emits an error after a tick
+    const fakeProc = createFakeProc(99999);
+    mockSpawn.mockReturnValue(fakeProc);
 
-    // Without cleanup, stale PID files accumulate and confuse next start() attempt
+    const manager = new SidecarManager();
 
-    expect(true).toBe(true);
+    // Emit error asynchronously (simulating ENOENT from invalid Python path)
+    const startPromise = manager.start();
+    // Give the code time to register event handlers, then emit error
+    await new Promise(r => setTimeout(r, 50));
+    const spawnError = new Error('spawn python ENOENT');
+    (spawnError as NodeJS.ErrnoException).code = 'ENOENT';
+    fakeProc.emit('error', spawnError);
+
+    // start() should reject with HologramUnavailableError
+    await expect(startPromise).rejects.toThrow(/ENOENT/);
+    await expect(startPromise).rejects.toThrow(/python/i);
   });
 
-  it('should not crash on unhandled error event', () => {
-    // Node.js behavior: if ChildProcess emits 'error' without a listener,
-    // Node throws and terminates the process.
+  it('should propagate spawn errors with diagnostic context including Python path', async () => {
+    const fakeProc = createFakeProc(88888);
+    mockSpawn.mockReturnValue(fakeProc);
 
-    // With .on('error', handler):
-    // - Error is caught
-    // - Handler executes
-    // - Process continues
+    const manager = new SidecarManager();
+    const startPromise = manager.start();
 
-    // This is critical for hook processes which must ALWAYS exit cleanly
-    // to avoid breaking Claude Code sessions
+    await new Promise(r => setTimeout(r, 50));
+    fakeProc.emit('error', new Error('spawn python ENOENT'));
 
-    expect(true).toBe(true);
+    try {
+      await startPromise;
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      const msg = (err as Error).message;
+      // Error message should include the Python path for debugging
+      expect(msg).toContain('python');
+      // Should mention it's a spawn failure
+      expect(msg.toLowerCase()).toContain('spawn');
+    }
+  });
+
+  it('should clean up PID/port files on spawn error', async () => {
+    const fakeProc = createFakeProc(77777);
+    mockSpawn.mockReturnValue(fakeProc);
+
+    // Pre-create port file to verify cleanup
+    fs.writeFileSync(tempPortFile, '9999', 'utf-8');
+
+    const manager = new SidecarManager();
+    const startPromise = manager.start();
+
+    await new Promise(r => setTimeout(r, 50));
+
+    // At this point, PID file should have been written by start()
+    const pidExists = fs.existsSync(tempPidFile);
+    expect(pidExists).toBe(true);
+
+    // Now emit error
+    fakeProc.emit('error', new Error('spawn python EACCES'));
+
+    try { await startPromise; } catch { /* expected */ }
+
+    // After error, both PID and port files should be cleaned up
+    expect(fs.existsSync(tempPidFile)).toBe(false);
+    expect(fs.existsSync(tempPortFile)).toBe(false);
+  });
+
+  it('should register an error event listener on the spawned process', async () => {
+    const fakeProc = createFakeProc(66666);
+    mockSpawn.mockReturnValue(fakeProc);
+
+    const manager = new SidecarManager();
+    const startPromise = manager.start();
+
+    // Wait for event handlers to be registered
+    await new Promise(r => setTimeout(r, 50));
+
+    // Verify that 'error' has at least one listener registered
+    const errorListeners = fakeProc.listenerCount('error');
+    expect(errorListeners).toBeGreaterThanOrEqual(1);
+
+    // Cleanup: emit exit so the promise resolves
+    fakeProc.emit('exit', 1, null);
+    try { await startPromise; } catch { /* expected */ }
   });
 });

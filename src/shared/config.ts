@@ -38,19 +38,29 @@ export function loadConfig(): ClaudexConfig {
  * Validate and normalize config values.
  * Invalid values fall back to defaults from DEFAULT_CONFIG.
  */
-function validateConfig(config: ClaudexConfig): ClaudexConfig {
+/** @internal Exported for testing only */
+export function validateConfig(config: ClaudexConfig): ClaudexConfig {
   const defaults = DEFAULT_CONFIG;
+
+  // Extract default sub-objects once to avoid repeated non-null assertions.
+  // DEFAULT_CONFIG always defines these properties.
+  const hDef = defaults.hologram!;
+  const dbDef = defaults.database!;
+  const hookDef = defaults.hooks!;
+  const obsDef = defaults.observation!;
+  const wrapDef = defaults.wrapper!;
+  const vecDef = defaults.vector!;
 
   // Validate hologram
   if (config.hologram) {
     if (typeof config.hologram.enabled !== 'boolean') {
-      config.hologram.enabled = defaults.hologram!.enabled;
+      config.hologram.enabled = hDef.enabled;
     }
-    if (typeof config.hologram.timeout_ms !== 'number' || config.hologram.timeout_ms < 0) {
-      config.hologram.timeout_ms = defaults.hologram!.timeout_ms;
+    if (!Number.isFinite(config.hologram.timeout_ms) || config.hologram.timeout_ms < 0) {
+      config.hologram.timeout_ms = hDef.timeout_ms;
     }
-    if (typeof config.hologram.health_interval_ms !== 'number' || config.hologram.health_interval_ms < 0) {
-      config.hologram.health_interval_ms = defaults.hologram!.health_interval_ms;
+    if (!Number.isFinite(config.hologram.health_interval_ms) || config.hologram.health_interval_ms < 0) {
+      config.hologram.health_interval_ms = hDef.health_interval_ms;
     }
     if (config.hologram.python_path !== undefined && typeof config.hologram.python_path !== 'string') {
       delete config.hologram.python_path;
@@ -59,14 +69,14 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
       delete config.hologram.sidecar_path;
     }
     if (config.hologram.project_patterns !== undefined && !Array.isArray(config.hologram.project_patterns)) {
-      config.hologram.project_patterns = defaults.hologram!.project_patterns;
+      config.hologram.project_patterns = hDef.project_patterns;
     }
     if (config.hologram.project_exclude !== undefined && !Array.isArray(config.hologram.project_exclude)) {
-      config.hologram.project_exclude = defaults.hologram!.project_exclude;
+      config.hologram.project_exclude = hDef.project_exclude;
     }
     if (config.hologram.project_max_files !== undefined) {
-      if (typeof config.hologram.project_max_files !== 'number' || config.hologram.project_max_files < 0) {
-        config.hologram.project_max_files = defaults.hologram!.project_max_files;
+      if (!Number.isFinite(config.hologram.project_max_files) || config.hologram.project_max_files < 0) {
+        config.hologram.project_max_files = hDef.project_max_files;
       }
     }
   }
@@ -74,7 +84,7 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
   // Validate database
   if (config.database) {
     if (typeof config.database.wal_mode !== 'boolean') {
-      config.database.wal_mode = defaults.database!.wal_mode;
+      config.database.wal_mode = dbDef.wal_mode;
     }
     if (config.database.path !== undefined && typeof config.database.path !== 'string') {
       delete config.database.path;
@@ -83,12 +93,12 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
 
   // Validate hooks
   if (config.hooks) {
-    if (typeof config.hooks.latency_budget_ms !== 'number' || config.hooks.latency_budget_ms < 0) {
-      config.hooks.latency_budget_ms = defaults.hooks!.latency_budget_ms;
+    if (!Number.isFinite(config.hooks.latency_budget_ms) || config.hooks.latency_budget_ms < 0) {
+      config.hooks.latency_budget_ms = hookDef.latency_budget_ms;
     }
     if (config.hooks.context_token_budget !== undefined) {
-      if (typeof config.hooks.context_token_budget !== 'number' || config.hooks.context_token_budget < 500 || config.hooks.context_token_budget > 50000) {
-        delete config.hooks.context_token_budget;  // fall back to hardcoded default in hook
+      if (!Number.isFinite(config.hooks.context_token_budget) || config.hooks.context_token_budget < 500 || config.hooks.context_token_budget > 50000) {
+        config.hooks.context_token_budget = hookDef.context_token_budget;
       }
     }
   }
@@ -96,14 +106,14 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
   // Validate observation
   if (config.observation) {
     if (typeof config.observation.enabled !== 'boolean') {
-      config.observation.enabled = defaults.observation!.enabled;
+      config.observation.enabled = obsDef.enabled;
     }
     if (typeof config.observation.redact_secrets !== 'boolean') {
-      config.observation.redact_secrets = defaults.observation!.redact_secrets;
+      config.observation.redact_secrets = obsDef.redact_secrets;
     }
     if (config.observation.retention_days !== undefined) {
-      if (typeof config.observation.retention_days !== 'number' || config.observation.retention_days < 0) {
-        config.observation.retention_days = defaults.observation!.retention_days;
+      if (!Number.isFinite(config.observation.retention_days) || config.observation.retention_days < 0) {
+        config.observation.retention_days = obsDef.retention_days;
       }
     }
   }
@@ -111,26 +121,26 @@ function validateConfig(config: ClaudexConfig): ClaudexConfig {
   // Validate wrapper
   if (config.wrapper) {
     if (typeof config.wrapper.enabled !== 'boolean') {
-      config.wrapper.enabled = defaults.wrapper!.enabled;
+      config.wrapper.enabled = wrapDef.enabled;
     }
-    if (typeof config.wrapper.warnThreshold !== 'number' || config.wrapper.warnThreshold < 0 || config.wrapper.warnThreshold > 1) {
-      config.wrapper.warnThreshold = defaults.wrapper!.warnThreshold;
+    if (!Number.isFinite(config.wrapper.warnThreshold) || config.wrapper.warnThreshold < 0 || config.wrapper.warnThreshold > 1) {
+      config.wrapper.warnThreshold = wrapDef.warnThreshold;
     }
-    if (typeof config.wrapper.flushThreshold !== 'number' || config.wrapper.flushThreshold < 0 || config.wrapper.flushThreshold > 1) {
-      config.wrapper.flushThreshold = defaults.wrapper!.flushThreshold;
+    if (!Number.isFinite(config.wrapper.flushThreshold) || config.wrapper.flushThreshold < 0 || config.wrapper.flushThreshold > 1) {
+      config.wrapper.flushThreshold = wrapDef.flushThreshold;
     }
-    if (typeof config.wrapper.cooldownMs !== 'number' || config.wrapper.cooldownMs < 0) {
-      config.wrapper.cooldownMs = defaults.wrapper!.cooldownMs;
+    if (!Number.isFinite(config.wrapper.cooldownMs) || config.wrapper.cooldownMs < 0) {
+      config.wrapper.cooldownMs = wrapDef.cooldownMs;
     }
   }
 
   // Validate vector
   if (config.vector) {
     if (typeof config.vector.enabled !== 'boolean') {
-      config.vector.enabled = defaults.vector!.enabled;
+      config.vector.enabled = vecDef.enabled;
     }
     if (!['fts5', 'openai', 'local'].includes(config.vector.provider)) {
-      config.vector.provider = defaults.vector!.provider;
+      config.vector.provider = vecDef.provider;
     }
     if (config.vector.openai) {
       if (config.vector.openai.apiKey !== undefined && typeof config.vector.openai.apiKey !== 'string') {

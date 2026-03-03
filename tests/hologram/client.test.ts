@@ -33,6 +33,16 @@ vi.mock('../../src/shared/metrics.js', () => ({
   recordMetric: vi.fn(),
 }));
 
+// Mock verifySidecarPing from launcher (R06 port verification)
+const mockVerifySidecarPing = vi.fn<[number], Promise<'ours' | 'foreign' | 'dead'>>().mockResolvedValue('ours');
+vi.mock('../../src/hologram/launcher.js', async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    verifySidecarPing: (...args: [number]) => mockVerifySidecarPing(...args),
+  };
+});
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -80,6 +90,7 @@ function makeMockLauncher() {
     getPort: vi.fn().mockReturnValue(12345),
     isRunning: vi.fn().mockReturnValue(true),
     start: vi.fn().mockResolvedValue(undefined),
+    restart: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -295,6 +306,101 @@ describe('Post-Compact Bridge — Active Files Boost (Tests #27-28)', () => {
 
     const [, request] = protocol.send.mock.calls[0]!;
     expect(request.payload.boost_files).toBeUndefined();
+  });
+});
+
+describe('ensureSidecar port verification (R06)', () => {
+  beforeEach(() => {
+    mockVerifySidecarPing.mockReset().mockResolvedValue('ours');
+  });
+
+  it('returns port directly when verifySidecarPing returns ours', async () => {
+    const launcher = makeMockLauncher();
+    const protocol = makeMockProtocol();
+    const client = new HologramClient(launcher as any, protocol as any, config);
+
+    await client.query('test', 1, 'sess-1');
+
+    expect(mockVerifySidecarPing).toHaveBeenCalledWith(12345);
+    expect(launcher.restart).not.toHaveBeenCalled();
+  });
+
+  it('calls restart when verifySidecarPing returns foreign', async () => {
+    mockVerifySidecarPing.mockResolvedValue('foreign');
+    const launcher = makeMockLauncher();
+    // After restart, getPort returns new port
+    launcher.getPort
+      .mockReturnValueOnce(12345) // first call — returns stale port
+      .mockReturnValueOnce(12346); // after restart — returns new port
+    const protocol = makeMockProtocol();
+    const client = new HologramClient(launcher as any, protocol as any, config);
+
+    await client.query('test', 1, 'sess-1');
+
+    expect(launcher.restart).toHaveBeenCalledTimes(1);
+    // Protocol should use the new port
+    expect(protocol.send).toHaveBeenCalled();
+  });
+
+  it('calls restart when verifySidecarPing returns dead', async () => {
+    mockVerifySidecarPing.mockResolvedValue('dead');
+    const launcher = makeMockLauncher();
+    launcher.getPort
+      .mockReturnValueOnce(12345)
+      .mockReturnValueOnce(12346);
+    const protocol = makeMockProtocol();
+    const client = new HologramClient(launcher as any, protocol as any, config);
+
+    await client.query('test', 1, 'sess-1');
+
+    expect(launcher.restart).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws when restart fails to produce a port', async () => {
+    mockVerifySidecarPing.mockResolvedValue('dead');
+    const launcher = makeMockLauncher();
+    launcher.getPort
+      .mockReturnValueOnce(12345)  // first call — stale port
+      .mockReturnValueOnce(null);  // after restart — no port
+    const protocol = makeMockProtocol();
+    const client = new HologramClient(launcher as any, protocol as any, config);
+
+    await expect(client.query('test', 1, 'sess-1'))
+      .rejects.toThrow('sidecar restart failed');
+  });
+});
+
+describe('HologramClient.isAvailable — port-based discovery (R05)', () => {
+  it('returns true when launcher.getPort() returns a port (even if isRunning is false)', () => {
+    const launcher = makeMockLauncher();
+    launcher.getPort.mockReturnValue(12345);
+    launcher.isRunning.mockReturnValue(false); // PID check fails, but port exists
+    const protocol = makeMockProtocol();
+    const client = new HologramClient(launcher as any, protocol as any, config);
+
+    expect(client.isAvailable()).toBe(true);
+  });
+
+  it('returns false when launcher.getPort() returns null', () => {
+    const launcher = makeMockLauncher();
+    launcher.getPort.mockReturnValue(null);
+    launcher.isRunning.mockReturnValue(true); // PID is alive, but no port file
+    const protocol = makeMockProtocol();
+    const client = new HologramClient(launcher as any, protocol as any, config);
+
+    expect(client.isAvailable()).toBe(false);
+  });
+
+  it('does not call isRunning (R05: port-based, not PID-based)', () => {
+    const launcher = makeMockLauncher();
+    launcher.getPort.mockReturnValue(9999);
+    const protocol = makeMockProtocol();
+    const client = new HologramClient(launcher as any, protocol as any, config);
+
+    client.isAvailable();
+
+    expect(launcher.getPort).toHaveBeenCalled();
+    expect(launcher.isRunning).not.toHaveBeenCalled();
   });
 });
 

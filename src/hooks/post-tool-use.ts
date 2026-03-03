@@ -8,6 +8,8 @@
  * NEVER throws — exits 0 always. Each step has independent error handling.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { extractObservation } from '../lib/observation-extractor.js';
@@ -134,29 +136,44 @@ runHook(HOOK_NAME, async (input) => {
   // DB is the authoritative store with decay, FTS5, and selection pressure.
   // Daily files are now curated-only (written by /endsession Step 5).
 
-  // Step 4.5. Thread accumulation — capture agent action (rolling window: max 20)
+  // Step 4.5. Thread accumulation — capture agent action
+  // Rolling window: trims to last 14 when reaching 20 exchanges (hysteresis pattern)
+  // Optimization: only parse full YAML when file size suggests >= 20 exchanges.
+  // Each exchange is ~60-120 bytes in YAML; 20 exchanges ~1.5KB+ with header.
   if (observation && scope.type === 'project') {
     try {
-      const { appendExchange, readThread } = await import('../checkpoint/state-files.js');
       const projectDir = scope.path;
+      const actionGist = `${toolName}: ${observation.title}`.slice(0, 100);
 
-      const thread = readThread(projectDir, sessionId);
-      if (thread.key_exchanges.length >= 20) {
-        // Rolling window: trim to last 14, then append new exchange
-        const trimmed = thread.key_exchanges.slice(-14);
-        const actionGist = `${toolName}: ${observation.title}`.slice(0, 100);
-        trimmed.push({ role: 'agent', gist: actionGist });
+      // Light file-size check to avoid full YAML parse on most invocations
+      const threadPath = path.join(projectDir, 'context', 'state', sessionId, 'thread.yaml');
+      let needsTrim = false;
+      try {
+        const stat = fs.statSync(threadPath);
+        // ~1.2KB is a conservative lower bound for 20 exchanges
+        needsTrim = stat.size >= 1200;
+      } catch {
+        // File doesn't exist yet — appendExchange will create it
+      }
 
-        // Rewrite thread.yaml with trimmed exchanges
-        const fsSync = await import('node:fs');
-        const pathMod = await import('node:path');
-        const yamlMod = await import('js-yaml');
-        const threadPath = pathMod.join(projectDir, 'context', 'state', sessionId, 'thread.yaml');
-        const newThread = { summary: thread.summary, key_exchanges: trimmed };
-        const content = yamlMod.dump(newThread, { schema: yamlMod.JSON_SCHEMA, lineWidth: -1, noRefs: true, sortKeys: false });
-        fsSync.writeFileSync(threadPath, content, 'utf-8');
+      if (needsTrim) {
+        const { appendExchange, readThread } = await import('../checkpoint/state-files.js');
+        const thread = readThread(projectDir, sessionId);
+        if (thread.key_exchanges.length >= 20) {
+          // Rolling window: trim to last 14, then append new exchange
+          const trimmed = thread.key_exchanges.slice(-14);
+          trimmed.push({ role: 'agent', gist: actionGist });
+
+          // Rewrite thread.yaml with trimmed exchanges
+          const yamlMod = await import('js-yaml');
+          const newThread = { summary: thread.summary, key_exchanges: trimmed };
+          const content = yamlMod.dump(newThread, { schema: yamlMod.JSON_SCHEMA, lineWidth: -1, noRefs: true, sortKeys: false });
+          fs.writeFileSync(threadPath, content, 'utf-8');
+        } else {
+          appendExchange(projectDir, sessionId, { role: 'agent', gist: actionGist });
+        }
       } else {
-        const actionGist = `${toolName}: ${observation.title}`.slice(0, 100);
+        const { appendExchange } = await import('../checkpoint/state-files.js');
         appendExchange(projectDir, sessionId, { role: 'agent', gist: actionGist });
       }
     } catch (err) {

@@ -5,6 +5,9 @@
  * This module ensures external inputs conform to that standard.
  */
 
+/** Milliseconds in one day (86,400,000). */
+export const MS_PER_DAY = 86_400_000;
+
 /**
  * Ensure a timestamp is in milliseconds.
  * If the value appears to be in seconds (< 1e12), convert to milliseconds.

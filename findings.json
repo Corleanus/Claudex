@@ -1,0 +1,68 @@
+{
+  "assessments": {
+    "naming_quality": 85,
+    "error_consistency": 90,
+    "abstraction_fitness": 87,
+    "logic_clarity": 86,
+    "ai_generated_debt": 83,
+    "type_safety": 88,
+    "contract_coherence": 88
+  },
+  "findings": [
+    {
+      "file": "src/db/observations.ts",
+      "dimension": "logic_clarity",
+      "identifier": "getRecentObservations",
+      "summary": "Three near-identical SQL branches differ only in WHERE clause — repeated column lists",
+      "evidence_lines": [126, 134, 144, 154],
+      "evidence": ["The same 12-column SELECT list is repeated 3 times across project=null, project=string, project=undefined branches"],
+      "suggestion": "Build a single SQL string with conditional WHERE clauses and parameterized project",
+      "reasoning": "The same pattern is repeated in getObservationsSince, getRecentConsensus, getRecentReasoning. DRY within each function would reduce the 3-branch pattern to 1.",
+      "confidence": "medium"
+    },
+    {
+      "file": "src/shared/health.ts",
+      "dimension": "logic_clarity",
+      "identifier": "checkDatabase",
+      "summary": "Nested try-catch with try-finally inside outer try-catch adds visual complexity",
+      "evidence_lines": [43, 61, 74, 83],
+      "evidence": ["Outer try-catch wraps inner try-finally for db.close() — two levels of exception handling"],
+      "suggestion": "Could simplify with a using-style pattern or early return after null check",
+      "reasoning": "The nesting is functionally correct but adds cognitive overhead. The ownedDb flag + nested try pattern is a common Node.js anti-pattern.",
+      "confidence": "low"
+    },
+    {
+      "file": "src/hologram/launcher.ts",
+      "dimension": "abstraction_fitness",
+      "identifier": "SidecarLauncher",
+      "summary": "Class combines process management, health checking, and port resolution — 458 LOC",
+      "evidence_lines": [1],
+      "evidence": ["Single class handles spawn, kill, health poll, port file reading, and retry logic"],
+      "suggestion": "Consider extracting health-check polling into a separate utility",
+      "reasoning": "The class works correctly but its size makes it the largest single file in the codebase. The health check loop could be a generic retry utility.",
+      "confidence": "low"
+    },
+    {
+      "file": "src/hooks/_prompt-queries.ts",
+      "dimension": "ai_generated_debt",
+      "identifier": "buildSearchContext",
+      "summary": "Several sequential SQL query builders with similar structure and restating inline comments",
+      "evidence_lines": [1],
+      "evidence": ["Functions like buildObservationQuery, buildReasoningQuery follow identical patterns with step-by-step comments"],
+      "suggestion": "The pattern is clear enough that the step-by-step comments could be trimmed",
+      "reasoning": "The comments describe what each line does rather than why, which is a hallmark of AI-generated code. The SQL building logic is straightforward.",
+      "confidence": "medium"
+    },
+    {
+      "file": "src/checkpoint/state-files.ts",
+      "dimension": "naming_quality",
+      "identifier": "ensureDir",
+      "summary": "Duplicate ensureDir helper appears in both state-files.ts and writer.ts",
+      "evidence_lines": [34],
+      "evidence": ["function ensureDir(dirPath: string) — identical 3-line function in both files"],
+      "suggestion": "Extract to shared utility or use fs.mkdirSync with recursive:true directly",
+      "reasoning": "Minor duplication. The function is trivial enough that inlining may be preferable to creating a shared module.",
+      "confidence": "low"
+    }
+  ]
+}

@@ -21,18 +21,31 @@ import { redactSensitive } from '../lib/redaction.js';
 import { detectVersion, migrateInput, stampOutput, validateInput, CURRENT_SCHEMA_VERSION } from '../shared/hook-schema.js';
 import type { HookStdin, HookStdout } from '../shared/types.js';
 
+/** Maximum stdin payload size (10 MB). Protects against DoS via oversized input. */
+export const MAX_STDIN_BYTES = 10 * 1024 * 1024;
+
 /** Read JSON from stdin (piped by Claude Code). */
 export async function readStdin<T>(): Promise<T> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of process.stdin) {
-    chunks.push(chunk as Buffer);
+    const buf = chunk as Buffer;
+    totalBytes += buf.length;
+    if (totalBytes > MAX_STDIN_BYTES) {
+      throw new Error(`Stdin payload exceeds ${MAX_STDIN_BYTES} bytes (${totalBytes}+ bytes received). Rejecting.`);
+    }
+    chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString('utf-8');
-  return JSON.parse(raw) as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(`Invalid JSON on stdin (${raw.length} bytes): ${raw.slice(0, 200)}`);
+  }
 }
 
 /** Write JSON to stdout (consumed by Claude Code). Optionally exit after flush. */
-export function writeStdout(output: HookStdout, exitAfter?: boolean): void {
+function writeStdout(output: HookStdout, exitAfter?: boolean): void {
   const data = JSON.stringify(output) + '\n';
   if (exitAfter) {
     process.stdout.write(data, () => process.exit(0));
@@ -72,8 +85,8 @@ export async function runHook(
       // Record metric with error flag — in its own try/catch so hook still succeeds
       try {
         recordMetric(`hook.${hookName}`, durationMs, true);
-      } catch {
-        // Metrics must never break the hook.
+      } catch (metricErr) {
+        logToFile(hookName, 'WARN', 'Metric recording failed (non-fatal)', metricErr);
       }
       throw handlerError;
     }
@@ -83,8 +96,8 @@ export async function runHook(
     // Record success metric — isolated so failures don't break the hook
     try {
       recordMetric(`hook.${hookName}`, durationMs);
-    } catch {
-      // Metrics must never break the hook.
+    } catch (metricErr) {
+      logToFile(hookName, 'WARN', 'Metric recording failed (non-fatal)', metricErr);
     }
 
     // Latency budget warning — isolated from hook execution
@@ -94,16 +107,16 @@ export async function runHook(
       if (durationMs > latencyBudgetMs) {
         logToFile(hookName, 'WARN', `Hook ${hookName} exceeded latency budget: ${durationMs}ms > ${latencyBudgetMs}ms`);
       }
-    } catch {
-      // Config/budget check must never break the hook.
+    } catch (budgetErr) {
+      logToFile(hookName, 'WARN', 'Config/budget check failed (non-fatal)', budgetErr);
     }
 
     // Session-end metrics dump
     if (hookName === 'session-end') {
       try {
         logToFile(hookName, 'INFO', 'Metrics dump:', getMetrics());
-      } catch {
-        // Metrics dump must never break the hook.
+      } catch (dumpErr) {
+        logToFile(hookName, 'WARN', 'Metrics dump failed (non-fatal)', dumpErr);
       }
     }
 

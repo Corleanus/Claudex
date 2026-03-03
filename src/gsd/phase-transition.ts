@@ -20,18 +20,19 @@ import { readGsdState } from './state-reader.js';
 import type { GsdPhase } from './types.js';
 import { writeCheckpoint } from '../checkpoint/writer.js';
 import { writeCrossPhaseSummary } from './cross-phase-writer.js';
+import { writeClaudexMetricsToState } from './state-sync.js';
 import type { ScoredFile } from '../shared/types.js';
 
 const log = createLogger('gsd-phase-transition');
 
-export interface PhaseTransitionArgs {
+interface PhaseTransitionArgs {
   db: Database.Database;
   projectDir: string;
   projectName: string;
   phaseNumber: number;
 }
 
-export interface PlanCompleteArgs extends PhaseTransitionArgs {
+interface PlanCompleteArgs extends PhaseTransitionArgs {
   planNumber: number;
   sessionId: string;
 }
@@ -103,18 +104,7 @@ function resolvePhaseStartEpoch(
   phaseNumber: number,
   phases: GsdPhase[],
 ): number {
-  const previous = findPreviousPhase(phases, phaseNumber);
-  if (previous) {
-    const prevArchive = findArchiveFile(projectDir, previous.number);
-    if (prevArchive) {
-      try {
-        return Math.floor(fs.statSync(prevArchive).mtimeMs);
-      } catch {
-        // fall through to DB fallback
-      }
-    }
-  }
-
+  // Primary: Use the earliest observation timestamp for this project as lower bound
   const row = db.prepare(`
     SELECT MIN(timestamp_epoch) AS min_epoch
     FROM observations
@@ -123,6 +113,19 @@ function resolvePhaseStartEpoch(
 
   if (typeof row?.min_epoch === 'number') {
     return row.min_epoch;
+  }
+
+  // Fallback: archive file mtime (last resort when DB has no observations)
+  const previous = findPreviousPhase(phases, phaseNumber);
+  if (previous) {
+    const prevArchive = findArchiveFile(projectDir, previous.number);
+    if (prevArchive) {
+      try {
+        return Math.floor(fs.statSync(prevArchive).mtimeMs);
+      } catch {
+        // fall through
+      }
+    }
   }
 
   return Date.now();
@@ -163,6 +166,9 @@ export function handlePhaseStart(args: PhaseTransitionArgs): PhaseTransitionResu
         }
       }
     }
+
+    // Write metrics to STATE.md (no debounce for lifecycle events)
+    writeClaudexMetricsToState(args.projectDir, args.projectName, args.db);
 
     return {
       success: true,
@@ -208,6 +214,8 @@ export function handlePhaseEnd(args: PhaseTransitionArgs): PhaseTransitionResult
         AND timestamp_epoch <= ?
         AND deleted_at_epoch IS NULL
     `).run(nowEpoch, args.projectName, startEpoch, nowEpoch);
+
+    writeClaudexMetricsToState(args.projectDir, args.projectName, args.db);
 
     return {
       success: true,
@@ -272,6 +280,7 @@ export function handlePlanComplete(args: PlanCompleteArgs): PhaseTransitionResul
           project: args.projectName,
           raw_pressure: file.raw_pressure,
           temperature: file.temperature,
+          last_accessed_epoch: Date.now(),
           decay_rate: DEFAULT_DECAY_RATE,
         });
         boostedCount++;
@@ -286,8 +295,9 @@ export function handlePlanComplete(args: PlanCompleteArgs): PhaseTransitionResul
     }
     writePhaseSummary(args.projectDir, args.projectName, args.db, readGsdState(args.projectDir));
 
-    const claudexDir = path.join(args.projectDir, 'Claudex');
-    const crossPhase = writeCrossPhaseSummary(args.projectDir, claudexDir);
+    const crossPhase = writeCrossPhaseSummary(args.projectDir, args.projectDir);
+
+    writeClaudexMetricsToState(args.projectDir, args.projectName, args.db);
 
     return {
       success: true,

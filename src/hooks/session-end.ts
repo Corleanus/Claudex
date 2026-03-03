@@ -3,12 +3,17 @@
  *
  * Final cleanup when a session ends. The most complex hook.
  *
- * Five independent sections, each with its own try/catch:
+ * Six independent phases, each with its own error handling:
  * 1. Final transcript snapshot (same pattern as PreCompact, "sessionend" label)
  * 2. Completion marker check (.completed-<session_id>)
- * 3. Fail-safe handoff (only if no marker AND project scope)
- * 4. Session index update (status, ended_at, ended_by)
- * 5. SQLite session update (soft dependency)
+ * 3. Fail-safe handoff (project scope only, no marker)
+ * 4. Session index update (file lock + atomic write)
+ * 5-9. DB-dependent phase (single shared connection):
+ *   5. SQLite session status update (runSqliteUpdate)
+ *   6. Retention policy enforcement (runRetentionPolicy)
+ *   7. State capture — pressure scores + session summary (runPressureCapture, runSessionSummary)
+ *   8. Decay pass — stratified half-life (runDecayPass)
+ *   9. Observation pruning — lowest-EI soft-delete (runObservationPruning)
  *
  * MUST exit 0 always. One section failing does not prevent others.
  */
@@ -20,7 +25,218 @@ import { runHook, logToFile } from './_infrastructure.js';
 import { PATHS, transcriptDir, completionMarkerPath, sessionDir } from '../shared/paths.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { SCHEMAS } from '../shared/types.js';
-import type { SessionEndInput, HookStdin } from '../shared/types.js';
+import { loadConfig } from '../shared/config.js';
+import { getDatabase } from '../db/connection.js';
+import { updateSessionStatus } from '../db/sessions.js';
+import { enforceRetention } from '../lib/retention.js';
+import { logAudit, cleanOldAuditLogs } from '../db/audit.js';
+import { batchUpsertPressureScores, decayAllScores } from '../db/pressure.js';
+import { HologramClient } from '../hologram/client.js';
+import { SidecarManager } from '../hologram/launcher.js';
+import { ProtocolHandler } from '../hologram/protocol.js';
+import { pruneObservations } from '../lib/decay-engine.js';
+import type { SessionEndInput, HookStdin, Scope, ClaudexConfig } from '../shared/types.js';
+
+// =============================================================================
+// O06: Extracted helper functions for DB-dependent sections 5-9
+// =============================================================================
+
+const HOOK = 'session-end';
+
+/** Section 5: Update SQLite session status to completed */
+function runSqliteUpdate(
+  db: import('better-sqlite3').Database,
+  sessionId: string,
+  isoTimestamp: string,
+): boolean {
+  try {
+    updateSessionStatus(db, sessionId, 'completed', isoTimestamp);
+    logToFile(HOOK, 'INFO', 'SQLite session status updated to completed');
+    return true;
+  } catch (err) {
+    logToFile(HOOK, 'WARN', 'Section 5 (SQLite update) failed (soft dependency):', err);
+    return false;
+  }
+}
+
+/** Section 6: Enforce retention policy and audit the action */
+function runRetentionPolicy(
+  db: import('better-sqlite3').Database,
+  sessionId: string,
+  config: ClaudexConfig,
+): boolean {
+  try {
+    if (config.observation?.retention_days == null) return false;
+
+    const retentionResult = enforceRetention(db, config);
+
+    if (retentionResult.observationsDeleted > 0 || retentionResult.reasoningDeleted > 0) {
+      logToFile(HOOK, 'INFO',
+        `Retention cleanup: ${retentionResult.observationsDeleted} observations, ${retentionResult.reasoningDeleted} reasoning chains, ${retentionResult.consensusDeleted} consensus deleted (${retentionResult.durationMs}ms)`);
+    }
+
+    // Audit the retention action + self-clean old audit entries
+    try {
+      logAudit(db, {
+        timestamp: new Date().toISOString(),
+        timestamp_epoch: Date.now(),
+        session_id: sessionId,
+        event_type: 'retention_cleanup',
+        actor: 'hook:session-end',
+        details: {
+          observations: retentionResult.observationsDeleted,
+          reasoning: retentionResult.reasoningDeleted,
+          consensus: retentionResult.consensusDeleted,
+        },
+      });
+      cleanOldAuditLogs(db, 30);
+    } catch (auditErr) {
+      logToFile(HOOK, 'WARN', 'Retention audit logging failed (non-fatal):', auditErr);
+    }
+
+    return true;
+  } catch (err) {
+    logToFile(HOOK, 'WARN', 'Section 6 (retention policy) failed (non-fatal):', err);
+    return false;
+  }
+}
+
+/** Section 7a: Capture pressure scores from hologram sidecar */
+async function runPressureCapture(
+  db: import('better-sqlite3').Database,
+  sessionId: string,
+  scope: Scope,
+  config: ClaudexConfig,
+): Promise<boolean> {
+  try {
+    if (!config.hologram?.enabled) return false;
+
+    try {
+      const launcher = new SidecarManager();
+      const protocol = new ProtocolHandler();
+      const client = new HologramClient(launcher, protocol, config);
+
+      if (!client.isAvailable()) {
+        logToFile(HOOK, 'DEBUG', 'Hologram not available — skipping pressure capture');
+        return false;
+      }
+
+      const response = await client.query('session-end', 0, sessionId);
+      const allFiles = [...response.hot, ...response.warm, ...response.cold];
+      const nowEpoch = Date.now();
+
+      const scores = allFiles.map(file => ({
+        file_path: file.path,
+        project: scope.type === 'project' ? scope.name : undefined,
+        raw_pressure: file.raw_pressure,
+        temperature: file.temperature,
+        last_accessed_epoch: nowEpoch,
+        decay_rate: 0.05,
+      }));
+
+      batchUpsertPressureScores(db, scores);
+      logToFile(HOOK, 'INFO', `Pressure scores captured from hologram: ${scores.length} files`);
+      return true;
+    } catch (hologramErr) {
+      logToFile(HOOK, 'DEBUG', 'Hologram query for pressure capture failed (non-fatal)', hologramErr);
+      return false;
+    }
+  } catch (err) {
+    logToFile(HOOK, 'WARN', 'Section 7a (pressure capture) failed (non-fatal):', err);
+    return false;
+  }
+}
+
+/** Section 7b: Write session summary to flat-file */
+function runSessionSummary(
+  sessionId: string,
+  scope: Scope,
+  cwd: string,
+  reason: string,
+  isoTimestamp: string,
+  flags: {
+    transcriptSaved: boolean;
+    completionMarkerFound: boolean;
+    failsafeWritten: boolean;
+    sqliteUpdated: boolean;
+    pressureCaptured: boolean;
+  },
+): boolean {
+  try {
+    const scopeStr = scope.type === 'project' ? `project:${scope.name}` : 'global';
+
+    const summaryLines = [
+      '---',
+      `session_id: ${sessionId}`,
+      `scope: ${scopeStr}`,
+      `reason: ${reason}`,
+      `started_at: unknown`,
+      `ended_at: ${isoTimestamp}`,
+      `transcript_saved: ${flags.transcriptSaved}`,
+      `completion_marker: ${flags.completionMarkerFound}`,
+      `failsafe_written: ${flags.failsafeWritten}`,
+      `sqlite_updated: ${flags.sqliteUpdated}`,
+      `pressure_captured: ${flags.pressureCaptured}`,
+      '---',
+      '',
+      '# Session Summary',
+      '',
+      `Session \`${sessionId}\` ended at ${isoTimestamp}.`,
+      `- **Scope**: ${scopeStr}`,
+      `- **Reason**: ${reason}`,
+      `- **CWD**: ${cwd}`,
+      '',
+    ];
+
+    const sessionDirectory = sessionDir(sessionId);
+    fs.mkdirSync(sessionDirectory, { recursive: true });
+
+    const summaryPath = path.join(sessionDirectory, 'summary.md');
+    fs.writeFileSync(summaryPath, summaryLines.join('\n'), 'utf-8');
+
+    logToFile(HOOK, 'INFO', `Session summary written: ${summaryPath}`);
+    return true;
+  } catch (err) {
+    logToFile(HOOK, 'WARN', 'Section 7b (session summary) failed (non-fatal):', err);
+    return false;
+  }
+}
+
+/** Section 8: Decay pass -- stratified half-life decay on pressure scores */
+function runDecayPass(
+  db: import('better-sqlite3').Database,
+  scope: Scope,
+): { ran: boolean; count: number } {
+  try {
+    const project = scope.type === 'project' ? scope.name : undefined;
+    const count = decayAllScores(db, project);
+    if (count > 0) {
+      logToFile(HOOK, 'INFO', `Decay pass: ${count} pressure scores updated`);
+    }
+    return { ran: true, count };
+  } catch (err) {
+    logToFile(HOOK, 'WARN', 'Section 8 (decay pass) failed (non-fatal):', err);
+    return { ran: false, count: 0 };
+  }
+}
+
+/** Section 9: Observation pruning -- remove lowest-EI observations when >1000 */
+function runObservationPruning(
+  db: import('better-sqlite3').Database,
+  scope: Scope,
+): { ran: boolean; count: number } {
+  try {
+    const project = scope.type === 'project' ? scope.name : undefined;
+    const result = pruneObservations(db, project);
+    if (result.pruned > 0) {
+      logToFile(HOOK, 'INFO', `Pruning: ${result.pruned} observations soft-deleted, ${result.remaining} remaining`);
+    }
+    return { ran: true, count: result.pruned };
+  } catch (err) {
+    logToFile(HOOK, 'WARN', 'Section 9 (observation pruning) failed (non-fatal):', err);
+    return { ran: false, count: 0 };
+  }
+}
 
 runHook('session-end', async (input: HookStdin) => {
   const { session_id, transcript_path, cwd } = input;
@@ -37,6 +253,9 @@ runHook('session-end', async (input: HookStdin) => {
 
   // Detect scope
   const scope = detectScope(cwd);
+
+  // Load config once for the entire hook invocation
+  const config = loadConfig();
 
   // Tracking variables — each section updates independently
   let transcriptSaved = false;
@@ -183,9 +402,10 @@ Session ended without /endsession. This is a fail-safe handoff.
         releaseLock = () => { try { fs.unlinkSync(lockPath); } catch { /* already removed */ } };
       } catch {
         // Check for stale lock (>5s)
+        const STALE_LOCK_MS = 5000;
         try {
           const stat = fs.statSync(lockPath);
-          if (Date.now() - stat.mtimeMs > 5000) {
+          if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
             try { fs.unlinkSync(lockPath); } catch { /* race */ }
             try {
               const fd = fs.openSync(lockPath, 'wx');
@@ -246,257 +466,68 @@ Session ended without /endsession. This is a fail-safe handoff.
   }
 
   // =========================================================================
-  // Section 5: SQLite session update (soft dependency)
+  // R25 fix: Open a single DB connection for all DB-dependent sections (5-9)
   // =========================================================================
+  let db: import('better-sqlite3').Database | null = null;
   try {
-    const { getDatabase } = await import('../db/connection.js');
-    const { updateSessionStatus } = await import('../db/sessions.js');
-
-    const db = getDatabase();
+    db = getDatabase();
     if (!db) {
-      logToFile('session-end', 'WARN', 'Database connection failed, skipping session status update');
-    } else {
-      try {
-        updateSessionStatus(db, session_id, 'completed', isoTimestamp);
-        sqliteUpdated = true;
-        logToFile('session-end', 'INFO', 'SQLite session status updated to completed');
-      } finally {
-        db.close();
-      }
+      logToFile('session-end', 'WARN', 'Database connection failed — DB-dependent sections will be skipped');
     }
-  } catch (err) {
-    logToFile('session-end', 'WARN', 'Section 5 (SQLite update) failed (soft dependency):', err);
+  } catch (dbErr) {
+    logToFile('session-end', 'WARN', 'Database connection failed — DB-dependent sections will be skipped:', dbErr);
   }
 
-  // =========================================================================
-  // Section 6: Retention policy enforcement
-  // =========================================================================
-  let retentionRan = false;
   try {
-    const { loadConfig } = await import('../shared/config.js');
-    const config = loadConfig();
-
-    // retention_days=0 means "purge everything immediately" (valid)
-    // retention_days=undefined/null means "use default 90 days" — skip here, only run when explicitly configured
-    if (config.observation?.retention_days != null) {
-      const { enforceRetention } = await import('../lib/retention.js');
-      const { getDatabase } = await import('../db/connection.js');
-
-      const retentionDb = getDatabase();
-      if (!retentionDb) {
-        logToFile('session-end', 'WARN', 'Database connection failed, skipping retention cleanup');
-      } else {
-        try {
-          const retentionResult = enforceRetention(retentionDb, config);
-          retentionRan = true;
-          if (retentionResult.observationsDeleted > 0 || retentionResult.reasoningDeleted > 0) {
-            logToFile('session-end', 'INFO',
-              `Retention cleanup: ${retentionResult.observationsDeleted} observations, ${retentionResult.reasoningDeleted} reasoning chains, ${retentionResult.consensusDeleted} consensus deleted (${retentionResult.durationMs}ms)`);
-          }
-          // Audit the retention action + self-clean old audit entries
-          try {
-            const { logAudit, cleanOldAuditLogs } = await import('../db/audit.js');
-            logAudit(retentionDb, {
-              timestamp: new Date().toISOString(),
-              timestamp_epoch: Date.now(),
-              session_id,
-              event_type: 'retention_cleanup',
-              actor: 'hook:session-end',
-              details: {
-                observations: retentionResult.observationsDeleted,
-                reasoning: retentionResult.reasoningDeleted,
-                consensus: retentionResult.consensusDeleted,
-              },
-            });
-            cleanOldAuditLogs(retentionDb, 30);
-          } catch (auditErr) {
-            logToFile('session-end', 'WARN', 'Retention audit logging failed (non-fatal):', auditErr);
-          }
-        } finally {
-          retentionDb.close();
-        }
-      }
+    // Section 5: SQLite session update
+    if (db) {
+      sqliteUpdated = runSqliteUpdate(db, session_id, isoTimestamp);
     }
-  } catch (err) {
-    logToFile('session-end', 'WARN', 'Section 6 (retention policy) failed (non-fatal):', err);
-  }
 
-  // =========================================================================
-  // Section 7: State capture — persist pressure scores and session summary
-  // =========================================================================
-  let pressureCaptured = false;
-  let summaryCaptured = false;
+    // Section 6: Retention policy enforcement
+    const retentionRan = db ? runRetentionPolicy(db, session_id, config) : false;
 
-  // 6a: Persist pressure scores from hologram (if available) to DB
-  try {
-    const { getDatabase } = await import('../db/connection.js');
-    const { upsertPressureScore } = await import('../db/pressure.js');
-    const { loadConfig } = await import('../shared/config.js');
+    // Section 7a: Pressure capture from hologram
+    const pressureCaptured = db ? await runPressureCapture(db, session_id, scope, config) : false;
 
-    const config = loadConfig();
-    const db = getDatabase();
-    if (!db) {
-      logToFile('session-end', 'WARN', 'Database connection failed, skipping pressure score capture');
-    } else {
-      try {
-        if (config.hologram?.enabled) {
-        try {
-          const { HologramClient } = await import('../hologram/client.js');
-          const { SidecarManager } = await import('../hologram/launcher.js');
-          const { ProtocolHandler } = await import('../hologram/protocol.js');
+    // Section 7b: Write session summary
+    const summaryCaptured = runSessionSummary(session_id, scope, cwd, reason, isoTimestamp, {
+      transcriptSaved,
+      completionMarkerFound,
+      failsafeWritten,
+      sqliteUpdated,
+      pressureCaptured,
+    });
 
-          const launcher = new SidecarManager();
-          const protocol = new ProtocolHandler();
-          const client = new HologramClient(launcher, protocol, config);
+    // Section 8: Decay pass
+    const decay = db ? runDecayPass(db, scope) : { ran: false, count: 0 };
 
-          if (client.isAvailable()) {
-              const response = await client.query('session-end', 0, session_id);
-              const allFiles = [...response.hot, ...response.warm, ...response.cold];
+    // Section 9: Observation pruning
+    const prune = db ? runObservationPruning(db, scope) : { ran: false, count: 0 };
 
-              for (const file of allFiles) {
-                upsertPressureScore(db, {
-                  file_path: file.path,
-                  project: scope.type === 'project' ? scope.name : undefined,
-                  raw_pressure: file.raw_pressure,
-                  temperature: file.temperature,
-                  last_accessed_epoch: Date.now(),
-                  decay_rate: 0.05,
-                });
-              }
-
-              pressureCaptured = true;
-              logToFile('session-end', 'INFO',
-                `Pressure scores captured from hologram: ${allFiles.length} files`);
-            } else {
-              logToFile('session-end', 'DEBUG', 'Hologram not available — skipping pressure capture');
-            }
-          } catch (hologramErr) {
-            logToFile('session-end', 'DEBUG', 'Hologram query for pressure capture failed (non-fatal)', hologramErr);
-          }
-        }
-      } finally {
-        db.close();
-      }
+    // Summary log
+    logToFile(HOOK, 'INFO', [
+      `Session ${session_id} end summary:`,
+      `  reason=${reason}`,
+      `  scope=${scope.type === 'project' ? `project:${scope.name}` : 'global'}`,
+      `  transcriptSaved=${transcriptSaved}`,
+      `  completionMarkerFound=${completionMarkerFound}`,
+      `  failsafeWritten=${failsafeWritten}`,
+      `  failsafeLocation=${failsafeLocation || '(none)'}`,
+      `  sessionIndexUpdated=${sessionIndexUpdated}`,
+      `  sqliteUpdated=${sqliteUpdated}`,
+      `  retentionRan=${retentionRan}`,
+      `  pressureCaptured=${pressureCaptured}`,
+      `  summaryCaptured=${summaryCaptured}`,
+      `  decayRan=${decay.ran} decayCount=${decay.count}`,
+      `  pruneRan=${prune.ran} prunedCount=${prune.count}`,
+    ].join('\n'));
+  } finally {
+    // R25: close the single shared DB connection
+    if (db) {
+      try { db.close(); } catch { /* already closed */ }
     }
-  } catch (err) {
-    logToFile('session-end', 'WARN', 'Section 6a (pressure capture) failed (non-fatal):', err);
   }
-
-  // 6b: Write session summary to flat-file mirror
-  try {
-    const scopeStr = scope.type === 'project' ? `project:${scope.name}` : 'global';
-
-    const summaryLines = [
-      '---',
-      `session_id: ${session_id}`,
-      `scope: ${scopeStr}`,
-      `reason: ${reason}`,
-      `started_at: unknown`,
-      `ended_at: ${isoTimestamp}`,
-      `transcript_saved: ${transcriptSaved}`,
-      `completion_marker: ${completionMarkerFound}`,
-      `failsafe_written: ${failsafeWritten}`,
-      `sqlite_updated: ${sqliteUpdated}`,
-      `pressure_captured: ${pressureCaptured}`,
-      '---',
-      '',
-      '# Session Summary',
-      '',
-      `Session \`${session_id}\` ended at ${isoTimestamp}.`,
-      `- **Scope**: ${scopeStr}`,
-      `- **Reason**: ${reason}`,
-      `- **CWD**: ${cwd}`,
-      '',
-    ];
-
-    const sessionDirectory = sessionDir(session_id);
-    fs.mkdirSync(sessionDirectory, { recursive: true });
-
-    const summaryPath = path.join(sessionDirectory, 'summary.md');
-    fs.writeFileSync(summaryPath, summaryLines.join('\n'), 'utf-8');
-
-    summaryCaptured = true;
-    logToFile('session-end', 'INFO', `Session summary written: ${summaryPath}`);
-  } catch (err) {
-    logToFile('session-end', 'WARN', 'Section 6b (session summary) failed (non-fatal):', err);
-  }
-
-  // =========================================================================
-  // Section 8: Decay pass — stratified half-life decay on pressure scores
-  // =========================================================================
-  let decayRan = false;
-  let decayCount = 0;
-  try {
-    const { getDatabase } = await import('../db/connection.js');
-    const { decayAllScores } = await import('../db/pressure.js');
-
-    const decayDb = getDatabase();
-    if (!decayDb) {
-      logToFile('session-end', 'WARN', 'Database connection failed, skipping decay pass');
-    } else {
-      try {
-        const project = scope.type === 'project' ? scope.name : undefined;
-        decayCount = decayAllScores(decayDb, project);
-        decayRan = true;
-        if (decayCount > 0) {
-          logToFile('session-end', 'INFO', `Decay pass: ${decayCount} pressure scores updated`);
-        }
-      } finally {
-        decayDb.close();
-      }
-    }
-  } catch (err) {
-    logToFile('session-end', 'WARN', 'Section 8 (decay pass) failed (non-fatal):', err);
-  }
-
-  // =========================================================================
-  // Section 9: Observation pruning — remove lowest-EI observations when >1000
-  // =========================================================================
-  let pruneRan = false;
-  let prunedCount = 0;
-  try {
-    const { getDatabase } = await import('../db/connection.js');
-    const { pruneObservations } = await import('../lib/decay-engine.js');
-
-    const pruneDb = getDatabase();
-    if (!pruneDb) {
-      logToFile('session-end', 'WARN', 'Database connection failed, skipping observation pruning');
-    } else {
-      try {
-        const project = scope.type === 'project' ? scope.name : undefined;
-        const result = pruneObservations(pruneDb, project);
-        pruneRan = true;
-        prunedCount = result.pruned;
-        if (prunedCount > 0) {
-          logToFile('session-end', 'INFO', `Pruning: ${prunedCount} observations soft-deleted, ${result.remaining} remaining`);
-        }
-      } finally {
-        pruneDb.close();
-      }
-    }
-  } catch (err) {
-    logToFile('session-end', 'WARN', 'Section 9 (observation pruning) failed (non-fatal):', err);
-  }
-
-  // =========================================================================
-  // Summary log
-  // =========================================================================
-  logToFile('session-end', 'INFO', [
-    `Session ${session_id} end summary:`,
-    `  reason=${reason}`,
-    `  scope=${scope.type === 'project' ? `project:${scope.name}` : 'global'}`,
-    `  transcriptSaved=${transcriptSaved}`,
-    `  completionMarkerFound=${completionMarkerFound}`,
-    `  failsafeWritten=${failsafeWritten}`,
-    `  failsafeLocation=${failsafeLocation || '(none)'}`,
-    `  sessionIndexUpdated=${sessionIndexUpdated}`,
-    `  sqliteUpdated=${sqliteUpdated}`,
-    `  retentionRan=${retentionRan}`,
-    `  pressureCaptured=${pressureCaptured}`,
-    `  summaryCaptured=${summaryCaptured}`,
-    `  decayRan=${decayRan} decayCount=${decayCount}`,
-    `  pruneRan=${pruneRan} prunedCount=${prunedCount}`,
-  ].join('\n'));
 
   return {};
 });

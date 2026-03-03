@@ -13,77 +13,51 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as yaml from 'js-yaml';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
 import { ensureEpochMs } from '../shared/epoch.js';
+import { safeLoadYaml, safeWriteYaml } from '../shared/yaml-utils.js';
+import { sanitizeSessionId, isContainedPath } from '../shared/paths.js';
 import type { Decision, FileState, ThreadState } from './types.js';
 
 const log = createLogger('state-files');
 
 // =============================================================================
+// Input Validation (C03)
+// =============================================================================
+
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function validateSessionId(sessionId: string): boolean {
+  return SESSION_ID_PATTERN.test(sessionId);
+}
+
+// =============================================================================
 // Internal Helpers
 // =============================================================================
 
-/** Get the state directory for a session */
+/** Get the state directory for a session, with sanitization and containment */
 function stateDir(projectDir: string, sessionId: string): string {
-  return path.join(projectDir, 'context', 'state', sessionId);
+  const safe = sanitizeSessionId(sessionId);
+  if (!safe) {
+    return path.join(projectDir, 'context', 'state', '_invalid');
+  }
+  const resolved = path.resolve(projectDir, 'context', 'state', safe);
+  const expectedRoot = path.resolve(projectDir, 'context', 'state');
+  if (!isContainedPath(resolved, expectedRoot)) {
+    log.warn(`Path containment violation: ${resolved} is not under ${expectedRoot}`);
+    return path.join(expectedRoot, '_invalid');
+  }
+  return resolved;
 }
 
 /** Ensure a directory exists (create if missing) */
-function ensureDir(dirPath: string): void {
+export function ensureDir(dirPath: string): void {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
   }
 }
 
-/**
- * Strip UTF-8 BOM and normalize CRLF before YAML parsing.
- * Handles all Windows line ending variants.
- */
-function normalizeYaml(raw: string): string {
-  // Strip BOM (U+FEFF) — appears at start of UTF-8 files on Windows
-  let content = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
-  // Normalize CRLF → LF
-  content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  return content;
-}
-
-/**
- * Safely parse a YAML file. Returns null on any error (corrupt, missing, empty).
- * Uses JSON_SCHEMA to prevent type coercion (e.g., 'yes' → true).
- */
-function safeLoadYaml(filePath: string): unknown {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    if (!raw.trim()) return null;
-    const normalized = normalizeYaml(raw);
-    return yaml.load(normalized, { schema: yaml.JSON_SCHEMA });
-  } catch (e) {
-    log.warn(`Failed to parse YAML: ${filePath}`, e);
-    return null;
-  }
-}
-
-/**
- * Safely write a YAML file. Creates parent directories if needed.
- * Uses JSON_SCHEMA for consistent serialization.
- */
-function safeWriteYaml(filePath: string, data: unknown): void {
-  try {
-    ensureDir(path.dirname(filePath));
-    const content = yaml.dump(data, {
-      schema: yaml.JSON_SCHEMA,
-      lineWidth: -1,        // No line wrapping
-      noRefs: true,         // No YAML anchors/aliases
-      sortKeys: false,      // Preserve insertion order
-    });
-    fs.writeFileSync(filePath, content, 'utf-8');
-  } catch (e) {
-    log.error(`Failed to write YAML: ${filePath}`, e);
-  }
-}
 
 // =============================================================================
 // Decisions
@@ -99,7 +73,11 @@ export function readDecisions(projectDir: string, sessionId: string): Decision[]
     const filePath = path.join(stateDir(projectDir, sessionId), 'decisions.yaml');
     const data = safeLoadYaml(filePath);
     if (!Array.isArray(data)) return [];
-    return data as Decision[];
+    return (data as unknown[]).filter(
+      (el): el is Decision => !!el && typeof el === 'object' &&
+        typeof (el as any).what === 'string' &&
+        typeof (el as any).why === 'string'
+    );
   } catch (e) {
     log.error('readDecisions failed', e);
     return [];
@@ -140,7 +118,7 @@ export function readQuestions(projectDir: string, sessionId: string): string[] {
     const filePath = path.join(stateDir(projectDir, sessionId), 'questions.yaml');
     const data = safeLoadYaml(filePath);
     if (!Array.isArray(data)) return [];
-    return data as string[];
+    return (data as unknown[]).filter((el): el is string => typeof el === 'string');
   } catch (e) {
     log.error('readQuestions failed', e);
     return [];
@@ -188,9 +166,20 @@ export function readFilesTouched(projectDir: string, sessionId: string): FileSta
     if (!data || typeof data !== 'object') return emptyFileState();
     const obj = data as Record<string, unknown>;
     return {
-      changed: Array.isArray(obj.changed) ? obj.changed as FileState['changed'] : [],
-      read: Array.isArray(obj.read) ? obj.read as string[] : [],
-      hot: Array.isArray(obj.hot) ? obj.hot as string[] : [],
+      changed: Array.isArray(obj.changed)
+        ? (obj.changed as unknown[]).filter(
+            (el): el is FileState['changed'][number] =>
+              !!el && typeof el === 'object' &&
+              typeof (el as any).path === 'string' &&
+              typeof (el as any).action === 'string'
+          )
+        : [],
+      read: Array.isArray(obj.read)
+        ? (obj.read as unknown[]).filter((el): el is string => typeof el === 'string')
+        : [],
+      hot: Array.isArray(obj.hot)
+        ? (obj.hot as unknown[]).filter((el): el is string => typeof el === 'string')
+        : [],
     };
   } catch (e) {
     log.error('readFilesTouched failed', e);
@@ -255,7 +244,12 @@ export function readThread(projectDir: string, sessionId: string): ThreadState {
     return {
       summary: typeof obj.summary === 'string' ? obj.summary : '',
       key_exchanges: Array.isArray(obj.key_exchanges)
-        ? obj.key_exchanges as ThreadState['key_exchanges']
+        ? (obj.key_exchanges as unknown[]).filter(
+            (el): el is ThreadState['key_exchanges'][number] =>
+              !!el && typeof el === 'object' &&
+              typeof (el as any).role === 'string' &&
+              typeof (el as any).gist === 'string'
+          )
         : [],
     };
   } catch (e) {

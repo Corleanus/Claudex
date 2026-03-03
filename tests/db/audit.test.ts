@@ -401,4 +401,104 @@ describe('audit', () => {
       expect(() => runner.run()).not.toThrow();
     });
   });
+
+  // ===========================================================================
+  // R14: Redaction runs BEFORE length enforcement
+  // ===========================================================================
+
+  describe('R14: redaction before length check', () => {
+    it('redacted content does not exceed MAX_DETAILS_LENGTH', () => {
+      // Create data with many short API key patterns that will expand when redacted
+      const details: Record<string, unknown> = {};
+      for (let i = 0; i < 20; i++) {
+        details[`key_${i}`] = `api_key=sk_${'a'.repeat(40)}`;
+      }
+
+      logAudit(db, makeEntry({ details }));
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+
+      // After redaction + length enforcement, result must be within limit
+      expect(raw.details.length).toBeLessThanOrEqual(2000);
+      // Should still be valid JSON
+      expect(() => JSON.parse(raw.details)).not.toThrow();
+    });
+
+    it('short entry with API key is redacted and preserved', () => {
+      logAudit(db, makeEntry({
+        details: { token: 'ghp_test_fake_secret_0123456789abcdef0123456789ab' },
+      }));
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+      expect(raw.details).toContain('[REDACTED]');
+      expect(raw.details).not.toContain('ghp_test_fake_secret');
+      expect(raw.details.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('details without secrets are unchanged by redaction', () => {
+      logAudit(db, makeEntry({
+        details: { count: 42, label: 'normal data' },
+      }));
+      const raw = db.prepare('SELECT details FROM audit_log').get() as { details: string };
+      const parsed = JSON.parse(raw.details);
+      expect(parsed.count).toBe(42);
+      expect(parsed.label).toBe('normal data');
+    });
+  });
+
+  // ===========================================================================
+  // O09: event_type validation in getAuditLog
+  // ===========================================================================
+
+  describe('O09: event_type validation', () => {
+    it('maps known event_type values correctly', () => {
+      logAudit(db, makeEntry({ event_type: 'search' }));
+      logAudit(db, makeEntry({ event_type: 'retention_cleanup' }));
+      const rows = getAuditLog(db);
+      expect(rows).toHaveLength(2);
+      expect(rows.some(r => r.event_type === 'search')).toBe(true);
+      expect(rows.some(r => r.event_type === 'retention_cleanup')).toBe(true);
+    });
+
+    it('maps unknown event_type to "unknown" instead of blind cast', () => {
+      // Manually insert a row with an unknown event_type (simulating future version or manual edit)
+      db.prepare(
+        'INSERT INTO audit_log (timestamp, timestamp_epoch, session_id, event_type, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(
+        new Date().toISOString(),
+        Date.now(),
+        'sess-test',
+        'future_event_type',
+        'hook:test',
+        null,
+        new Date().toISOString(),
+      );
+
+      const rows = getAuditLog(db);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.event_type).toBe('unknown');
+    });
+
+    it('preserves valid event_type when mixed with unknown', () => {
+      logAudit(db, makeEntry({ event_type: 'search' }));
+
+      // Insert unknown type manually
+      db.prepare(
+        'INSERT INTO audit_log (timestamp, timestamp_epoch, session_id, event_type, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(
+        new Date().toISOString(),
+        Date.now(),
+        'sess-test',
+        'nonexistent_type',
+        'hook:test',
+        null,
+        new Date().toISOString(),
+      );
+
+      const rows = getAuditLog(db);
+      expect(rows).toHaveLength(2);
+      const validRow = rows.find(r => r.event_type === 'search');
+      const unknownRow = rows.find(r => r.event_type === 'unknown');
+      expect(validRow).toBeDefined();
+      expect(unknownRow).toBeDefined();
+    });
+  });
 });

@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { searchObservations, searchAll, migration_2 } from '../../src/db/search.js';
+import { searchObservations, searchReasoning, searchAll, migration_2 } from '../../src/db/search.js';
 import { migration_1 } from '../../src/db/schema.js';
 import { MigrationRunner } from '../../src/db/migrations.js';
 import { storeObservation } from '../../src/db/observations.js';
+import { insertReasoning } from '../../src/db/reasoning.js';
+import { insertConsensus } from '../../src/db/consensus.js';
 import type { Observation } from '../../src/shared/types.js';
 
 // Mock logger to prevent filesystem writes during tests
@@ -360,5 +362,125 @@ describe('searchAll', () => {
     storeObservation(db, makeTestObservation());
     const results = searchAll(db, '');
     expect(results).toEqual([]);
+  });
+});
+
+describe('global scope isolation', () => {
+  it('searchObservations with project=undefined returns only global-scope results', () => {
+    // Global observation (project=undefined → stored as NULL)
+    storeObservation(db, makeTestObservation({
+      title: 'Global logging note',
+      content: 'Logging implementation for global scope',
+      project: undefined,
+    }));
+    // Project-scoped observation
+    storeObservation(db, makeTestObservation({
+      title: 'Project logging note',
+      content: 'Logging implementation for project alpha',
+      project: 'proj-a',
+    }));
+
+    // No project option = undefined = global scope only
+    const results = searchObservations(db, 'Logging');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.observation.title).toBe('Global logging note');
+    expect(results[0]!.observation.project).toBeUndefined();
+  });
+
+  it('searchReasoning with project=undefined returns only global-scope results', () => {
+    // Global reasoning
+    insertReasoning(db, {
+      session_id: 'test-session',
+      project: undefined,
+      timestamp: new Date().toISOString(),
+      timestamp_epoch: Date.now(),
+      trigger: 'manual',
+      title: 'Global reasoning',
+      reasoning: 'Reasoning about global architecture patterns',
+      importance: 3,
+    });
+    // Project-scoped reasoning
+    insertReasoning(db, {
+      session_id: 'test-session',
+      project: 'proj-a',
+      timestamp: new Date().toISOString(),
+      timestamp_epoch: Date.now(),
+      trigger: 'manual',
+      title: 'Project reasoning',
+      reasoning: 'Reasoning about project architecture patterns',
+      importance: 3,
+    });
+
+    const results = searchReasoning(db, 'architecture');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.observation.title).toBe('Global reasoning');
+    expect(results[0]!.observation.project).toBeUndefined();
+  });
+
+  it('searchAll with project=undefined returns only global-scope results across tables', () => {
+    // Global observation
+    storeObservation(db, makeTestObservation({
+      title: 'Global database note',
+      content: 'Database migration strategy',
+      project: undefined,
+    }));
+    // Project observation
+    storeObservation(db, makeTestObservation({
+      title: 'Project database note',
+      content: 'Database migration for alpha',
+      project: 'proj-a',
+    }));
+    // Global reasoning
+    insertReasoning(db, {
+      session_id: 'test-session',
+      project: undefined,
+      timestamp: new Date().toISOString(),
+      timestamp_epoch: Date.now(),
+      trigger: 'manual',
+      title: 'Global migration reasoning',
+      reasoning: 'Database migration reasoning',
+      importance: 3,
+    });
+    // Project consensus
+    insertConsensus(db, {
+      session_id: 'test-session',
+      project: 'proj-b',
+      timestamp: new Date().toISOString(),
+      timestamp_epoch: Date.now(),
+      title: 'Project migration decision',
+      description: 'Database migration decision',
+      status: 'agreed',
+      importance: 3,
+    });
+
+    // searchAll with no project = global only
+    const results = searchAll(db, 'migration');
+    // Should get the global observation + global reasoning, NOT the project ones
+    expect(results.length).toBe(2);
+    for (const r of results) {
+      expect(r.observation.project).toBeUndefined();
+    }
+  });
+
+  it('searchObservations with explicit project still returns that project only', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'Alpha logging',
+      content: 'Logging for alpha',
+      project: 'alpha',
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Beta logging',
+      content: 'Logging for beta',
+      project: 'beta',
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Global logging',
+      content: 'Logging for global',
+      project: undefined,
+    }));
+
+    const results = searchObservations(db, 'Logging', { project: 'alpha' });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.observation.project).toBe('alpha');
   });
 });

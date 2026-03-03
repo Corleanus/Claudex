@@ -15,12 +15,13 @@
 import type Database from 'better-sqlite3';
 import { deleteOldObservations } from '../db/observations.js';
 import { rebuildSearchIndex } from '../db/search.js';
+import { MS_PER_DAY } from '../shared/epoch.js';
 import { createLogger } from '../shared/logger.js';
 import type { ClaudexConfig } from '../shared/types.js';
 
 const log = createLogger('retention');
 
-export interface RetentionResult {
+interface RetentionResult {
   observationsDeleted: number;
   reasoningDeleted: number;
   consensusDeleted: number;
@@ -32,7 +33,7 @@ export interface RetentionResult {
 export function enforceRetention(db: Database.Database, config: ClaudexConfig): RetentionResult {
   const start = Date.now();
   const retentionDays = config.observation?.retention_days ?? 90;
-  const cutoffEpoch = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
+  const cutoffEpoch = Date.now() - (retentionDays * MS_PER_DAY);
 
   const result: RetentionResult = {
     observationsDeleted: 0,

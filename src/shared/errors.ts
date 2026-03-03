@@ -4,7 +4,7 @@
  * Typed errors for each subsystem. All extend ClaudexError.
  */
 
-export class ClaudexError extends Error {
+class ClaudexError extends Error {
   constructor(
     message: string,
     public readonly subsystem: string,

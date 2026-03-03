@@ -46,8 +46,13 @@ export function normalizeFts5Query(
   const mode = options?.mode ?? 'AND';
   const usePrefix = options?.prefix ?? false;
 
-  // Split into tokens, preserving quoted phrases and existing operators
-  const tokens = sanitized.split(' ').filter(Boolean);
+  // Split into tokens, preserving quoted phrases as single tokens
+  const tokens: string[] = [];
+  const tokenPattern = /"[^"]*"|\S+/g;
+  let tokenMatch: RegExpExecArray | null;
+  while ((tokenMatch = tokenPattern.exec(sanitized)) !== null) {
+    tokens.push(tokenMatch[0]);
+  }
   const FTS5_OPERATORS = new Set(['AND', 'OR', 'NOT', 'NEAR']);
 
   const processed = tokens.map(token => {

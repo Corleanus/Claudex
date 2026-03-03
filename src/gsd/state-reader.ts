@@ -248,7 +248,17 @@ export function countPlanFiles(phaseDir: string): GsdPlanSummary {
     const files = fs.readdirSync(phaseDir);
     const plans = files.filter(f => f.endsWith('-PLAN.md') || f === 'PLAN.md');
     const summaries = files.filter(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
-    return { total: plans.length, complete: summaries.length };
+
+    // Count only summaries that have a corresponding plan file
+    let matchedCount = 0;
+    for (const summary of summaries) {
+      const planName = summary.replace('-SUMMARY.md', '-PLAN.md').replace('SUMMARY.md', 'PLAN.md');
+      if (plans.includes(planName)) {
+        matchedCount++;
+      }
+    }
+
+    return { total: plans.length, complete: matchedCount };
   } catch {
     return { total: 0, complete: 0 };
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { logToFile } from '../../src/hooks/_infrastructure.js';
+import { logToFile, MAX_STDIN_BYTES } from '../../src/hooks/_infrastructure.js';
 
 // Mock dependencies
 vi.mock('../../src/shared/config.js', () => ({
@@ -86,6 +86,12 @@ describe('hook infrastructure', () => {
 
       // Hooks catch config errors internally
       expect(true).toBe(true);
+    });
+  });
+
+  describe('readStdin size cap', () => {
+    it('MAX_STDIN_BYTES is 10MB', () => {
+      expect(MAX_STDIN_BYTES).toBe(10 * 1024 * 1024);
     });
   });
 

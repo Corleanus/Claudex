@@ -13,11 +13,9 @@ import { ensureEpochMs } from '../shared/epoch.js';
 
 const log = createLogger('pressure');
 
-/** Sentinel value for global scope (no project). Avoids NULL in UNIQUE index. */
+/** Sentinel value for global scope (no project). Avoids NULL in UNIQUE index.
+ *  Also serves as the reserved project name — user projects must not use this value. */
 const GLOBAL_PROJECT_SENTINEL = '__global__';
-
-/** Reserved project name that conflicts with the sentinel. Must be rejected or mapped. */
-const RESERVED_PROJECT_NAME = '__global__';
 
 /** Row shape returned by SQLite before hydration */
 interface PressureRow {
@@ -56,13 +54,6 @@ export function upsertPressureScore(
 ): void {
   const startMs = Date.now();
   try {
-    // Guard against reserved project name collision
-    if (score.project === RESERVED_PROJECT_NAME) {
-      log.warn(`Project name "${RESERVED_PROJECT_NAME}" is reserved and conflicts with internal sentinel. Skipping upsert for file: ${score.file_path}`);
-      recordMetric('db.insert', Date.now() - startMs);
-      return;
-    }
-
     const now = new Date().toISOString();
     const nowEpoch = Date.now();
 
@@ -97,96 +88,111 @@ export function upsertPressureScore(
 }
 
 /**
- * Get all pressure scores, optionally filtered by project.
- * Ordered by raw_pressure DESC.
+ * Batch upsert pressure scores in a single transaction.
+ * Same semantics as calling upsertPressureScore() for each item,
+ * but wrapped in db.transaction() for ~2-5x better throughput.
  */
-export function getPressureScores(db: Database.Database, project?: string): PressureScore[] {
+export function batchUpsertPressureScores(
+  db: Database.Database,
+  scores: Array<Omit<PressureScore, 'id' | 'updated_at' | 'updated_at_epoch'>>,
+): void {
+  if (scores.length === 0) return;
   const startMs = Date.now();
   try {
-    const sql = project
-      ? `SELECT id, file_path, project, raw_pressure, temperature,
+    const stmt = db.prepare(`
+      INSERT INTO pressure_scores (
+        file_path, project, raw_pressure, temperature,
+        last_accessed_epoch, decay_rate,
+        updated_at, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(file_path, project) DO UPDATE SET
+        raw_pressure = excluded.raw_pressure,
+        temperature = excluded.temperature,
+        last_accessed_epoch = excluded.last_accessed_epoch,
+        decay_rate = excluded.decay_rate,
+        updated_at = excluded.updated_at,
+        updated_at_epoch = excluded.updated_at_epoch
+    `);
+
+    const run = db.transaction(() => {
+      const now = new Date().toISOString();
+      const nowEpoch = Date.now();
+      for (const score of scores) {
+        stmt.run(
+          score.file_path,
+          score.project ?? GLOBAL_PROJECT_SENTINEL,
+          score.raw_pressure,
+          score.temperature,
+          score.last_accessed_epoch !== undefined ? ensureEpochMs(score.last_accessed_epoch) : null,
+          score.decay_rate,
+          now,
+          nowEpoch,
+        );
+      }
+    });
+
+    run();
+    recordMetric('db.insert', Date.now() - startMs);
+  } catch (err) {
+    recordMetric('db.insert', Date.now() - startMs, true);
+    log.error('Failed to batch upsert pressure scores:', err);
+  }
+}
+
+/** Internal helper — shared query logic for pressure score retrieval. */
+function queryPressureScores(
+  db: Database.Database,
+  project?: string,
+  temperature?: TemperatureLevel,
+): PressureScore[] {
+  const startMs = Date.now();
+  try {
+    const resolvedProject = project ?? GLOBAL_PROJECT_SENTINEL;
+    const conditions = ['project = ?'];
+    const params: unknown[] = [resolvedProject];
+
+    if (temperature) {
+      conditions.push('temperature = ?');
+      params.push(temperature);
+    }
+
+    const sql = `SELECT id, file_path, project, raw_pressure, temperature,
                 last_accessed_epoch, decay_rate, updated_at, updated_at_epoch
          FROM pressure_scores
-         WHERE project = ?
-         ORDER BY raw_pressure DESC`
-      : `SELECT id, file_path, project, raw_pressure, temperature,
-                last_accessed_epoch, decay_rate, updated_at, updated_at_epoch
-         FROM pressure_scores
+         WHERE ${conditions.join(' AND ')}
          ORDER BY raw_pressure DESC`;
 
-    const rows = project
-      ? db.prepare(sql).all(project) as PressureRow[]
-      : db.prepare(sql).all() as PressureRow[];
+    const rows = db.prepare(sql).all(...params) as PressureRow[];
 
     recordMetric('db.query', Date.now() - startMs);
     return rows.map(rowToPressureScore);
   } catch (err) {
     recordMetric('db.query', Date.now() - startMs, true);
-    log.error('Failed to get pressure scores:', err);
+    log.error('Failed to query pressure scores:', err);
     return [];
   }
+}
+
+/**
+ * Get all pressure scores, optionally filtered by project.
+ * Ordered by raw_pressure DESC.
+ */
+export function getPressureScores(db: Database.Database, project?: string): PressureScore[] {
+  return queryPressureScores(db, project);
 }
 
 /**
  * Get only HOT files. Ordered by raw_pressure DESC.
  */
 export function getHotFiles(db: Database.Database, project?: string): PressureScore[] {
-  const startMs = Date.now();
-  try {
-    const sql = project
-      ? `SELECT id, file_path, project, raw_pressure, temperature,
-                last_accessed_epoch, decay_rate, updated_at, updated_at_epoch
-         FROM pressure_scores
-         WHERE temperature = 'HOT' AND project = ?
-         ORDER BY raw_pressure DESC`
-      : `SELECT id, file_path, project, raw_pressure, temperature,
-                last_accessed_epoch, decay_rate, updated_at, updated_at_epoch
-         FROM pressure_scores
-         WHERE temperature = 'HOT'
-         ORDER BY raw_pressure DESC`;
-
-    const rows = project
-      ? db.prepare(sql).all(project) as PressureRow[]
-      : db.prepare(sql).all() as PressureRow[];
-
-    recordMetric('db.query', Date.now() - startMs);
-    return rows.map(rowToPressureScore);
-  } catch (err) {
-    recordMetric('db.query', Date.now() - startMs, true);
-    log.error('Failed to get hot files:', err);
-    return [];
-  }
+  return queryPressureScores(db, project, 'HOT');
 }
 
 /**
  * Get only WARM files. Ordered by raw_pressure DESC.
  */
 export function getWarmFiles(db: Database.Database, project?: string): PressureScore[] {
-  const startMs = Date.now();
-  try {
-    const sql = project
-      ? `SELECT id, file_path, project, raw_pressure, temperature,
-                last_accessed_epoch, decay_rate, updated_at, updated_at_epoch
-         FROM pressure_scores
-         WHERE temperature = 'WARM' AND project = ?
-         ORDER BY raw_pressure DESC`
-      : `SELECT id, file_path, project, raw_pressure, temperature,
-                last_accessed_epoch, decay_rate, updated_at, updated_at_epoch
-         FROM pressure_scores
-         WHERE temperature = 'WARM'
-         ORDER BY raw_pressure DESC`;
-
-    const rows = project
-      ? db.prepare(sql).all(project) as PressureRow[]
-      : db.prepare(sql).all() as PressureRow[];
-
-    recordMetric('db.query', Date.now() - startMs);
-    return rows.map(rowToPressureScore);
-  } catch (err) {
-    recordMetric('db.query', Date.now() - startMs, true);
-    log.error('Failed to get warm files:', err);
-    return [];
-  }
+  return queryPressureScores(db, project, 'WARM');
 }
 
 /**
@@ -209,13 +215,6 @@ export function accumulatePressureScore(
   const startMs = Date.now();
   try {
     const resolvedProject = project ?? GLOBAL_PROJECT_SENTINEL;
-
-    // Guard against reserved project name collision
-    if (project === RESERVED_PROJECT_NAME) {
-      log.warn(`Project name "${RESERVED_PROJECT_NAME}" is reserved and conflicts with internal sentinel. Skipping accumulate for file: ${filePath}`);
-      recordMetric('db.insert', Date.now() - startMs);
-      return;
-    }
 
     // Clamp increment to [0, 1] — defensive against invalid values
     const safeIncrement = Math.max(0, Math.min(1, Number.isFinite(increment) ? increment : 0));
@@ -307,19 +306,17 @@ export function decayAllScores(db: Database.Database, project?: string): number 
       { factor: 0.90572, minPressure: null, maxPressure: 0.40 },
     ];
 
+    const resolvedProject = project ?? GLOBAL_PROJECT_SENTINEL;
     let totalChanged = 0;
 
     for (const tier of tiers) {
       const whereConditions: string[] = [idempotencyClause];
       if (tier.minPressure !== null) whereConditions.push(`raw_pressure >= ${tier.minPressure}`);
       if (tier.maxPressure !== null) whereConditions.push(`raw_pressure < ${tier.maxPressure}`);
-      if (project) whereConditions.push('project = ?');
+      whereConditions.push('project = ?');
 
       const newPressureExpr = `raw_pressure * ${tier.factor}`;
 
-      // Parameter order: SET params first, then WHERE params
-      // SET: last_decay_epoch=?, updated_at=?, updated_at_epoch=?
-      // WHERE: todayStartEpoch (idempotency), [project]
       const sql = `
         UPDATE pressure_scores
         SET raw_pressure = ${newPressureExpr},
@@ -335,8 +332,8 @@ export function decayAllScores(db: Database.Database, project?: string): number 
         now,                // updated_at = ?
         nowEpoch,           // updated_at_epoch = ?
         todayStartEpoch,    // idempotency: last_decay_epoch < ?
+        resolvedProject,    // project = ?
       ];
-      if (project) runParams.push(project);
 
       const result = db.prepare(sql).run(...runParams);
       totalChanged += result.changes;

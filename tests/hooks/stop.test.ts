@@ -205,7 +205,7 @@ describe('detectDecisionSignals', () => {
     expect(signals.toolActions[0]).toEqual({ name: 'Read', target: '/src/main.ts' });
   });
 
-  it('counts Write, Edit, Bash tool_use blocks and captures toolActions', () => {
+  it('counts Write and Edit but NOT Bash as file-modifying tools (R23 fix)', () => {
     const content = buildTranscript([
       { name: 'Write', input: { file_path: '/src/new-file.ts' } },
       { name: 'Edit', input: { file_path: '/src/old-file.ts' } },
@@ -213,7 +213,8 @@ describe('detectDecisionSignals', () => {
     ]);
     const transcriptPath = writeTempTranscript(content, tmpDir);
     const signals = detectDecisionSignals(transcriptPath);
-    expect(signals.fileModifyCount).toBe(3);
+    // R23: Bash is NOT a file modification — only Write and Edit count
+    expect(signals.fileModifyCount).toBe(2);
     expect(signals.toolActions).toHaveLength(3);
     expect(signals.toolActions[0]).toEqual({ name: 'Write', target: '/src/new-file.ts' });
     expect(signals.toolActions[2]).toEqual({ name: 'Bash', target: 'pnpm test' });
@@ -264,6 +265,107 @@ describe('detectDecisionSignals', () => {
     const transcriptPath = writeTempTranscript(content, tmpDir);
     const signals = detectDecisionSignals(transcriptPath);
     expect(signals.fileModifyCount).toBe(0);
+  });
+
+  // R23 fix: Bash tool use is NOT counted as file modification
+  it('R23: Bash-only transcript has fileModifyCount=0', () => {
+    const content = buildTranscript([
+      { name: 'Bash', input: { command: 'git status' } },
+      { name: 'Bash', input: { command: 'git diff' } },
+      { name: 'Bash', input: { command: 'ls -la' } },
+    ]);
+    const transcriptPath = writeTempTranscript(content, tmpDir);
+    const signals = detectDecisionSignals(transcriptPath);
+    expect(signals.fileModifyCount).toBe(0);
+    expect(signals.toolActions).toHaveLength(3);
+  });
+
+  it('R23: 2 Write + 1 Bash = fileModifyCount 2', () => {
+    const content = buildTranscript([
+      { name: 'Write', input: { file_path: '/a.ts' } },
+      { name: 'Write', input: { file_path: '/b.ts' } },
+      { name: 'Bash', input: { command: 'npm test' } },
+    ]);
+    const transcriptPath = writeTempTranscript(content, tmpDir);
+    const signals = detectDecisionSignals(transcriptPath);
+    expect(signals.fileModifyCount).toBe(2);
+  });
+
+  it('R23: 1 Edit + 1 Read = fileModifyCount 1', () => {
+    const content = buildTranscript([
+      { name: 'Edit', input: { file_path: '/a.ts' } },
+      { name: 'Read', input: { file_path: '/b.ts' } },
+    ]);
+    const transcriptPath = writeTempTranscript(content, tmpDir);
+    const signals = detectDecisionSignals(transcriptPath);
+    expect(signals.fileModifyCount).toBe(1);
+  });
+
+  // R22 fix: turn-scoped detection — only count tool_use from entries after last user message
+  it('R22: multi-turn transcript counts only last turn', () => {
+    // Turn 1: assistant uses 3 file-modifying tools
+    const turn1Assistant = JSON.stringify({
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', name: 'Write', input: { file_path: '/a.ts' } },
+          { type: 'tool_use', name: 'Edit', input: { file_path: '/b.ts' } },
+          { type: 'tool_use', name: 'Write', input: { file_path: '/c.ts' } },
+        ],
+      },
+    });
+    // User message marks turn boundary
+    const userMsg = JSON.stringify({
+      message: { role: 'user', content: [{ type: 'text', text: 'ok' }] },
+    });
+    // Turn 2: assistant uses only Read (0 file-modifying tools)
+    const turn2Assistant = JSON.stringify({
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', name: 'Read', input: { file_path: '/d.ts' } },
+        ],
+      },
+    });
+
+    const content = [turn1Assistant, userMsg, turn2Assistant].join('\n') + '\n';
+    const transcriptPath = writeTempTranscript(content, tmpDir);
+    const signals = detectDecisionSignals(transcriptPath);
+
+    // Should only count turn 2 (after last user message)
+    expect(signals.fileModifyCount).toBe(0);
+    expect(signals.toolActions).toHaveLength(1);
+    expect(signals.toolActions[0]!.name).toBe('Read');
+  });
+
+  it('R22: single-turn transcript counts all entries', () => {
+    // No user message — all entries are current turn
+    const content = buildTranscript([
+      { name: 'Write', input: { file_path: '/a.ts' } },
+      { name: 'Edit', input: { file_path: '/b.ts' } },
+    ]);
+    const transcriptPath = writeTempTranscript(content, tmpDir);
+    const signals = detectDecisionSignals(transcriptPath);
+    expect(signals.fileModifyCount).toBe(2);
+  });
+
+  // R24 fix: fd leak prevention
+  it('R24: fd is closed even when transcript content is invalid JSON', () => {
+    // Write a transcript with only invalid JSON lines
+    const content = 'not json line 1\nnot json line 2\nnot json line 3\n';
+    const transcriptPath = writeTempTranscript(content, tmpDir);
+    const signals = detectDecisionSignals(transcriptPath);
+    expect(signals.fileModifyCount).toBe(0);
+
+    // If fd leaked, this would throw EBUSY on Windows
+    expect(() => fs.unlinkSync(transcriptPath)).not.toThrow();
+  });
+
+  it('R24: fd is closed even on empty file', () => {
+    const transcriptPath = writeTempTranscript('', tmpDir);
+    detectDecisionSignals(transcriptPath);
+    // File should be deletable (no fd leak)
+    expect(() => fs.unlinkSync(transcriptPath)).not.toThrow();
   });
 });
 

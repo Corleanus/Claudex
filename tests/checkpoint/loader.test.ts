@@ -73,7 +73,7 @@ function makeCheckpoint(overrides?: Partial<Checkpoint>): Checkpoint {
     ],
     files: {
       changed: [
-        { path: 'src/checkpoint/loader.ts', action: 'created', summary: 'Checkpoint loader module' },
+        { path: 'src/checkpoint/loader.ts', action: 'Write', summary: 'Checkpoint loader module' },
       ],
       read: ['src/checkpoint/types.ts'],
       hot: ['src/checkpoint/loader.ts'],

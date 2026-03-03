@@ -12,6 +12,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createLogger } from '../shared/logger.js';
+import { escapeUntrustedText } from '../lib/context-sections.js';
+import { redactSensitive } from '../lib/redaction.js';
 import type { RecurringPattern, PhaseDecision } from './types.js';
 
 const log = createLogger('gsd-cross-phase-writer');
@@ -29,7 +31,7 @@ const DEBOUNCE_MS = 5 * 60 * 1000;
 
 const FM_PATTERN = /^---\n([\s\S]*?)\n---/;
 const HANDOFF_ID_PATTERN = /^handoff_id:\s*(.+)$/m;
-const PHASE_FROM_HANDOFF = /gsd-phase(\d+)/;
+const PHASE_FROM_HANDOFF = /gsd-phase(\d+(?:\.\d+)?)/;
 const DECISIONS_SECTION = /## Decisions Made\n([\s\S]*?)(?=\n## |\n---|$)/;
 const HANDOFF_DECISIONS_SECTION = /## (?:Design )?Decisions(?: Made)?(?:\s*\([^)]*\))?\n([\s\S]*?)(?=\n## |\n---|$)/i;
 const SESSION_FILENAME = /(\d{4}-\d{2}-\d{2})_session-/;
@@ -251,7 +253,7 @@ export function extractDecisionHistory(claudexDir: string): Map<string, PhaseDec
     if (fs.existsSync(sessionsDir)) {
       const sessionFiles = fs.readdirSync(sessionsDir)
         .filter(f => f.endsWith('.md'))
-        .sort(); // Chronological by filename
+        .sort((a, b) => a.localeCompare(b)); // Chronological by filename
 
       for (const sessionFile of sessionFiles) {
         try {
@@ -306,7 +308,7 @@ export function extractDecisionHistory(claudexDir: string): Map<string, PhaseDec
       if (fs.existsSync(archiveDir)) {
         const archiveEntries = fs.readdirSync(archiveDir)
           .filter(f => f.endsWith('.md'))
-          .sort();
+          .sort((a, b) => a.localeCompare(b));
         for (const entry of archiveEntries) {
           handoffFiles.push(path.join(archiveDir, entry));
         }
@@ -414,9 +416,9 @@ export function writeCrossPhaseSummary(projectDir: string, claudexDir: string): 
       content += '_No recurring patterns detected across completed phases._\n\n';
     } else {
       for (const pattern of patterns) {
-        content += `### \`${pattern.filePath}\`\n`;
+        content += `### \`${escapeUntrustedText(pattern.filePath, 200)}\`\n`;
         for (const { phase, reason } of pattern.appearances) {
-          content += `- **${phase}**: ${reason}\n`;
+          content += `- **${escapeUntrustedText(phase, 50)}**: ${escapeUntrustedText(reason, 200)}\n`;
         }
         content += '\n';
       }
@@ -428,9 +430,10 @@ export function writeCrossPhaseSummary(projectDir: string, claudexDir: string): 
       content += '_No decisions extracted from session logs or handoffs._\n\n';
     } else {
       for (const [phaseLabel, decisions] of decisionsByPhase) {
-        content += `### ${phaseLabel}\n`;
+        content += `### ${escapeUntrustedText(phaseLabel, 100)}\n`;
         for (const { date, decision } of decisions) {
-          content += `- (${date}) ${decision}\n`;
+          const sanitized = escapeUntrustedText(redactSensitive(decision), 300);
+          content += `- (${date}) ${sanitized}\n`;
         }
         content += '\n';
       }

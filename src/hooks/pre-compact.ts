@@ -11,7 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { runHook, logToFile } from './_infrastructure.js';
-import { transcriptDir, completionMarkerPath, findCurrentSessionLog, dailyMemoryPath, PATHS } from '../shared/paths.js';
+import { transcriptDir, completionMarkerPath, findCurrentSessionLog, dailyMemoryPath, PATHS, sanitizeSessionId } from '../shared/paths.js';
 import type { PreCompactInput } from '../shared/types.js';
 import type { HookStdin } from '../shared/types.js';
 import type { ReasoningChain } from '../shared/types.js';
@@ -24,6 +24,7 @@ import { getCheckpointState, upsertCheckpointState } from '../db/checkpoint.js';
 import { getObservationsSince } from '../db/observations.js';
 import { readTokenGauge } from '../lib/token-gauge.js';
 import { writeCheckpoint } from '../checkpoint/writer.js';
+import { redactSensitive } from '../lib/redaction.js';
 import type Database from 'better-sqlite3';
 
 /**
@@ -122,14 +123,14 @@ function writeCompactCheckpoint(
         // Global scope: <session_id>_compact-1.md
         try {
           const existing = fs.readdirSync(sessionsDir);
-          const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+          const safeId = sanitizeSessionId(sessionId);
           const pattern = new RegExp(`^${safeId}_compact-(\\d+)\\.md$`);
           for (const f of existing) {
             const m = f.match(pattern);
             if (m) compactNum = Math.max(compactNum, parseInt(m[1]!, 10) + 1);
           }
         } catch { /* ignore */ }
-        const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+        const safeId = sanitizeSessionId(sessionId);
         const newPath = path.join(sessionsDir, `${safeId}_compact-${compactNum}.md`);
         fs.writeFileSync(newPath, checkpointContent.trimStart(), 'utf-8');
         logToFile(HOOK_NAME, 'DEBUG', `Checkpoint session log created: ${newPath}`);
@@ -193,6 +194,8 @@ function writeCompactCheckpoint(
 runHook('pre-compact', async (input: HookStdin) => {
   const { session_id, transcript_path } = input;
   const trigger = (input as PreCompactInput).trigger ?? 'auto';
+  // Sanitize trigger for safe filesystem use (R09)
+  const safeTrigger = trigger.replace(/[^a-zA-Z0-9_-]/g, '');
 
   // Guard: missing transcript_path
   if (!transcript_path) {
@@ -236,7 +239,7 @@ runHook('pre-compact', async (input: HookStdin) => {
     .replace('.', '-')      // .123Z → -123Z
     .replace('Z', '');      // strip trailing Z
 
-  const filename = `${ts}-precompact-${trigger}.jsonl`;
+  const filename = `${ts}-precompact-${safeTrigger}.jsonl`;
   const destPath = path.join(destDir, filename);
 
   // Copy transcript
@@ -302,15 +305,8 @@ runHook('pre-compact', async (input: HookStdin) => {
     }
 
     try {
-      // 3. Read transcript content
-      let transcriptContent: string | undefined;
-      if (transcript_path) {
-        try {
-          transcriptContent = fs.readFileSync(transcript_path, 'utf-8');
-        } catch (readErr) {
-          logToFile(HOOK_NAME, 'WARN', `Failed to read transcript for reasoning capture: ${transcript_path}`, readErr);
-        }
-      }
+      // 3. Reuse transcript buffer from snapshot copy above (O12: avoid second read)
+      const transcriptContent: string | undefined = content ? content.toString('utf-8') : undefined;
 
       // Truncate to last MAX_REASONING_LENGTH chars (most recent reasoning is most valuable)
       let reasoning = transcriptContent || 'Transcript unavailable';
@@ -318,6 +314,9 @@ runHook('pre-compact', async (input: HookStdin) => {
         reasoning = reasoning.slice(-MAX_REASONING_LENGTH);
         logToFile(HOOK_NAME, 'DEBUG', `Reasoning truncated to last ${MAX_REASONING_LENGTH} chars`);
       }
+
+      // C13 fix: redact secrets/PII from reasoning before storage
+      reasoning = redactSensitive(reasoning);
 
       // 4. Build reasoning chain
       const chainTimestamp = new Date().toISOString();
@@ -376,7 +375,7 @@ runHook('pre-compact', async (input: HookStdin) => {
       // Compact checkpoint writes — session log, handoff, daily memory
       // =====================================================================
       try {
-        writeCompactCheckpoint(session_id, scope, db, trigger, input.cwd);
+        writeCompactCheckpoint(session_id, scope, db, safeTrigger, input.cwd);
       } catch (cpErr) {
         logToFile(HOOK_NAME, 'ERROR', 'Compact checkpoint writes failed (non-fatal):', cpErr);
       }

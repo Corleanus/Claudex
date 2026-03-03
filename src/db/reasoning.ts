@@ -191,7 +191,7 @@ export function searchReasoning(
   const startMs = Date.now();
   try {
     if (!query || query.trim().length === 0) {
-      recordMetric('db.search_fts5', Date.now() - startMs);
+      recordMetric('db.search_like', Date.now() - startMs);
       return [];
     }
 
@@ -221,10 +221,10 @@ export function searchReasoning(
       ? db.prepare(sql).all(searchTerm, searchTerm, options.project, limit) as ReasoningRow[]
       : db.prepare(sql).all(searchTerm, searchTerm, limit) as ReasoningRow[];
 
-    recordMetric('db.search_fts5', Date.now() - startMs);
+    recordMetric('db.search_like', Date.now() - startMs);
     return rows.map(rowToReasoningChain);
   } catch (err) {
-    recordMetric('db.search_fts5', Date.now() - startMs, true);
+    recordMetric('db.search_like', Date.now() - startMs, true);
     log.error('Failed to search reasoning:', err);
     return [];
   }

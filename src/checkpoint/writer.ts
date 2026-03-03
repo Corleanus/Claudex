@@ -23,6 +23,7 @@ import {
   readFilesTouched,
   readThread,
   archiveStateFiles,
+  ensureDir,
 } from './state-files.js';
 import type { GaugeReading } from '../lib/token-gauge.js';
 import type { GsdState } from '../gsd/types.js';
@@ -37,6 +38,7 @@ import { CHECKPOINT_SCHEMA, CHECKPOINT_VERSION } from './types.js';
 import { getHotFiles, getWarmFiles } from '../db/pressure.js';
 import { getRecentObservations } from '../db/observations.js';
 import { getCheckpointState } from '../db/checkpoint.js';
+import { numericCheckpointSort } from './sort.js';
 
 const log = createLogger('checkpoint-writer');
 
@@ -50,7 +52,7 @@ const WRITER_VERSION = '3.0.0';
 // Public Types
 // =============================================================================
 
-export interface WriteCheckpointInput {
+interface WriteCheckpointInput {
   projectDir: string;
   sessionId: string;
   scope: string;                        // "global" | "project:{name}"
@@ -63,7 +65,7 @@ export interface WriteCheckpointInput {
   db?: Database.Database;               // Optional DB handle for enrichment (pressure, observations, boost)
 }
 
-export interface WriteCheckpointResult {
+interface WriteCheckpointResult {
   path: string;
   checkpointId: string;
   checkpoint: Checkpoint;
@@ -73,28 +75,6 @@ export interface WriteCheckpointResult {
 // =============================================================================
 // Internal Helpers
 // =============================================================================
-
-/**
- * Sort checkpoint filenames numerically.
- * Handles YYYY-MM-DD_cpN.yaml where N can be any number (cp10 > cp9).
- */
-function numericCheckpointSort(a: string, b: string): number {
-  const extractN = (f: string): number => {
-    const match = f.match(/_cp(\d+)\.yaml$/);
-    return match ? parseInt(match[1]!, 10) : 0;
-  };
-  const dateA = a.slice(0, 10);
-  const dateB = b.slice(0, 10);
-  if (dateA !== dateB) return dateA.localeCompare(dateB);
-  return extractN(a) - extractN(b);
-}
-
-/** Ensure a directory exists (create if missing) */
-function ensureDir(dirPath: string): void {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
-  }
-}
 
 /** Get the checkpoints directory for a project */
 function checkpointsDir(projectDir: string): string {
@@ -174,6 +154,10 @@ function buildGsdCheckpointState(gsdState?: GsdState): GsdCheckpointState | null
     phase_name: pos?.phaseName ?? null,
     phase_goal: currentPhase?.goal ?? null,
     plan_status: pos?.status ?? null,
+    plan_number: pos?.plan ?? null,
+    completion_pct: gsdState
+      ? Math.round(gsdState.phases.filter(p => p.roadmapComplete).length / Math.max(gsdState.phases.length, 1) * 100)
+      : 0,
     requirements: currentPhase
       ? currentPhase.requirements.map(reqId => ({
           id: reqId,
@@ -188,7 +172,7 @@ function buildGsdCheckpointState(gsdState?: GsdState): GsdCheckpointState | null
  * Estimate token count for selective-load sections.
  * Uses character count × 0.25 (4 chars/token average).
  */
-function estimateTokens(checkpoint: Checkpoint): number {
+function estimateCheckpointTokens(checkpoint: Checkpoint): number {
   // Selective-load sections: working, decisions, files, open_questions, thread, gsd
   const sections: unknown[] = [
     checkpoint.working,
@@ -360,7 +344,7 @@ export function writeCheckpoint(input: WriteCheckpointInput): WriteCheckpointRes
     archiveStateFiles(input.projectDir, input.sessionId, checkpointId);
 
     // Estimate token cost
-    const tokenEstimate = estimateTokens(checkpoint);
+    const tokenEstimate = estimateCheckpointTokens(checkpoint);
 
     return {
       path: cpPath,

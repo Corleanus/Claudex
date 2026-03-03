@@ -50,8 +50,8 @@ interface ParsedPhaseArgs extends BaseParsedArgs {
   event: 'phase-start' | 'phase-end';
 }
 
-export type ParsedCliArgs = ParsedPhaseArgs | ParsedPlanCompleteArgs;
-export type ParsedCliArgsResult = ParsedCliArgs | { error: string };
+type ParsedCliArgs = ParsedPhaseArgs | ParsedPlanCompleteArgs;
+type ParsedCliArgsResult = ParsedCliArgs | { error: string };
 
 const USAGE = [
   'Usage:',
@@ -229,10 +229,16 @@ function run(): void {
           sessionId: parsed.sessionId,
         });
         break;
+      default: {
+        const _exhaustive: never = parsed;
+        throw new Error(`Unexpected event: ${(_exhaustive as { event: string }).event}`);
+      }
     }
 
     if (result.success) {
-      console.log(`[phase-transition] ${parsed.event}: ${result.message}`);
+      const msg = `[phase-transition] ${parsed.event}: ${result.message}`;
+      console.log(msg);
+      log.info(`${parsed.event}: ${result.message}`);
       process.exit(0);
     }
 

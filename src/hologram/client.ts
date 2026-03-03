@@ -12,7 +12,7 @@ import { HologramError, HologramUnavailableError } from '../shared/errors.js';
 import { createLogger } from '../shared/logger.js';
 import { recordMetric } from '../shared/metrics.js';
 import { upsertPressureScore } from '../db/pressure.js';
-import { SidecarManager } from './launcher.js';
+import { SidecarManager, verifySidecarPing } from './launcher.js';
 import { ProtocolHandler, buildRequest } from './protocol.js';
 
 const log = createLogger('hologram-client');
@@ -178,10 +178,12 @@ export class HologramClient {
   }
 
   /**
-   * Check if hologram sidecar is available (process alive + port file present).
+   * Check if hologram sidecar is available (port file present).
+   * Uses port-based discovery instead of PID+process check, so adopted
+   * sidecars (port-only, no PID file) are also detected.
    */
   isAvailable(): boolean {
-    return this.launcher.isRunning();
+    return this.launcher.getPort() !== null;
   }
 
   /**
@@ -227,7 +229,18 @@ export class HologramClient {
    */
   private async ensureSidecar(): Promise<number> {
     let port = this.launcher.getPort();
-    if (port !== null) return port;
+    if (port !== null) {
+      // R06 fix: verify the port actually belongs to our sidecar
+      const status = await verifySidecarPing(port);
+      if (status === 'ours') return port;
+
+      // Port is stale or foreign — force restart
+      log.warn('Port verification failed, restarting sidecar', { port, status });
+      await this.launcher.restart();
+      port = this.launcher.getPort();
+      if (port !== null) return port;
+      throw new HologramUnavailableError('sidecar restart failed — no port available');
+    }
 
     log.info('Sidecar not running, attempting lazy start');
 

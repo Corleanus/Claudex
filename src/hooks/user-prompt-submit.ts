@@ -17,233 +17,24 @@ import { runHook, logToFile } from './_infrastructure.js';
 import { detectScope } from '../shared/scope-detector.js';
 import { loadConfig } from '../shared/config.js';
 import { assembleContext } from '../lib/context-assembler.js';
-import { normalizeFts5Query } from '../shared/fts5-utils.js';
 import { getDatabase } from '../db/connection.js';
 import { readGsdState, findActivePlanFile, extractPlanMustHaves, countCompletedRequirements } from '../gsd/state-reader.js';
 import { readTokenGauge } from '../lib/token-gauge.js';
 import { writeCheckpoint } from '../checkpoint/writer.js';
 import { readDecisions, readQuestions } from '../checkpoint/state-files.js';
 import { PATHS } from '../shared/paths.js';
-import type { UserPromptSubmitInput, SearchResult, Observation, Scope } from '../shared/types.js';
-import type { ContextSuggestion } from '../hologram/degradation.js';
+import { queryHologram, extractRecentFiles, queryFts5, getRecent } from './_prompt-queries.js';
+import type { UserPromptSubmitInput } from '../shared/types.js';
 import type { GsdState } from '../gsd/types.js';
 import type { GaugeReading } from '../lib/token-gauge.js';
-import type { Decision } from '../checkpoint/types.js';
+import type { Decision, GsdCheckpointState } from '../checkpoint/types.js';
+
+// Re-export extractKeywords for backward compatibility (tests import it from here)
+export { extractKeywords } from './_prompt-queries.js';
 
 const HOOK_NAME = 'user-prompt-submit';
 const SHORT_PROMPT_THRESHOLD = 10;
 const DEFAULT_CONTEXT_TOKEN_BUDGET = 4000;
-
-// =============================================================================
-// Subsystem queries (each independently try/caught)
-// =============================================================================
-
-/**
- * Query the hologram sidecar for pressure-scored file context.
- * Uses ResilientHologramClient for automatic retry + recency fallback.
- * Returns null if hologram is disabled or entirely unavailable.
- *
- * @param db - Shared database handle for fallback tier (caller manages lifecycle)
- */
-async function queryHologram(
-  promptText: string,
-  sessionId: string,
-  recentFiles: string[],
-  scope: Scope,
-  db: import('better-sqlite3').Database | null,
-  boostFiles?: string[],
-): Promise<ContextSuggestion | null> {
-  try {
-    const config = loadConfig();
-
-    if (config.hologram?.enabled === false) {
-      logToFile(HOOK_NAME, 'DEBUG', 'Hologram disabled in config, skipping');
-      return null;
-    }
-
-    const { SidecarManager } = await import('../hologram/launcher.js');
-    const { ProtocolHandler } = await import('../hologram/protocol.js');
-    const { HologramClient } = await import('../hologram/client.js');
-    const { ResilientHologramClient } = await import('../hologram/degradation.js');
-
-    const launcher = new SidecarManager();
-    const protocol = new ProtocolHandler(config.hologram?.timeout_ms ?? 2000);
-    const client = new HologramClient(launcher, protocol, config);
-    const resilient = new ResilientHologramClient(client, config);
-
-    if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'DB unavailable for fallback tier, continuing without');
-    }
-
-    const project = scope.type === 'project' ? scope.name : undefined;
-    const projectDir = scope.type === 'project' ? scope.path : undefined;
-    const result = await resilient.queryWithFallback(promptText, 0, sessionId, recentFiles, db ?? undefined, project, projectDir, boostFiles);
-
-    logToFile(HOOK_NAME, 'DEBUG', `Hologram query complete, source=${result.source}`);
-    return result;
-  } catch (err) {
-    logToFile(HOOK_NAME, 'WARN', 'Hologram query failed entirely', err);
-    return null;
-  }
-}
-
-/**
- * Extract unique file paths from recent observations for recency fallback.
- * Collects files_read and files_modified, deduplicates, returns up to 10.
- */
-function extractRecentFiles(observations: Observation[]): string[] {
-  const seen = new Set<string>();
-  for (const obs of observations) {
-    if (obs.files_modified) {
-      for (const f of obs.files_modified) seen.add(f);
-    }
-    if (obs.files_read) {
-      for (const f of obs.files_read) seen.add(f);
-    }
-  }
-  return [...seen].slice(0, 10);
-}
-
-/**
- * Extract simple keywords from a prompt for FTS5 search.
- * Filters out short words and common stop words.
- */
-export function extractKeywords(prompt: string): string {
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
-    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'about', 'this',
-    'that', 'it', 'not', 'but', 'and', 'or', 'if', 'then', 'so',
-    'what', 'which', 'who', 'how', 'when', 'where', 'why',
-    'all', 'each', 'every', 'any', 'no', 'some', 'just', 'also',
-    'me', 'my', 'we', 'our', 'you', 'your', 'they', 'them', 'their',
-    'please', 'thanks', 'thank',
-    // Technical stop words — noise in a code-centric memory system
-    'file', 'code', 'function', 'const', 'let', 'var', 'import', 'export',
-    'return', 'true', 'false', 'null', 'undefined', 'new', 'class', 'type',
-    'interface',
-  ]);
-
-  const words = prompt
-    .toLowerCase()
-    .replace(/[^a-z0-9\s_-]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length >= 2 && !stopWords.has(w));
-
-  // Deduplicate and take top 8 keywords (more = better recall with OR-expansion)
-  const unique = [...new Set(words)].slice(0, 8);
-  const keywords = unique.join(' ');
-
-  // Normalize for FTS5 (strips hyphens and other special chars)
-  return normalizeFts5Query(keywords);
-}
-
-/**
- * Query FTS5 search across all tables (observations, reasoning, consensus).
- * Uses strict-then-relax strategy: AND first, OR fallback if < 2 results.
- * Applies temporal re-ranking to boost recent results.
- * Returns empty array if database is unavailable or query fails.
- *
- * @param db - Shared database handle (caller manages lifecycle)
- */
-function queryFts5(promptText: string, scope: Scope, db: import('better-sqlite3').Database | null): SearchResult[] {
-  try {
-    const keywords = extractKeywords(promptText);
-    if (!keywords) {
-      logToFile(HOOK_NAME, 'DEBUG', 'No keywords extracted from prompt, skipping FTS5');
-      return [];
-    }
-
-    if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'Database unavailable, skipping FTS5');
-      return [];
-    }
-
-    const { searchAll } = require('../db/search.js') as typeof import('../db/search.js');
-
-    const project = scope.type === 'project' ? scope.name : undefined;
-
-    // Strict-then-relax: try AND first, fall back to OR if < 2 results
-    let results = searchAll(db, keywords, {
-      project,
-      limit: 8,
-      prefix: true,
-    });
-
-    if (results.length < 2) {
-      const andCount = results.length;
-      const orResults = searchAll(db, keywords, {
-        project,
-        limit: 8,
-        mode: 'OR',
-        prefix: true,
-      });
-      if (orResults.length > andCount) {
-        results = orResults;
-        logToFile(HOOK_NAME, 'DEBUG', `FTS5 OR fallback: ${orResults.length} results (AND had ${andCount})`);
-      }
-    }
-
-    // Temporal re-ranking: blend BM25 relevance with recency
-    if (results.length > 0) {
-      const now = Date.now();
-      // FTS5 rank is negative (more negative = better match)
-      // Find the "best" (most negative) rank to normalize against
-      const minRank = Math.min(...results.map(r => r.rank));
-      const maxRank = Math.max(...results.map(r => r.rank));
-      const rankRange = maxRank - minRank;
-
-      const scored = results.map(r => {
-        // Normalize BM25: 0 = worst match, 1 = best match
-        // rank is negative, so minRank is the best. Map minRank→1, maxRank→0
-        const normalizedBM25 = rankRange === 0 ? 1 : (maxRank - r.rank) / rankRange;
-
-        // Recency score: 1/(1 + daysSinceCreation)
-        const epochMs = r.observation.timestamp_epoch;
-        const daysSince = Math.max(0, (now - epochMs) / (1000 * 60 * 60 * 24));
-        const recencyScore = 1 / (1 + daysSince);
-
-        const finalScore = 0.7 * normalizedBM25 + 0.3 * recencyScore;
-        return { result: r, finalScore };
-      });
-
-      scored.sort((a, b) => b.finalScore - a.finalScore);
-      results = scored.map(s => s.result);
-    }
-
-    logToFile(HOOK_NAME, 'DEBUG', `FTS5 search returned ${results.length} results for "${keywords}"`);
-    return results;
-  } catch (err) {
-    logToFile(HOOK_NAME, 'WARN', 'FTS5 search failed, skipping', err);
-    return [];
-  }
-}
-
-/**
- * Get recent observations as fallback context.
- * Returns empty array if database is unavailable.
- *
- * @param db - Shared database handle (caller manages lifecycle)
- */
-function getRecent(scope: Scope, db: import('better-sqlite3').Database | null): Observation[] {
-  try {
-    if (!db) {
-      logToFile(HOOK_NAME, 'WARN', 'Database unavailable, skipping recent observations');
-      return [];
-    }
-
-    const { getRecentObservations } = require('../db/observations.js') as typeof import('../db/observations.js');
-
-    const project = scope.type === 'project' ? scope.name : undefined;
-    const recent = getRecentObservations(db, 8, project);
-    logToFile(HOOK_NAME, 'DEBUG', `Got ${recent.length} recent observations`);
-    return recent;
-  } catch (err) {
-    logToFile(HOOK_NAME, 'WARN', 'Recent observations query failed, skipping', err);
-    return [];
-  }
-}
 
 // =============================================================================
 // Main hook
@@ -337,6 +128,8 @@ runHook(HOOK_NAME, async (input) => {
   let gsdState: GsdState | undefined;
   let gsdPlanMustHaves: string[] | undefined;
   let gsdRequirementStatus: { complete: number; total: number } | undefined;
+  let postCompaction = false;
+  let checkpointGsd: GsdCheckpointState | undefined;
 
   if (scope.type === 'project') {
     try {
@@ -344,24 +137,25 @@ runHook(HOOK_NAME, async (input) => {
       if (fs.existsSync(statePath)) {
         gsdState = readGsdState(scope.path);
 
-        if (gsdState.active && gsdState.position) {
+        const pos = gsdState?.position;
+        if (gsdState.active && pos) {
           // Extract plan must-haves if there's an active plan
-          if (gsdState.position.plan > 0) {
+          if (pos.plan > 0) {
             const phasesDir = path.join(scope.path, '.planning', 'phases');
-            const planFile = findActivePlanFile(phasesDir, gsdState.position.phase, gsdState.position.plan);
+            const planFile = findActivePlanFile(phasesDir, pos.phase, pos.plan);
             if (planFile) {
               gsdPlanMustHaves = extractPlanMustHaves(planFile);
             }
           }
 
           // Count requirement completion for current phase
-          const currentPhase = gsdState.phases.find(p => p.number === gsdState!.position!.phase);
+          const currentPhase = gsdState.phases.find(p => p.number === pos.phase);
           if (currentPhase?.requirements.length) {
             const reqPath = path.join(scope.path, '.planning', 'REQUIREMENTS.md');
             gsdRequirementStatus = countCompletedRequirements(currentPhase.requirements, reqPath);
           }
 
-          logToFile(HOOK_NAME, 'DEBUG', `GSD active: Phase ${gsdState.position.phase}, plan ${gsdState.position.plan}`);
+          logToFile(HOOK_NAME, 'DEBUG', `GSD active: Phase ${pos.phase}, plan ${pos.plan}`);
         }
       }
     } catch (err) {
@@ -377,7 +171,7 @@ runHook(HOOK_NAME, async (input) => {
 
   try {
     // 5. Get recent observations early — needed for both context AND hologram fallback
-    const recentObservations = getRecent(scope, db);
+    const recentObservations = await getRecent(scope, db);
 
     // 5.3. Read incremental state for context enrichment
     let decisions: Decision[] = [];
@@ -391,7 +185,7 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
-    // 5.5. Feature 3 — Post-compact active file bridge
+    // 5.5. Feature 3 — Post-compact active file bridge + GSD restoration
     let boostFiles: string[] | undefined;
     let boostNewCount = 0;
     let boostAppliedAt = 0;
@@ -399,18 +193,42 @@ runHook(HOOK_NAME, async (input) => {
       try {
         const { getCheckpointState } = await import('../db/checkpoint.js');
         const cpState = getCheckpointState(db, sessionId);
-        if (cpState?.active_files?.length) {
+        if (cpState) {
           const STALENESS_MS = 30 * 60 * 1000; // 30 minutes
-          const MAX_BOOST_TURNS = 3;
           const isRecent = (Date.now() - cpState.last_epoch) < STALENESS_MS;
-          const turnsRemaining = !cpState.boost_applied_at
-            || (cpState.boost_turn_count ?? 0) < MAX_BOOST_TURNS;
 
-          if (isRecent && turnsRemaining) {
-            boostFiles = cpState.active_files;
-            boostNewCount = (cpState.boost_turn_count ?? 0) + 1;
-            boostAppliedAt = cpState.boost_applied_at ?? Date.now();
-            logToFile(HOOK_NAME, 'DEBUG', `Post-compact boost: ${boostFiles.length} files, turn ${boostNewCount}/${MAX_BOOST_TURNS} (pending sidecar result)`);
+          // Detect post-compact state (first prompt after compact)
+          if (isRecent && (!cpState.boost_applied_at || (cpState.boost_turn_count ?? 0) === 0)) {
+            postCompaction = true;
+            logToFile(HOOK_NAME, 'DEBUG', 'Post-compact detected — will render unified resume section');
+          }
+
+          // Active file bridge (existing logic)
+          if (cpState.active_files?.length) {
+            const MAX_BOOST_TURNS = 3;
+            const turnsRemaining = !cpState.boost_applied_at
+              || (cpState.boost_turn_count ?? 0) < MAX_BOOST_TURNS;
+
+            if (isRecent && turnsRemaining) {
+              boostFiles = cpState.active_files;
+              boostNewCount = (cpState.boost_turn_count ?? 0) + 1;
+              boostAppliedAt = cpState.boost_applied_at ?? Date.now();
+              logToFile(HOOK_NAME, 'DEBUG', `Post-compact boost: ${boostFiles.length} files, turn ${boostNewCount}/${MAX_BOOST_TURNS} (pending sidecar result)`);
+            }
+          }
+        }
+
+        // Load checkpoint GSD as fallback for unified resume section
+        if (postCompaction && scope.type === 'project') {
+          try {
+            const { loadLatestCheckpoint } = await import('../checkpoint/loader.js');
+            const loaded = loadLatestCheckpoint(scope.path, { sections: ['gsd'], resumeMode: false });
+            if (loaded?.checkpoint?.gsd?.active) {
+              checkpointGsd = loaded.checkpoint.gsd;
+              logToFile(HOOK_NAME, 'DEBUG', `Checkpoint GSD loaded: phase ${checkpointGsd.phase}, ${checkpointGsd.completion_pct}%`);
+            }
+          } catch (err) {
+            logToFile(HOOK_NAME, 'DEBUG', 'Checkpoint GSD load failed (non-fatal)', err);
           }
         }
       } catch (err) {
@@ -420,7 +238,7 @@ runHook(HOOK_NAME, async (input) => {
 
     // 6. Query hologram sidecar (with degradation fallback using recent file paths)
     const recentFiles = extractRecentFiles(recentObservations);
-    const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope, db, boostFiles);
+    const hologramResult = await queryHologram(promptText, sessionId, recentFiles, scope, db, boostFiles, config);
 
     // 6.1. Commit boost turn when hologram returned any result (including fallback sources)
     if (hologramResult !== null && boostFiles && db) {
@@ -436,9 +254,9 @@ runHook(HOOK_NAME, async (input) => {
     // 6.5. Persist hologram pressure scores to DB so wrapper/pre-flush sees fresh data
     if (hologramResult && db) {
       try {
-        const { upsertPressureScore } = await import('../db/pressure.js');
+        const { batchUpsertPressureScores } = await import('../db/pressure.js');
 
-        const project = scope.type === 'project' ? scope.name : '__global__';
+        const project = scope.type === 'project' ? scope.name : undefined;
         const nowEpoch = Date.now();
 
         const entries: Array<{ list: typeof hologramResult.hot; temp: 'HOT' | 'WARM' | 'COLD'; pressure: number }> = [
@@ -447,10 +265,10 @@ runHook(HOOK_NAME, async (input) => {
           { list: hologramResult.cold, temp: 'COLD', pressure: 0.1 },
         ];
 
-        let persisted = 0;
+        const scores: Array<{ file_path: string; project?: string; raw_pressure: number; temperature: 'HOT' | 'WARM' | 'COLD'; last_accessed_epoch: number; decay_rate: number }> = [];
         for (const { list, temp, pressure } of entries) {
           for (const file of list) {
-            upsertPressureScore(db, {
+            scores.push({
               file_path: file.path,
               project,
               raw_pressure: file.raw_pressure ?? pressure,
@@ -458,11 +276,11 @@ runHook(HOOK_NAME, async (input) => {
               last_accessed_epoch: nowEpoch,
               decay_rate: 0.05,
             });
-            persisted++;
           }
         }
 
-        logToFile(HOOK_NAME, 'DEBUG', `Persisted ${persisted} pressure scores to DB`);
+        batchUpsertPressureScores(db, scores);
+        logToFile(HOOK_NAME, 'DEBUG', `Persisted ${scores.length} pressure scores to DB`);
       } catch (err) {
         logToFile(HOOK_NAME, 'WARN', 'Failed to persist hologram pressure scores (non-fatal)', err);
       }
@@ -508,8 +326,7 @@ runHook(HOOK_NAME, async (input) => {
     if (gsdState?.active && gsdState.position && scope.type === 'project') {
       try {
         const { writeCrossPhaseSummary } = await import('../gsd/cross-phase-writer.js');
-        const claudexDir = path.join(scope.path, 'Claudex');
-        const wrote = writeCrossPhaseSummary(scope.path, claudexDir);
+        const wrote = writeCrossPhaseSummary(scope.path, scope.path);
         if (wrote) {
           logToFile(HOOK_NAME, 'DEBUG', 'Cross-phase summary written');
         }
@@ -518,8 +335,36 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
+    // 6.10. Write Claudex metrics to STATE.md (debounced)
+    if (gsdState?.active && gsdState.position && scope.type === 'project' && db) {
+      try {
+        const stateMdPath = path.join(scope.path, '.planning', 'STATE.md');
+        let shouldWriteMetrics = true;
+        try {
+          const stat = fs.statSync(stateMdPath);
+          const METRICS_STALENESS_MS = 5 * 60 * 1000;
+          if (Date.now() - stat.mtimeMs < METRICS_STALENESS_MS) {
+            shouldWriteMetrics = false;
+            logToFile(HOOK_NAME, 'DEBUG', 'Claudex metrics debounced — STATE.md written <5min ago');
+          }
+        } catch {
+          shouldWriteMetrics = false;
+        }
+
+        if (shouldWriteMetrics) {
+          const { writeClaudexMetricsToState } = await import('../gsd/state-sync.js');
+          const wrote = writeClaudexMetricsToState(scope.path, scope.name, db);
+          if (wrote) {
+            logToFile(HOOK_NAME, 'DEBUG', 'Claudex metrics written to STATE.md');
+          }
+        }
+      } catch (err) {
+        logToFile(HOOK_NAME, 'WARN', 'Claudex metrics write failed (non-fatal)', err);
+      }
+    }
+
     // 7. Query FTS5 search (keywords from prompt)
-    const ftsResults = queryFts5(promptText, scope, db);
+    const ftsResults = await queryFts5(promptText, scope, db);
 
     // 7.3. Bump access counts for observations that appeared in search results
     if (ftsResults.length > 0 && db) {
@@ -546,6 +391,8 @@ runHook(HOOK_NAME, async (input) => {
         gsdPlanMustHaves,
         gsdRequirementStatus,
         scope,
+        postCompaction: postCompaction || undefined,
+        checkpointGsd,
       },
       { maxTokens: CONTEXT_TOKEN_BUDGET },
     );
