@@ -1,6 +1,6 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-# Claudex v2
+# Claudex
 
 > Persistent memory, incremental checkpointing, and context-aware intelligence for Claude Code.
 
