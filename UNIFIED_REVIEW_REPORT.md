@@ -1,9 +1,9 @@
 # Unified Code Review Report
 
-**Scope:** uncommitted changes (staged + unstaged) — 34 files, 2100 lines changed
-**Date:** 2026-02-28 18:30 UTC
+**Scope:** Uncommitted changes — Incremental Checkpointing (9 files, 262 lines)
+**Date:** 2026-03-05 22:10 UTC
 **Grade:** C
-**Perspectives:** Quality [OK], Acceptance [OK], Security [OK], General [FAILED: timeout after 18m]
+**Perspectives:** Quality [OK], Acceptance [OK], Security [OK], General [OK], Reuse [OK], Efficiency [OK], Code-Health [OK]
 
 ## Grading Rubric
 
@@ -19,65 +19,60 @@
 
 ## Critical
 
-### [ACCEPTANCE] Unified post-compact can suppress all context output
-**File:** src/lib/context-assembler.ts:101
-**Issue:** When `useUnifiedPath` is true but `buildUnifiedResumeSection()` returns empty string (e.g., active GSD with `position=null`), no unified content is appended AND the standard assembly path is skipped. The function returns only the header — effectively no context output.
-**Recommendation:** Compute unified content first and only enable unified path if it is non-empty; otherwise fall back to standard assembly path.
+### [ACCEPTANCE] Threshold state doesn't account for window size changes
+**File:** src/hooks/post-tool-use.ts:229
+**Issue:** `.incremental-cp.json` stores `last_threshold_index` but not the window size used to compute thresholds. If window size changes mid-session (e.g., model detection returns different result, or config is updated), `crossedIndex` from the new threshold array can never exceed the stored index, suppressing all future incremental checkpoints.
+**Recommendation:** Persist `window_size` in `.incremental-cp.json` and reset `last_threshold_index` when window size changes.
 
 ---
 
 ## Recommended
 
-### [QUALITY] Public type exports removed from checkpoint/writer
-**File:** src/checkpoint/writer.ts:54
-**Issue:** Public type exports were removed (e.g., `WriteCheckpointInput`, `WriteCheckpointResult`). This changes the module contract and breaks typed consumers that import these names.
-**Recommendation:** Keep deprecated exports for a transition period, or verify no external consumers exist before removing.
+### [QUALITY][ACCEPTANCE][GENERAL][REUSE][CODE-HEALTH] Config override inconsistency across hooks
+**File:** src/hooks/post-tool-use.ts:201, src/hooks/pre-compact.ts:402
+**Issue:** `checkpoint.window_size` config override is passed to `detectWindowSize()` in `user-prompt-submit` but omitted in `post-tool-use` and `pre-compact`. Different hooks can compute different window sizes for the same session.
+**Recommendation:** Centralize window resolution in one shared helper (e.g., `resolveCheckpointWindowSize(config, transcriptPath)`) and call it from all three hooks.
 
-### [QUALITY][ACCEPTANCE] searchConsensus export removed without compatibility shim
-**File:** src/db/search.ts:289
-**Issue:** `searchConsensus` changed from exported to internal with no compatibility shim. Existing consumers importing this API will break.
-**Recommendation:** Keep deprecated wrapper/re-export for a transition period, or explicitly version-break with migration notes.
+### [QUALITY][GENERAL][SECURITY] Window detection assumes capability, not activation
+**File:** src/lib/token-gauge.ts:227
+**Issue:** `detectWindowSize()` maps model family to 1M capability even when 1M may not be active (requires beta header). For Opus/Sonnet sessions without 1M activation, window size is overstated, utilization is underreported, and checkpoint triggers fire late.
+**Recommendation:** Default to 200k for ambiguous cases (safe: earlier checkpoints). Only return 1M when explicitly configured via `checkpoint.window_size`, or when heuristic confirms 1M (tokens exceed 195k).
 
-### [QUALITY][ACCEPTANCE] Source attribution misleading when unified append fails
-**File:** src/lib/context-assembler.ts:119
-**Issue:** `contributedSources.push('hologram')` and `push('session')` happen unconditionally after `tryAppend(unified, 'gsd')`, regardless of whether the append succeeded. This produces misleading source metadata.
-**Recommendation:** Only add source tags if the unified section append actually succeeds (check `tryAppend` return value).
+### [QUALITY][GENERAL][REUSE][EFFICIENCY][CODE-HEALTH] Double transcript read on hot path
+**File:** src/hooks/post-tool-use.ts:201, src/lib/token-gauge.ts:213
+**Issue:** `detectWindowSize()` and `readTokenGauge()` each perform full synchronous `readFileSync` + JSONL parse of the transcript. On `post-tool-use` (fires every tool call), this doubles I/O on the hottest path.
+**Recommendation:** Add a single-pass API (e.g., `readTokenGaugeWithDetection(transcriptPath, configOverride?)`) that reads once and returns both window size and gauge reading. `extractLastUsage` and `extractModelName` share identical BOM-strip/split/reverse-scan logic — extract a common backward scanner.
 
-### [QUALITY] Metrics writes silently skipped on exception
-**File:** src/hooks/user-prompt-submit.ts:354
-**Issue:** Any exception during STATE.md stat/read forces `shouldWriteMetrics=false`, silently skipping metrics writes instead of degrading gracefully like nearby non-fatal paths.
-**Recommendation:** Narrow the catch scope or degrade gracefully (write metrics even if STATE.md read fails).
+### [GENERAL][EFFICIENCY] Aggressive thresholds for 200k sessions
+**File:** src/lib/token-gauge.ts:61
+**Issue:** Percentage-based thresholds (15%, 30%, ...) apply to all window sizes. For 200k, this means 6 incremental checkpoints starting at 30k tokens — a major behavior change from the previous single checkpoint at 167k. Increases I/O and storage for sessions that don't need it.
+**Recommendation:** Gate dense thresholds to large windows (>200k), or enforce a minimum absolute token delta between checkpoints (e.g., 100k minimum).
 
-### [ACCEPTANCE] Post-compact detection can repeat across multiple prompts
-**File:** src/hooks/user-prompt-submit.ts:201
-**Issue:** `postCompaction` detection can repeat when `active_files` is empty because boost state is only committed when `boostFiles` exists. Post-compact mode remains true until staleness timeout.
-**Recommendation:** Mark post-compact as consumed even when there are no boost files (update checkpoint state with turn count 1 after first render).
+### [GENERAL] Missing lifecycle tests
+**File:** src/checkpoint/writer.ts:346
+**Issue:** No tests for: (1) incremental trigger skipping `archiveStateFiles`, (2) threshold crossing behavior in `post-tool-use` with `.incremental-cp.json`, (3) config override propagation consistency across hooks.
+**Recommendation:** Add targeted integration tests for the new archive semantics and threshold advancement logic.
 
-### [SECURITY] STATE.md write path lacks symlink/path safety checks
-**File:** src/hooks/user-prompt-submit.ts:360
-**Issue:** New automatic write paths to `STATE.md` through `writeClaudexMetricsToState` use `fs.writeFileSync` + rename without symlink/path safety checks. A crafted `.planning/STATE.md.claudex-tmp` symlink could clobber unintended files.
-**Recommendation:** Harden writes with `lstat`/`realpath` checks, reject symlinks, create temp files with exclusive flags, verify destination remains inside `<project>/.planning`.
-
-### [SECURITY] Raw stdin preview leaked in error logs
-**File:** src/hooks/_infrastructure.ts:34
-**Issue:** Invalid stdin JSON throws an error containing `raw.slice(0, 200)`, which is logged by `runHook` error handling. This can leak prompt content/secrets.
-**Recommendation:** Remove raw payload echo from exception text; log only length/schema error metadata.
+### [SECURITY] Unarchived state retains sensitive content longer
+**File:** src/checkpoint/writer.ts:343
+**Issue:** Incremental checkpoints no longer archive/reset live state files. Secrets in decisions/questions persist in state files for the full session, increasing exposure window. Subsequent prompts continue to inject this state.
+**Recommendation:** Add TTL/size caps for active state files, or scrub sensitive fields before reinjection. Consider periodic state rotation independent of checkpoint archiving.
 
 ---
 
 ## Observations
 
-### [QUALITY] Unsafe never cast in exhaustive switch
-**File:** src/gsd/phase-transition-cli.ts:234
-**Issue:** The exhaustive default branch casts `never` to `{ event: string }`, weakening strict exhaustiveness guarantees.
-**Recommendation:** Use a proper exhaustive check helper that throws at runtime.
+### [CODE-HEALTH] Writer embeds orchestration policy
+**File:** src/checkpoint/writer.ts:346
+**Issue:** `writeCheckpoint` now contains `if (trigger !== 'incremental')` — a persistence module depends on higher-level lifecycle semantics.
+**Recommendation:** Move archival policy to callers or pass an explicit `archiveState` option. If policy stays in writer, prefer an allowlist of "final" triggers over a negative check.
 
-### [QUALITY] ContextUtilization export removed
-**File:** src/wrapper/context-monitor.ts:12
-**Issue:** `ContextUtilization` is no longer exported while typed imports may still exist in consumer code/tests.
-**Recommendation:** Verify no consumers depend on this type before removing the export.
+### [GENERAL][REUSE] Stale comments referencing old constants
+**File:** src/hooks/post-tool-use.ts:28
+**Issue:** Comments still reference `INCREMENTAL_THRESHOLDS` as if it were the runtime source. Post-refactor, runtime uses dynamic `getIncrementalThresholds(windowSize)`.
+**Recommendation:** Update comments to match current behavior.
 
-### [SECURITY] Checkpoint content injected without sanitization
-**File:** src/hooks/user-prompt-submit.ts:224
-**Issue:** Checkpoint-GSD fallback loads persisted checkpoint content and injects it into unified resume context without content sanitization. A poisoned checkpoint could contain instruction-like text.
-**Recommendation:** Treat checkpoint strings as untrusted: sanitize markdown control content, constrain field length, prefix with data-only framing.
+### [REUSE] Test helpers not extended for new tests
+**File:** tests/lib/token-gauge.test.ts:303
+**Issue:** New `detectWindowSize` tests inline assistant JSON payloads instead of extending `makeAssistantLine` to accept a `model` parameter.
+**Recommendation:** Add `makeAssistantLineWithModel(inputTokens, model, outputTokens?)` helper and use it.

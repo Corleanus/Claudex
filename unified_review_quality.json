@@ -1,61 +1,45 @@
 {
   "assessments": {
-    "naming_quality": 86,
-    "error_consistency": 72,
-    "abstraction_fitness": 84,
-    "logic_clarity": 74,
-    "ai_generated_debt": 70,
-    "type_safety": 62,
-    "contract_coherence": 54
+    "naming_quality": 84,
+    "error_consistency": 86,
+    "abstraction_fitness": 70,
+    "logic_clarity": 62,
+    "ai_generated_debt": 76,
+    "type_safety": 85,
+    "contract_coherence": 56
   },
   "findings": [
     {
-      "id": "quality-101",
+      "id": "quality-001",
       "dimension": "contract_coherence",
-      "file": "src/checkpoint/writer.ts",
-      "line": 54,
+      "file": "src/lib/token-gauge.ts",
+      "line": 227,
       "severity": "high",
-      "description": "Public type exports were removed (e.g., WriteCheckpointInput/WriteCheckpointResult). This changes the module contract and breaks typed consumers that import these names."
+      "description": "Window size is inferred from model family capability, not actual active context limit. For Sonnet/Opus sessions without 1M activation, this can overstate window size (1M vs 200k), under-report utilization, and delay checkpoint triggers."
     },
     {
-      "id": "quality-102",
+      "id": "quality-002",
       "dimension": "contract_coherence",
-      "file": "src/db/search.ts",
-      "line": 289,
+      "file": "src/hooks/post-tool-use.ts",
+      "line": 201,
       "severity": "medium",
-      "description": "searchConsensus changed from exported to internal with no compatibility shim; any direct caller loses API access."
+      "description": "The new global config override (checkpoint.window_size) is not applied here, while it is applied in user-prompt-submit. This creates inconsistent checkpoint behavior across hooks for the same session/config."
     },
     {
-      "id": "quality-103",
-      "dimension": "logic_clarity",
-      "file": "src/lib/context-assembler.ts",
-      "line": 119,
+      "id": "quality-003",
+      "dimension": "contract_coherence",
+      "file": "src/hooks/pre-compact.ts",
+      "line": 402,
       "severity": "medium",
-      "description": "In unified mode, source attribution is updated even when tryAppend(unified, 'gsd') may fail due token budget, which can produce misleading source metadata."
+      "description": "Like post-tool-use, this hook calls detectWindowSize without passing checkpoint.window_size override, so window-size selection is inconsistent with user-prompt-submit."
     },
     {
-      "id": "quality-104",
-      "dimension": "error_consistency",
-      "file": "src/hooks/user-prompt-submit.ts",
-      "line": 354,
-      "severity": "medium",
-      "description": "Any exception during STATE.md stat/read forces shouldWriteMetrics=false, silently skipping metrics writes instead of degrading gracefully like nearby non-fatal paths."
-    },
-    {
-      "id": "quality-105",
-      "dimension": "type_safety",
-      "file": "src/gsd/phase-transition-cli.ts",
-      "line": 234,
+      "id": "quality-004",
+      "dimension": "abstraction_fitness",
+      "file": "src/hooks/post-tool-use.ts",
+      "line": 201,
       "severity": "low",
-      "description": "The exhaustive default branch casts never to { event: string }, which weakens strict exhaustiveness guarantees and introduces an unnecessary unsafe cast."
-    },
-    {
-      "id": "quality-106",
-      "dimension": "type_safety",
-      "file": "src/wrapper/context-monitor.ts",
-      "line": 12,
-      "severity": "high",
-      "description": "ContextUtilization is no longer exported while typed imports still exist in consumer code/tests, weakening type-contract stability and likely breaking strict type-check workflows."
+      "description": "Hot-path code now performs two full transcript reads (detectWindowSize and readTokenGauge) on every tool-use event. This increases I/O overhead and may affect hook latency on large transcripts."
     }
   ]
 }
