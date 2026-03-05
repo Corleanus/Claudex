@@ -2,6 +2,72 @@
 
 All notable changes to Claudex v2.
 
+## [1.0.0] - 2026-03-05
+
+### Public Release
+- Added AGPL-3.0 license
+- Added `npx claudex setup` CLI for automated installation
+- Added config.example.json with documented defaults
+- Added GitHub issue templates (bug report, feature request)
+- Updated README with prerequisites, quick-start guide, and feature status
+- Updated CHANGELOG with complete version history
+
+## [0.5.0] - 2026-03-04
+
+### Incremental Checkpointing for 1M Context Windows
+- Added conservative window size detection (default 200k, upgrade to 1M on heuristic evidence)
+- Added single-pass `readTokenGaugeWithDetection()` API eliminating double transcript reads
+- Added gated incremental thresholds (2 checkpoints for 200k, 6 for 1M)
+- Added threshold state tracking with window size change detection
+- Incremental checkpoints skip state archival for full session accumulation
+- Config override `checkpoint.window_size` applied consistently across all hooks
+- Resolved 14 code quality findings from unified review
+- 43 new lifecycle tests
+
+## [0.4.0] - 2026-02-27
+
+### Memory System Upgrade (C+ → A)
+- Implemented stratified decay engine with tier-specific half-lives
+- Added quality-gated observation capture (filters trivial/noisy observations)
+- Added importance-based observation filtering
+- Observation flat-file mirror killed — DB is sole authoritative store
+- Token gauge counts cached tokens correctly
+- Replaced console.error with structured logger throughout
+- Added log rotation at 5MB
+- Added systemMessage to HookStdout type
+- Lowered checkpoint threshold from 80% to 75% for auto-compact runway
+- Fixed DB tests with proper migration runner
+- 35 new tests, grade A achieved
+
+## [0.3.0] - 2026-02-24
+
+### GSD Integration (Phase-Aware Context)
+- Added GSD state reader module (reads `.planning/` directory structure)
+- Added phase relevance engine for context-aware file boosting
+- Added cross-phase summary writer
+- Added phase transition handlers and CLI entry point
+- Wired GSD context into user-prompt-submit pipeline
+- Added `[phase]` annotation to context assembler hot/warm sections
+- Extended ContextSources with GSD fields and buildGsdSection
+- Added plan file analysis: findActivePlanFile, extractPlanMustHaves, countCompletedRequirements
+- 8 phases implemented across 12 work packages
+
+## [0.2.0] - 2026-02-19
+
+### Context Management v3
+- Implemented token gauge for context window utilization tracking
+- Added checkpoint writer with full state capture (Phase 10)
+- Added compact checkpoints with hologram project awareness and post-compact bridge
+- Added local pressure scoring in post-tool-use hook
+- Improved pre-compact reasoning chain capture
+- Added structured logger replacing console.error throughout
+- Hardening pass resolving all CRITICALs, HIGHs, and 12 MEDIUMs from Codex review
+- Added sidecar `__main__.py` for Python directory execution
+- Added hologram integration tests with real Python sidecar
+- Phases 7-9: hologram integration, data governance, hardening
+- Session-end close all entries + smart hologram retry
+- 3 Codex-accepted fixes: boost counter, LRU cache, array validation
+
 ## [0.1.0] - 2026-02-15
 
 ### Phase 4: Polish, Observability & End-to-End Verification

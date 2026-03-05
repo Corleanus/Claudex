@@ -1,7 +1,10 @@
 {
   "name": "claudex",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
+  "bin": {
+    "claudex": "./dist/setup.mjs"
+  },
   "scripts": {
     "build": "npx tsx build.ts",
     "typecheck": "tsc --noEmit",

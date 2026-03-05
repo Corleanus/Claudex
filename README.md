@@ -1,12 +1,33 @@
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
 # Claudex v2
 
-> Infinite context, persistent memory, and structural enforcement for Claude Code.
+> Persistent memory, incremental checkpointing, and context-aware intelligence for Claude Code.
 
 ## What is Claudex?
 
 Claudex is a hook-based memory and context system for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It intercepts every session lifecycle event -- session start, prompt submission, tool use, compaction, and session end -- to automatically capture observations, preserve reasoning chains, and inject relevant context back into the conversation. The result is persistent memory across sessions: Claude Code gains awareness of past decisions, recently touched files, and project-specific knowledge, even after context compaction wipes the conversation window.
 
 The system operates entirely through Claude Code's hook protocol. Six hooks feed into a SQLite database with FTS5 full-text search, a Python TCP sidecar for pressure-based attention routing, and a flat-file mirror that keeps all data human-readable. When any component is unavailable, the system degrades gracefully through three tiers -- never crashing, never blocking the user.
+
+For 1M context window users, incremental checkpointing captures progressive snapshots throughout the session, preventing catastrophic context loss during auto-compaction.
+
+**Highlights:**
+- Incremental checkpointing for 1M+ context windows
+- GSD phase-aware context injection
+- Memory system with stratified decay and quality gating
+- 1200+ tests passing
+
+## Quick Start
+
+```bash
+git clone https://github.com/Corleanus/Claudex.git
+cd Claudex
+npm install
+npx claudex setup
+```
+
+That's it. The setup command creates `~/.claudex/`, writes default config, and registers all hooks with Claude Code. Start a new Claude Code session and Claudex is active.
 
 ## Architecture
 
@@ -34,13 +55,21 @@ Claude Code ──stdin/stdout──> Hook Processes (Node.js, ephemeral)
 - **Flat-File Mirroring** -- every DB record mirrored to human-readable markdown files
 - **Context Assembler** -- priority-ranked, token-budgeted context injection into Claude's input
 - **Wrapper Layer** -- context window monitoring with configurable warn/flush thresholds
+- **Incremental Checkpointing** -- progressive context snapshots at configurable thresholds (2 for 200k, 6 for 1M windows) with conservative window detection
+- **GSD Phase Awareness** -- reads `.planning/` state to inject phase-relevant context (active plan, requirements, progress)
 
-## Setup
+## Prerequisites
 
-### Prerequisites
+- **Node.js** >= 20.0.0
+- **C++ Build Tools** (required for better-sqlite3 native module):
+  - **Windows:** Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with "Desktop development with C++" workload, or run `npm install -g windows-build-tools` from an admin terminal
+  - **macOS:** `xcode-select --install`
+  - **Linux:** `sudo apt-get install build-essential` (Debian/Ubuntu) or equivalent
+- **Python 3.x** (optional — only needed for the hologram pressure-scoring sidecar)
 
-- Node.js >= 20.0.0
-- Python 3.x (for hologram sidecar)
+## Manual Setup
+
+> **Prefer the automated setup:** `npx claudex setup` handles everything below automatically. Use manual setup only if you need custom configuration.
 
 ### Installation
 
@@ -451,3 +480,7 @@ Claudex/
 - **Hooks are ephemeral.** Each hook invocation is a fresh Node.js process. Module-level state resets every time. Cross-invocation state uses the filesystem (cooldown files, port/PID files) or SQLite.
 - **The sidecar is long-lived.** Spawned detached, outlives hook processes. Port/PID files coordinate discovery. Orphan detection cleans up stale state.
 - **Timestamps are always milliseconds.** `timestamp_epoch` fields throughout the codebase are epoch milliseconds, not seconds.
+
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 — see the [LICENSE](LICENSE) file for details. You are free to use, modify, and distribute this software, provided that all derivative works are also licensed under AGPL-3.0.

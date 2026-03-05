@@ -13,6 +13,7 @@ const hookFiles = fs.readdirSync(HOOKS_DIR)
 // Additional CLI entry points (not hooks, but built alongside them)
 const cliEntryPoints = [
   path.join('src', 'gsd', 'phase-transition-cli.ts'),
+  path.join('src', 'cli', 'setup.ts'),
 ].filter(f => fs.existsSync(f));
 
 const allEntryPoints = [...hookFiles, ...cliEntryPoints];

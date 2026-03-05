@@ -1,0 +1,47 @@
+{
+  "_comment": "Copy this file to ~/.claudex/config.json and customize. All fields are optional — missing fields use defaults.",
+  "hologram": {
+    "enabled": false,
+    "python_path": "python",
+    "sidecar_path": "",
+    "timeout_ms": 2000,
+    "health_interval_ms": 30000,
+    "project_patterns": ["*.md", "*.ts", "*.py", "**/*.md", "**/*.ts", "**/*.py"],
+    "project_exclude": [
+      "node_modules/**", ".git/**", "dist/**", "build/**", "coverage/**",
+      "**/*.test.ts", "**/*.spec.ts", "**/*.test.tsx", "**/*.spec.tsx",
+      "**/test_*.py", "**/*_test.py", "**/tests/**"
+    ],
+    "project_max_files": 200
+  },
+  "database": {
+    "path": "",
+    "wal_mode": true
+  },
+  "hooks": {
+    "latency_budget_ms": 3000,
+    "context_token_budget": 4000
+  },
+  "observation": {
+    "enabled": true,
+    "redact_secrets": true,
+    "retention_days": 90
+  },
+  "wrapper": {
+    "enabled": true,
+    "warnThreshold": 0.70,
+    "flushThreshold": 0.80,
+    "cooldownMs": 30000
+  },
+  "vector": {
+    "enabled": false,
+    "provider": "fts5",
+    "openai": {
+      "apiKey": "",
+      "model": ""
+    }
+  },
+  "checkpoint": {
+    "window_size": null
+  }
+}
