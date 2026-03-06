@@ -181,13 +181,12 @@ function patchSettings(repoRoot: string): { patched: string[]; settingsPath: str
   }
   const hooks = settings.hooks as Record<string, unknown[]>;
 
-  const ext = process.platform === 'win32' ? '.cmd' : '.sh';
   const patched: string[] = [];
 
   for (const [event, wrapperNames] of Object.entries(HOOK_MAP)) {
     const hookCommands = wrapperNames.map(name => ({
       type: 'command' as const,
-      command: forwardSlashes(path.join(repoRoot, 'hooks', `${name}${ext}`)),
+      command: `node "${forwardSlashes(path.join(repoRoot, 'dist', `${name}.mjs`))}"`,
     }));
 
     if (!Array.isArray(hooks[event])) {
