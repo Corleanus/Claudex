@@ -21,13 +21,11 @@ import { rescoreWithFallback } from '../../src/hologram/degradation.js';
 import type { HologramClient } from '../../src/hologram/client.js';
 import type { ClaudexConfig, HologramResponse, ScoredFile, SidecarResponse } from '../../src/shared/types.js';
 import { HologramUnavailableError } from '../../src/shared/errors.js';
-import { MigrationRunner } from '../../src/db/migrations.js';
-import { migration_1 } from '../../src/db/schema.js';
-import { migration_2, migration_4 } from '../../src/db/search.js';
-import { migration_3 } from '../../src/db/schema-phase2.js';
 import { upsertPressureScore } from '../../src/db/pressure.js';
 import { assembleContext } from '../../src/lib/context-assembler.js';
 import type { ContextSources } from '../../src/shared/types.js';
+import { setupDb } from '../helpers/setup-db.js';
+import { expectNoWarmSection } from '../helpers/fixtures.js';
 
 // Mock logger to prevent filesystem writes during tests
 vi.mock('../../src/shared/logger.js', () => ({
@@ -166,28 +164,6 @@ async function stopSidecar(info: SidecarInfo): Promise<void> {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-function setupDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_versions (
-      id INTEGER PRIMARY KEY,
-      version INTEGER UNIQUE NOT NULL,
-      applied_at TEXT NOT NULL
-    )
-  `);
-
-  const runner = new MigrationRunner(db);
-  migration_1(runner);
-  migration_2(runner);
-  migration_3(runner);
-  migration_4(runner);
-
-  return db;
-}
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'claudex-hologram-test-'));
@@ -624,8 +600,7 @@ describe('Hologram Integration (Real Sidecar)', { timeout: 30_000 }, () => {
       expect(assembled.tokenEstimate).toBeGreaterThan(0);
     });
 
-    it('WARM files from sidecar appear in Warm Context section', async () => {
-      // Build a HologramResponse with some files in WARM
+    it('warm section removed — WARM-only files no longer injected standalone', async () => {
       const hologramResponse: HologramResponse = {
         hot: [],
         warm: [
@@ -638,12 +613,10 @@ describe('Hologram Integration (Real Sidecar)', { timeout: 30_000 }, () => {
       const sources = buildContextSources(hologramResponse);
       const assembled = assembleContext(sources, { maxTokens: 4000 });
 
-      expect(assembled.markdown).toContain('Warm Context');
-      expect(assembled.markdown).toContain('deployment.md');
-      expect(assembled.markdown).toContain('testing.md');
+      expectNoWarmSection(assembled.markdown);
     });
 
-    it('mixed HOT and WARM produce both sections', async () => {
+    it('mixed HOT and WARM — only Active Focus produced (warm removed)', async () => {
       const hologramResponse: HologramResponse = {
         hot: [
           { path: 'architecture.md', raw_pressure: 0.92, temperature: 'HOT', system_bucket: 0, pressure_bucket: 44 },
@@ -659,8 +632,7 @@ describe('Hologram Integration (Real Sidecar)', { timeout: 30_000 }, () => {
 
       expect(assembled.markdown).toContain('Active Focus');
       expect(assembled.markdown).toContain('architecture.md');
-      expect(assembled.markdown).toContain('Warm Context');
-      expect(assembled.markdown).toContain('auth.md');
+      expectNoWarmSection(assembled.markdown);
     });
   });
 

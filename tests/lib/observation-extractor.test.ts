@@ -20,6 +20,10 @@ const SESSION_ID = 'test-session-001';
 const GLOBAL_SCOPE: Scope = { type: 'global' };
 const PROJECT_SCOPE: Scope = { type: 'project', name: 'my-app', path: '/work/my-app' };
 
+// Substantial file content (100+ chars after "File type: XX\n" prefix) for Read tests
+// that need non-null results. Trivial reads with short content are now filtered out.
+const SUBSTANTIAL_CONTENT = Array.from({ length: 8 }, (_, i) => `const value${i} = "${'x'.repeat(10)}";`).join('\n');
+
 // Freeze time so timestamp assertions are stable
 let dateSpy: ReturnType<typeof vi.spyOn>;
 
@@ -43,7 +47,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/src/index.ts' },
-        { output: 'const x = 1;\nconst y = 2;\nconst z = 3;\n' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -179,6 +183,54 @@ describe('extractObservation', () => {
     });
   });
 
+  describe('Grep tool — noise filter', () => {
+    it('filters zero-match greps — returns null', () => {
+      const result = extractObservation(
+        'Grep',
+        { pattern: 'nonexistent_pattern_xyz' },
+        { files: [] },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+
+    it('filters greps with no response — returns null', () => {
+      const result = extractObservation(
+        'Grep',
+        { pattern: 'something' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+
+    it('filters greps with empty string output — returns null', () => {
+      const result = extractObservation(
+        'Grep',
+        { pattern: 'something' },
+        { output: '' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+
+    it('returns observation for greps with matches > 0', () => {
+      const result = extractObservation(
+        'Grep',
+        { pattern: 'TODO' },
+        { files: ['src/a.ts'] },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.tool_name).toBe('Grep');
+      expect(result!.content).toContain('Matches: 1');
+    });
+  });
+
   describe('Glob tool', () => {
     it('filters Glob results with < 3 matches — returns null', () => {
       const result = extractObservation(
@@ -224,12 +276,49 @@ describe('extractObservation', () => {
     }
   });
 
+  describe('Read tool — noise filter', () => {
+    it('filters trivial reads with short content (< 100 chars) — returns null', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/index.ts' },
+        { output: 'const x = 1;' },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+
+    it('filters reads with no output (just "File type: TS") — returns null', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/index.ts' },
+        undefined,
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).toBeNull();
+    });
+
+    it('returns observation for reads with substantial content (100+ chars)', () => {
+      const result = extractObservation(
+        'Read',
+        { file_path: '/src/index.ts' },
+        { output: SUBSTANTIAL_CONTENT },
+        SESSION_ID,
+        GLOBAL_SCOPE,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.tool_name).toBe('Read');
+      expect(result!.category).toBe('discovery');
+    });
+  });
+
   describe('Read tool — dynamic importance', () => {
     it('assigns importance 3 for config files (.json)', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/src/package.json' },
-        { output: '{}' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -241,7 +330,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/src/config.yaml' },
-        { output: 'key: value' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -253,7 +342,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/src/pyproject.toml' },
-        { output: '[tool]' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -265,7 +354,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/src/.env' },
-        { output: 'KEY=value' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -277,7 +366,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/docs/README.md' },
-        { output: '# Title' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -289,7 +378,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/tests/utils.test.ts' },
-        { output: 'describe(...)' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -301,7 +390,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/tests/utils.spec.ts' },
-        { output: 'it(...)' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -313,7 +402,7 @@ describe('extractObservation', () => {
       const result = extractObservation(
         'Read',
         { file_path: '/src/index.ts' },
-        { output: 'const x = 1;' },
+        { output: SUBSTANTIAL_CONTENT },
         SESSION_ID,
         GLOBAL_SCOPE,
       );
@@ -324,7 +413,7 @@ describe('extractObservation', () => {
 
   describe('Read tool — truncation limit', () => {
     it('includes up to 8 lines of preview', () => {
-      const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n');
+      const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}: ${'x'.repeat(15)}`).join('\n');
       const result = extractObservation(
         'Read',
         { file_path: '/src/big.ts' },
@@ -335,7 +424,7 @@ describe('extractObservation', () => {
       expect(result).not.toBeNull();
       // Should contain lines 1-8 but not line 9
       expect(result!.content).toContain('line 8');
-      expect(result!.content).not.toContain('line 9\n');
+      expect(result!.content).not.toContain('line 9:');
       expect(result!.content).toContain('more lines');
     });
   });
@@ -675,7 +764,7 @@ describe('observation metadata', () => {
     const result = extractObservation(
       'Read',
       { file_path: '/src/index.ts' },
-      { output: 'content' },
+      { output: SUBSTANTIAL_CONTENT },
       SESSION_ID,
       GLOBAL_SCOPE,
     );
@@ -692,7 +781,7 @@ describe('observation metadata', () => {
     const read = extractObservation(
       'Read',
       { file_path: '/a.ts' },
-      { output: 'x' },
+      { output: SUBSTANTIAL_CONTENT },
       SESSION_ID,
       GLOBAL_SCOPE,
     );
@@ -763,7 +852,7 @@ describe('observation metadata', () => {
     const result = extractObservation(
       'Read',
       { file_path: '/src/index.ts' },
-      { output: 'content' },
+      { output: SUBSTANTIAL_CONTENT },
       SESSION_ID,
       PROJECT_SCOPE,
     );
@@ -776,7 +865,7 @@ describe('observation metadata', () => {
     const result = extractObservation(
       'Read',
       { file_path: '/src/index.ts' },
-      { output: 'content' },
+      { output: SUBSTANTIAL_CONTENT },
       SESSION_ID,
       GLOBAL_SCOPE,
     );
@@ -795,7 +884,7 @@ describe('path sanitization in observation fields', () => {
     const result = extractObservation(
       'Read',
       { file_path: '/work/my-app/src/index.ts' },
-      { output: 'content' },
+      { output: SUBSTANTIAL_CONTENT },
       SESSION_ID,
       PROJECT_SCOPE,
     );
@@ -824,7 +913,7 @@ describe('path sanitization in observation fields', () => {
     const result = extractObservation(
       'Read',
       { file_path: 'C:\\Users\\JohnDoe\\Desktop\\file.txt' },
-      { output: 'content' },
+      { output: SUBSTANTIAL_CONTENT },
       SESSION_ID,
       GLOBAL_SCOPE,
     );

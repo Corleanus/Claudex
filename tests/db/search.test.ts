@@ -295,6 +295,44 @@ describe('searchObservations', () => {
     expect(results[0]!.observation.content).toContain('pre-commit');
   });
 
+  it('sinceEpoch filters out older observations when provided', () => {
+    const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+    const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    const sevenDayCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+    storeObservation(db, makeTestObservation({
+      title: 'Old scheduler observation',
+      content: 'Scheduler content from last week',
+      timestamp_epoch: eightDaysAgo,
+    }));
+    storeObservation(db, makeTestObservation({
+      title: 'Recent scheduler observation',
+      content: 'Scheduler content from yesterday',
+      timestamp_epoch: twoDaysAgo,
+    }));
+
+    // With sinceEpoch, only the recent observation is returned
+    const filtered = searchObservations(db, 'scheduler', { sinceEpoch: sevenDayCutoff });
+    expect(filtered.length).toBe(1);
+    expect(filtered[0]!.observation.title).toBe('Recent scheduler observation');
+
+    // Without sinceEpoch, both observations are returned (no age filter)
+    const unfiltered = searchObservations(db, 'scheduler');
+    expect(unfiltered.length).toBe(2);
+  });
+
+  it('minImportance defaults to 1 (backward compat)', () => {
+    storeObservation(db, makeTestObservation({
+      title: 'Low priority widget',
+      content: 'Widget implementation',
+      importance: 1,
+    }));
+
+    // No minImportance specified — default is 1, so importance=1 should be included
+    const results = searchObservations(db, 'widget');
+    expect(results.length).toBe(1);
+  });
+
   it('passes mode through to FTS5 normalizer (OR mode finds partial matches)', () => {
     storeObservation(db, makeTestObservation({
       title: 'TypeScript migration',
@@ -453,10 +491,10 @@ describe('global scope isolation', () => {
       importance: 3,
     });
 
-    // searchAll with no project = global only
+    // searchAll with no project = global only (reasoning excluded from searchAll)
     const results = searchAll(db, 'migration');
-    // Should get the global observation + global reasoning, NOT the project ones
-    expect(results.length).toBe(2);
+    // Should get only the global observation, NOT reasoning or project ones
+    expect(results.length).toBe(1);
     for (const r of results) {
       expect(r.observation.project).toBeUndefined();
     }

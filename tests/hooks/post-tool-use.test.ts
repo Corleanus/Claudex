@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { MigrationRunner } from '../../src/db/migrations.js';
 import { extractObservation } from '../../src/lib/observation-extractor.js';
 import type { Scope } from '../../src/shared/types.js';
+import { setupDb } from '../helpers/setup-db.js';
+import { SUBSTANTIAL_READ_OUTPUT } from '../helpers/fixtures.js';
 
 // Mock dependencies
 vi.mock('../../src/shared/logger.js', () => ({
@@ -21,15 +22,6 @@ vi.mock('../../src/shared/metrics.js', () => ({
 // =============================================================================
 // Helpers
 // =============================================================================
-
-function setupDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  const runner = new MigrationRunner(db);
-  runner.run();
-  return db;
-}
 
 const TEST_SESSION = 'sess-post-tool-test';
 const PROJECT_SCOPE: Scope = { type: 'project', name: 'test-project', path: '/test/project' };
@@ -60,7 +52,7 @@ describe('post-tool-use hook logic', () => {
       const observation = extractObservation(
         'Read',
         { file_path: '/src/foo.ts' },
-        { output: 'file contents' },
+        { output: SUBSTANTIAL_READ_OUTPUT },
         TEST_SESSION,
         PROJECT_SCOPE,
       );
@@ -209,7 +201,7 @@ describe('post-tool-use hook logic', () => {
       const observation = extractObservation(
         'Read',
         { file_path: '/src/test.ts' },
-        { output: 'content' },
+        { output: SUBSTANTIAL_READ_OUTPUT },
         TEST_SESSION,
         PROJECT_SCOPE,
       );
@@ -289,7 +281,7 @@ describe('post-tool-use hook logic', () => {
       const observation = extractObservation(
         'Read',
         { file_path: '/tmp/global-file.ts' },
-        { output: 'content' },
+        { output: SUBSTANTIAL_READ_OUTPUT },
         TEST_SESSION,
         GLOBAL_SCOPE,
       );

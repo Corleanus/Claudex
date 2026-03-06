@@ -6,11 +6,11 @@ import {
   rebuildSearchIndex,
   optimizeSearchIndex,
 } from '../../src/db/search.js';
-import { MigrationRunner } from '../../src/db/migrations.js';
 import { storeObservation } from '../../src/db/observations.js';
 import { insertReasoning } from '../../src/db/reasoning.js';
 import { insertConsensus } from '../../src/db/consensus.js';
 import type { Observation, ReasoningChain, ConsensusDecision } from '../../src/shared/types.js';
+import { setupDb } from '../helpers/setup-db.js';
 
 // Mock logger to prevent filesystem writes during tests
 vi.mock('../../src/shared/logger.js', () => ({
@@ -25,25 +25,6 @@ vi.mock('../../src/shared/logger.js', () => ({
 // =============================================================================
 // Helpers
 // =============================================================================
-
-function setupDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_versions (
-      id INTEGER PRIMARY KEY,
-      version INTEGER UNIQUE NOT NULL,
-      applied_at TEXT NOT NULL
-    )
-  `);
-
-  const runner = new MigrationRunner(db);
-  runner.run();
-
-  return db;
-}
 
 function makeObservation(overrides: Partial<Observation> = {}): Observation {
   return {
@@ -167,7 +148,7 @@ describe('searchReasoning', () => {
 // searchConsensus is internal (not exported) — tested indirectly via searchAll
 
 describe('searchAll', () => {
-  it('returns results from all three tables', () => {
+  it('returns results from observations and consensus (not reasoning)', () => {
     storeObservation(db, makeObservation({
       title: 'Kubernetes observation',
       content: 'Kubernetes cluster analysis',
@@ -182,13 +163,13 @@ describe('searchAll', () => {
     }));
 
     const results = searchAll(db, 'Kubernetes');
-    expect(results.length).toBe(3);
+    expect(results.length).toBe(2);
 
-    // Verify all 3 source types present (mapped via tool_name)
+    // Verify only observations + consensus (reasoning excluded)
     const toolNames = results.map(r => r.observation.tool_name);
     expect(toolNames).toContain('Read');        // observation
-    expect(toolNames).toContain('Flow');        // reasoning
     expect(toolNames).toContain('Consensus');   // consensus
+    expect(toolNames).not.toContain('Flow');    // reasoning excluded
   });
 
   it('respects limit across merged results', () => {
@@ -229,8 +210,9 @@ describe('searchAll', () => {
       project: 'proj-y',
     }));
 
+    // Only observation from proj-x (reasoning excluded from searchAll)
     const results = searchAll(db, 'deploy', { project: 'proj-x' });
-    expect(results.length).toBe(2);
+    expect(results.length).toBe(1);
     results.forEach(r => expect(r.observation.project).toBe('proj-x'));
   });
 
@@ -241,22 +223,39 @@ describe('searchAll', () => {
   });
 
   it('BM25 ranking: more relevant results rank higher', () => {
-    // One reasoning with a single mention
-    insertReasoning(db, makeReasoning({
+    // One observation with a single mention
+    storeObservation(db, makeObservation({
       title: 'Minor note',
-      reasoning: 'Some refactoring code',
+      content: 'Some refactoring code',
     }));
 
     // One with many mentions — should rank higher (lower rank value)
-    insertReasoning(db, makeReasoning({
+    storeObservation(db, makeObservation({
       title: 'Refactoring deep dive',
-      reasoning: 'Refactoring patterns, refactoring tools, refactoring strategy, refactoring steps, refactoring gains',
+      content: 'Refactoring patterns, refactoring tools, refactoring strategy, refactoring steps, refactoring gains',
     }));
 
     const results = searchAll(db, 'refactoring');
     expect(results.length).toBe(2);
     // BM25 in FTS5: lower rank values = more relevant
     expect(results[0]!.rank).toBeLessThanOrEqual(results[1]!.rank);
+  });
+
+  it('passes minImportance through to searchObservations', () => {
+    storeObservation(db, makeObservation({
+      title: 'Low importance artifact',
+      content: 'Artifact content',
+      importance: 2,
+    }));
+    storeObservation(db, makeObservation({
+      title: 'High importance artifact',
+      content: 'Artifact content',
+      importance: 4,
+    }));
+
+    const results = searchAll(db, 'artifact', { minImportance: 3 });
+    expect(results.length).toBe(1);
+    expect(results[0]!.observation.importance).toBe(4);
   });
 });
 
@@ -268,9 +267,9 @@ describe('rebuildSearchIndex', () => {
 
     expect(() => rebuildSearchIndex(db)).not.toThrow();
 
-    // Verify indexes still work after rebuild
+    // Verify indexes still work after rebuild (reasoning excluded from searchAll)
     const obsResults = searchAll(db, 'Rebuild');
-    expect(obsResults.length).toBe(3);
+    expect(obsResults.length).toBe(2);
   });
 });
 

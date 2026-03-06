@@ -15,6 +15,9 @@ export { redactSensitive as redactSecrets } from './redaction.js';
 // Helpers
 // =============================================================================
 
+/** Minimum raw output length for a Read to be worth storing. */
+const MIN_READ_CONTENT_LENGTH = 100;
+
 const TRIVIAL_BASH_COMMANDS = new Set([
   'ls', 'cd', 'pwd', 'cat', 'head', 'tail', 'echo',
   'type', 'dir', 'cls', 'clear', 'which', 'where', 'whoami',
@@ -102,17 +105,21 @@ function extractRead(
   const filePath = coerceString(toolInput['file_path'] || toolInput['path']);
   if (!filePath) return null;
 
+  // Fast-path: skip trivial reads before expensive string processing
+  const rawOutput = toolResponse
+    ? coerceString(toolResponse['output'] || toolResponse['content'] || '')
+    : '';
+  if (!rawOutput || rawOutput.length < MIN_READ_CONTENT_LENGTH) return null;
+
   const ext = fileExtension(filePath);
   const fileType = ext ? ext.toUpperCase() : 'unknown';
 
   let contentSummary = `File type: ${fileType}`;
-  if (toolResponse) {
-    const output = coerceString(toolResponse['output'] || toolResponse['content'] || '');
-    if (output) {
-      const preview = truncateLines(output, 8);
-      contentSummary += `\n${preview}`;
-    }
-  }
+  const preview = truncateLines(rawOutput, 8);
+  contentSummary += `\n${preview}`;
+
+  // Secondary filter: formatted content can be shorter than raw after truncation
+  if (contentSummary.length < MIN_READ_CONTENT_LENGTH) return null;
 
   // Dynamic importance: config/test files get 3, others get 2
   const readExt = fileExtension(filePath).toLowerCase();
@@ -293,6 +300,9 @@ function extractGrep(
       topFiles = lines.slice(0, 5).map(parseGrepFilePath);
     }
   }
+
+  // Filter zero-match greps — they're noise in the observation DB
+  if (matchCount === 0) return null;
 
   const content = `Pattern: ${pattern}\nMatches: ${matchCount}${topFiles.length > 0 ? '\nTop files: ' + topFiles.join(', ') : ''}`;
 

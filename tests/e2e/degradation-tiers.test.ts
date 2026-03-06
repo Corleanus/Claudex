@@ -17,12 +17,10 @@ import { rescoreWithFallback } from '../../src/hologram/degradation.js';
 import type { HologramClient } from '../../src/hologram/client.js';
 import type { ClaudexConfig, HologramResponse, ContextSources } from '../../src/shared/types.js';
 import { HologramUnavailableError } from '../../src/shared/errors.js';
-import { MigrationRunner } from '../../src/db/migrations.js';
-import { migration_1 } from '../../src/db/schema.js';
-import { migration_2, migration_4 } from '../../src/db/search.js';
-import { migration_3 } from '../../src/db/schema-phase2.js';
 import { upsertPressureScore } from '../../src/db/pressure.js';
 import { assembleContext } from '../../src/lib/context-assembler.js';
+import { setupDb } from '../helpers/setup-db.js';
+import { expectNoWarmSection } from '../helpers/fixtures.js';
 
 // Mock logger to prevent filesystem writes during tests
 vi.mock('../../src/shared/logger.js', () => ({
@@ -37,28 +35,6 @@ vi.mock('../../src/shared/logger.js', () => ({
 // =============================================================================
 // Helpers
 // =============================================================================
-
-function setupDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_versions (
-      id INTEGER PRIMARY KEY,
-      version INTEGER UNIQUE NOT NULL,
-      applied_at TEXT NOT NULL
-    )
-  `);
-
-  const runner = new MigrationRunner(db);
-  migration_1(runner);
-  migration_2(runner);
-  migration_3(runner);
-  migration_4(runner);
-
-  return db;
-}
 
 const config: ClaudexConfig = {
   hologram: {
@@ -162,7 +138,7 @@ describe('Degradation Tiers E2E', () => {
       expect(assembled.markdown).toContain('HOT');
     });
 
-    it('Tier 1 context includes Warm Context section', async () => {
+    it('warm section removed — warm files no longer injected standalone', async () => {
       const mockClient = makeMockClient();
       mockClient.query.mockResolvedValueOnce(tier1Response);
 
@@ -174,8 +150,9 @@ describe('Degradation Tiers E2E', () => {
       const sources = buildContextSources(suggestion);
       const assembled = assembleContext(sources, { maxTokens: 4000 });
 
-      expect(assembled.markdown).toContain('Warm Context');
-      expect(assembled.markdown).toContain('src/utils/helpers.ts');
+      // Positive: Tier 1 still produces Active Focus from HOT files
+      expect(assembled.markdown).toContain('Active Focus');
+      expectNoWarmSection(assembled.markdown);
     });
 
     it('Tier 1 sources include hologram', async () => {
@@ -293,7 +270,7 @@ describe('Degradation Tiers E2E', () => {
       expect(assembled.tokenEstimate).toBeGreaterThan(0);
     });
 
-    it('DB fallback context includes Warm Context section for WARM files', async () => {
+    it('warm section removed — DB warm files no longer injected standalone', async () => {
       const mockClient = makeMockClient();
       failHologram(mockClient);
       seedDbScores();
@@ -306,8 +283,9 @@ describe('Degradation Tiers E2E', () => {
       const sources = buildContextSources(suggestion);
       const assembled = assembleContext(sources, { maxTokens: 4000 });
 
-      expect(assembled.markdown).toContain('Warm Context');
-      expect(assembled.markdown).toContain('src/db/utils.ts');
+      // Positive: Tier 2 still produces Active Focus from DB HOT scores
+      expect(assembled.markdown).toContain('Active Focus');
+      expectNoWarmSection(assembled.markdown);
     });
 
     it('respects project scope when querying DB scores', async () => {
@@ -407,7 +385,7 @@ describe('Degradation Tiers E2E', () => {
       expect(result.warm[0]!.path).toBe('only-recent.ts');
     });
 
-    it('recency fallback produces valid context assembly', async () => {
+    it('recency fallback produces empty context (warm removed)', async () => {
       const mockClient = makeMockClient();
       failHologram(mockClient);
 
@@ -419,11 +397,10 @@ describe('Degradation Tiers E2E', () => {
       const sources = buildContextSources(suggestion);
       const assembled = assembleContext(sources, { maxTokens: 4000 });
 
-      expect(assembled.markdown).toBeTruthy();
-      expect(assembled.markdown).toContain('Warm Context');
-      expect(assembled.markdown).toContain('src/fallback-file.ts');
-      expect(assembled.markdown).toContain('src/another.ts');
-      expect(assembled.tokenEstimate).toBeGreaterThan(0);
+      // Positive: Tier 3 with only warm files produces empty markdown
+      expect(assembled.markdown).toBe('');
+      expect(assembled.tokenEstimate).toBe(0);
+      expectNoWarmSection(assembled.markdown);
     });
 
     it('recency fallback with empty recent files produces empty context', async () => {
@@ -492,7 +469,7 @@ describe('Degradation Tiers E2E', () => {
       expect(assembled.markdown).toContain('## Active Focus');
     });
 
-    it('Tier 3 context includes Warm Context section', async () => {
+    it('Tier 3 warm section removed — recency files not injected standalone', async () => {
       const mockClient = makeMockClient();
       mockClient.query
         .mockRejectedValueOnce(new HologramUnavailableError('down'))
@@ -505,8 +482,9 @@ describe('Degradation Tiers E2E', () => {
 
       const assembled = assembleContext(buildContextSources(suggestion), { maxTokens: 4000 });
 
-      expect(assembled.markdown).toContain('## Warm Context');
-      expect(assembled.markdown).toContain('src/recency-file.ts');
+      // Positive: Tier 3 with only warm files produces empty markdown
+      expect(assembled.markdown).toBe('');
+      expectNoWarmSection(assembled.markdown);
     });
 
     it('all tiers produce markdown starting with Context header', async () => {
@@ -546,7 +524,9 @@ describe('Degradation Tiers E2E', () => {
 
       expect(a1.markdown).toMatch(/^# Context \(auto-injected by Claudex\)/);
       expect(a2.markdown).toMatch(/^# Context \(auto-injected by Claudex\)/);
-      expect(a3.markdown).toMatch(/^# Context \(auto-injected by Claudex\)/);
+      // Tier 3 with only warm files produces empty context (warm removed)
+      // so a3.markdown may be empty — only check tiers that have HOT files
+      expect(a3.markdown === '' || a3.markdown.startsWith('# Context')).toBe(true);
     });
 
     it('token estimates increase with more content', async () => {

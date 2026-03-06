@@ -466,7 +466,7 @@ describe('Compaction Survival E2E', () => {
   // ===========================================================================
 
   describe('unified search finds data across sessions', () => {
-    it('searchAll finds observations and reasoning from prior sessions', () => {
+    it('searchAll finds observations from prior sessions (reasoning excluded)', () => {
       createSession(db, {
         session_id: 'session-1',
         scope: 'project:test-project',
@@ -486,12 +486,10 @@ describe('Compaction Survival E2E', () => {
 
       transitionSession(db, 'session-1', 'session-2');
 
-      // Session 2: unified search should find both
+      // Session 2: unified search finds observations (reasoning excluded from searchAll)
       const results = searchAll(db, 'WebSocket', { project: 'test-project' });
-      expect(results.length).toBe(2);
-      const titles = results.map(r => r.observation.title);
-      expect(titles).toContain('Discovered WebSocket reconnection strategy');
-      expect(titles).toContain('WebSocket protocol selection');
+      expect(results.length).toBe(1);
+      expect(results[0]!.observation.title).toBe('Discovered WebSocket reconnection strategy');
     });
   });
 

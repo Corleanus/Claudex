@@ -200,15 +200,6 @@ export function buildPostCompactionSection(): string {
   return `## Session Continuity\n- Context was recently compacted. Prior conversation state has been summarized.\n`;
 }
 
-export function buildWarmSection(warmFiles: ScoredFile[]): string {
-  if (warmFiles.length === 0) return '';
-  const paths = warmFiles.map(f => {
-    const boost = f.phase_boosted ? ' [phase]' : '';
-    return `\`${f.path}\`${boost}`;
-  }).join(', ');
-  return `## Warm Context\n- ${paths}\n`;
-}
-
 export function buildRecentObservationsSection(observations: Observation[]): string {
   if (observations.length === 0) return '';
   const lines = observations.map(o => {
@@ -322,8 +313,3 @@ export function buildConsensusSectionRef(decisions: ConsensusDecision[]): string
   return `## Consensus Decisions (refs)\n- [${decisions.length} decisions, latest: "${escapeUntrustedText(latest.title, 100)}" [${latest.status}] (${ago})]\n`;
 }
 
-export function buildWarmSectionRef(warmFiles: ScoredFile[]): string {
-  if (warmFiles.length === 0) return '';
-  const top = warmFiles[0]!;
-  return `## Warm Context (refs)\n- [${warmFiles.length} files, top: \`${top.path}\` (${top.raw_pressure.toFixed(2)})]\n`;
-}

@@ -11,7 +11,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { MigrationRunner } from '../../src/db/migrations.js';
 import { createSession, updateSessionStatus, getActiveSession, incrementObservationCount } from '../../src/db/sessions.js';
 import { storeObservation, getRecentObservations, getObservationsBySession } from '../../src/db/observations.js';
 import { insertReasoning, getRecentReasoning, getReasoningBySession } from '../../src/db/reasoning.js';
@@ -20,6 +19,8 @@ import { upsertPressureScore, getPressureScores } from '../../src/db/pressure.js
 import { searchAll, searchObservations } from '../../src/db/search.js';
 import { assembleContext } from '../../src/lib/context-assembler.js';
 import type { Observation } from '../../src/shared/types.js';
+import { setupDb } from '../helpers/setup-db.js';
+import { expectNoWarmSection } from '../helpers/fixtures.js';
 
 // Mock logger to prevent filesystem writes during tests
 vi.mock('../../src/shared/logger.js', () => ({
@@ -47,25 +48,6 @@ function makeObservation(overrides: Partial<Observation> = {}): Observation {
     importance: 3,
     ...overrides,
   };
-}
-
-function setupDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_versions (
-      id INTEGER PRIMARY KEY,
-      version INTEGER UNIQUE NOT NULL,
-      applied_at TEXT NOT NULL
-    )
-  `);
-
-  const runner = new MigrationRunner(db);
-  runner.run();
-
-  return db;
 }
 
 // =============================================================================
@@ -508,8 +490,7 @@ describe('Session Lifecycle E2E', () => {
       expect(assembled.markdown).toContain('Build optimization reasoning');
       expect(assembled.markdown).toContain('Consensus Decisions');
       expect(assembled.markdown).toContain('Webpack as bundler');
-      expect(assembled.markdown).toContain('Warm Context');
-      expect(assembled.markdown).toContain('package.json');
+      expectNoWarmSection(assembled.markdown);
       expect(assembled.tokenEstimate).toBeGreaterThan(0);
 
       // Verify contributing sources tracked

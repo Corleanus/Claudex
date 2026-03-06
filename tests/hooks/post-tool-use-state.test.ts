@@ -6,6 +6,7 @@ import { extractObservation } from '../../src/lib/observation-extractor.js';
 import { recordFileTouch, readFilesTouched } from '../../src/checkpoint/state-files.js';
 import { getIncrementalThresholds } from '../../src/lib/token-gauge.js';
 import type { Scope } from '../../src/shared/types.js';
+import { SUBSTANTIAL_READ_OUTPUT } from '../helpers/fixtures.js';
 
 // Mock logger and metrics (state-files.ts uses these)
 vi.mock('../../src/shared/logger.js', () => ({
@@ -97,7 +98,7 @@ describe('PostToolUse Step 3.7: files-touched state updates', () => {
     const observation = extractObservation(
       'Read',
       { file_path: '/src/foo.ts' },
-      { output: 'file contents' },
+      { output: SUBSTANTIAL_READ_OUTPUT },
       TEST_SESSION,
       PROJECT_SCOPE,
     );

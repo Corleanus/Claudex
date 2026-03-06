@@ -90,6 +90,8 @@ export function searchObservations(
     limit?: number;
     category?: ObservationCategory;
     minImportance?: number;
+    /** Only return observations newer than this epoch (ms). When omitted, no age filter is applied. */
+    sinceEpoch?: number;
     mode?: 'AND' | 'OR';
     prefix?: boolean;
   },
@@ -105,6 +107,7 @@ export function searchObservations(
     const minImportance = options?.minImportance ?? 1;
     const project = options?.project;
     const category = options?.category ?? null;
+    const sinceEpoch = options?.sinceEpoch ?? null;
     const useGlobalFilter = project === undefined || project === null;
 
     const sql = `
@@ -119,6 +122,7 @@ export function searchObservations(
         AND ${useGlobalFilter ? 'o.project IS NULL' : 'o.project = ?'}
         AND (? IS NULL OR o.category = ?)
         AND o.importance >= ?
+        AND (? IS NULL OR o.timestamp_epoch > ?)
         AND o.deleted_at_epoch IS NULL
       ORDER BY fts.rank
       LIMIT ?
@@ -126,8 +130,8 @@ export function searchObservations(
 
     const normalizedQuery = normalizeFts5Query(trimmed, { mode: options?.mode, prefix: options?.prefix });
     const params = useGlobalFilter
-      ? [normalizedQuery, category, category, minImportance, limit]
-      : [normalizedQuery, project, category, category, minImportance, limit];
+      ? [normalizedQuery, category, category, minImportance, sinceEpoch, sinceEpoch, limit]
+      : [normalizedQuery, project, category, category, minImportance, sinceEpoch, sinceEpoch, limit];
     const rows = db.prepare(sql).all(...params) as SearchRow[];
 
     const result = rows.map(row => ({
@@ -336,14 +340,23 @@ function searchConsensus(
 // =============================================================================
 
 /**
- * Unified search across ALL FTS5 tables (observations, reasoning, consensus).
+ * Unified search across FTS5 tables (observations, consensus).
  * Merges results, sorts by rank (most relevant first), and applies limit.
  * This is the primary search entry point for Phase 2.
  */
 export function searchAll(
   db: Database.Database,
   query: string,
-  options?: { project?: string; limit?: number; mode?: 'AND' | 'OR'; prefix?: boolean },
+  options?: {
+    project?: string;
+    limit?: number;
+    /** Applied to observation search only; consensus results are not filtered by importance. */
+    minImportance?: number;
+    /** Applied to observation search only; filters observations older than this epoch (ms). */
+    sinceEpoch?: number;
+    mode?: 'AND' | 'OR';
+    prefix?: boolean;
+  },
 ): SearchResult[] {
   const searchStart = Date.now();
   try {
@@ -355,12 +368,11 @@ export function searchAll(
     const limit = options?.limit ?? 10;
 
     const prefix = options?.prefix;
-    const obsResults = searchObservations(db, trimmed, { project: options?.project, limit, mode: options?.mode, prefix });
-    const reasoningResults = searchReasoning(db, trimmed, { project: options?.project, limit, mode: options?.mode, prefix });
+    const obsResults = searchObservations(db, trimmed, { project: options?.project, limit, minImportance: options?.minImportance, sinceEpoch: options?.sinceEpoch, mode: options?.mode, prefix });
     const consensusResults = searchConsensus(db, trimmed, { project: options?.project, limit, mode: options?.mode, prefix });
 
     // Merge all results and sort by rank (BM25 — lower/more negative = more relevant)
-    const merged = [...obsResults, ...reasoningResults, ...consensusResults];
+    const merged = [...obsResults, ...consensusResults];
     merged.sort((a, b) => a.rank - b.rank);
 
     const result = merged.slice(0, limit);

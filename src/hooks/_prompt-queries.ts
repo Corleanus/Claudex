@@ -17,6 +17,7 @@ import { HologramClient } from '../hologram/client.js';
 import { ResilientHologramClient } from '../hologram/degradation.js';
 import { searchAll } from '../db/search.js';
 import { getRecentObservations } from '../db/observations.js';
+import { MS_PER_DAY } from '../shared/epoch.js';
 import type { SearchResult, Observation, Scope, ClaudexConfig } from '../shared/types.js';
 import type { ContextSuggestion } from '../hologram/degradation.js';
 
@@ -122,9 +123,10 @@ export function extractKeywords(prompt: string): string {
 }
 
 /**
- * Query FTS5 search across all tables (observations, reasoning, consensus).
+ * Query FTS5 search across observations and consensus tables.
  * Uses strict-then-relax strategy: AND first, OR fallback if < 2 results.
  * Applies temporal re-ranking to boost recent results.
+ * Limits results to the last 7 days via sinceEpoch.
  * Returns empty array if database is unavailable or query fails.
  *
  * @param db - Shared database handle (caller manages lifecycle)
@@ -145,10 +147,13 @@ export async function queryFts5(promptText: string, scope: Scope, db: import('be
     const project = scope.type === 'project' ? scope.name : undefined;
 
     // Strict-then-relax: try AND first, fall back to OR if < 2 results
+    const sinceEpoch = Date.now() - 7 * MS_PER_DAY;
     let results = searchAll(db, keywords, {
       project,
       limit: 8,
+      minImportance: 3,
       prefix: true,
+      sinceEpoch,
     });
 
     if (results.length < 2) {
@@ -156,8 +161,10 @@ export async function queryFts5(promptText: string, scope: Scope, db: import('be
       const orResults = searchAll(db, keywords, {
         project,
         limit: 8,
+        minImportance: 3,
         mode: 'OR',
         prefix: true,
+        sinceEpoch,
       });
       if (orResults.length > andCount) {
         results = orResults;
@@ -190,6 +197,15 @@ export async function queryFts5(promptText: string, scope: Scope, db: import('be
 
       scored.sort((a, b) => b.finalScore - a.finalScore);
       results = scored.map(s => s.result);
+
+      // Deduplicate by tool_name:title composite key — keep highest-scored instance
+      const seen = new Set<string>();
+      results = results.filter(r => {
+        const key = `${r.observation.tool_name}:${r.observation.title}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
     }
 
     logToFile(HOOK_NAME, 'DEBUG', `FTS5 search returned ${results.length} results for "${keywords}"`);
