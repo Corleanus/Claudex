@@ -632,7 +632,7 @@ describe('Phase boost annotation', () => {
     expect(result.markdown).not.toContain('[phase]');
   });
 
-  it('warm section shows [phase] marker for boosted files', () => {
+  it('warm section removed — warm files no longer injected standalone', () => {
     const sources = emptySources({
       hologram: {
         hot: [],
@@ -642,7 +642,7 @@ describe('Phase boost annotation', () => {
     });
 
     const result = assembleContext(sources, { maxTokens: 4000 });
-    expect(result.markdown).toContain('`/src/warm-boosted.ts` [phase]');
+    expect(result.markdown).not.toContain('## Warm Context');
   });
 
   it('non-GSD project has no [phase] markers (regression guard)', () => {
@@ -773,7 +773,7 @@ describe('demand-paging: reference builders (via assembleContext with tight budg
     expect(result.markdown).toContain('2h ago');
   });
 
-  it('buildWarmSectionRef: tight budget produces compact warm reference', () => {
+  it('warm section removed — no warm reference produced even on tight budget', () => {
     const sources = tightBudgetSources({
       hologram: {
         hot: [],
@@ -786,8 +786,7 @@ describe('demand-paging: reference builders (via assembleContext with tight budg
     });
 
     const result = assembleContext(sources, { maxTokens: 1000 });
-    expect(result.markdown).toContain('## Warm Context (refs)');
-    expect(result.markdown).toContain('[2 files, top: `src/lib/context-assembler.ts` (0.52)]');
+    expect(result.markdown).not.toContain('## Warm Context');
   });
 
   it('all ref builders return empty string for empty arrays', () => {
@@ -844,7 +843,6 @@ describe('demand-paging: mode switching', () => {
     expect(md).toContain('## Related Observations\n');
     expect(md).toContain('## Recent Activity\n');
     expect(md).toContain('## Consensus Decisions\n');
-    expect(md).toContain('## Warm Context\n');
 
     // No reference headers
     expect(md).not.toContain('(refs)');

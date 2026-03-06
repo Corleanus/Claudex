@@ -13,7 +13,6 @@
  * 6. Recent observations (temporal context)
  * 7. Consensus Decisions
  * 8. Session continuity (post-compaction)
- * 9. WARM files (pressure >= 0.426)
  *
  * Never throws — returns empty AssembledContext on error.
  */
@@ -33,14 +32,12 @@ import {
   buildReasoningSection,
   buildConsensusSection,
   buildPostCompactionSection,
-  buildWarmSection,
   buildRecentObservationsSection,
   buildUnifiedResumeSection,
   buildSearchSectionRef,
   buildRecentSectionRef,
   buildReasoningSectionRef,
   buildConsensusSectionRef,
-  buildWarmSectionRef,
 } from './context-sections.js';
 
 // =============================================================================
@@ -204,11 +201,7 @@ export function assembleContext(
         tryAppend(buildPostCompactionSection(), 'session');
       }
 
-      // 9. WARM files
-      if (hasHologram && hologram && hologram.warm.length > 0) {
-        const builder = useReferences ? buildWarmSectionRef : buildWarmSection;
-        tryAppend(builder(hologram.warm), 'hologram');
-      }
+      // 9. WARM files — removed: low signal, ~2k tokens/turn of file paths never scanned
     }
 
     // 9.5. Search result reservation: ensure FTS5 results get at least a ref slot
@@ -222,7 +215,7 @@ export function assembleContext(
       if (searchRefTokens <= SEARCH_RESERVE) {
         // Try to trim lowest-priority sections (reverse priority) to free space
         // Use prefix matching to handle both full and ref variants (e.g., "## Warm Context" and "## Warm Context (refs)")
-        const trimmablePrefixes = ['## Warm Context', '## Session Continuity', '## Consensus Decisions', '## Recent Activity'];
+        const trimmablePrefixes = ['## Session Continuity', '## Consensus Decisions', '## Recent Activity'];
         for (const prefix of trimmablePrefixes) {
           const idx = assembled.indexOf(prefix);
           if (idx === -1) continue;
