@@ -58,6 +58,8 @@ runHook(HOOK_NAME, async (input) => {
   logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
 
   // 2.0. Resolve configurable token budget (coordination config overrides default)
+  // Coordination is read once and used for: (a) injection_budget fallback (line ~64),
+  // and (b) checkpoint_primary gate (line ~444). Both are needed on most invocations.
   const config = loadConfig();
   const coordination = readCoordinationConfig();
   const CONTEXT_TOKEN_BUDGET = config.hooks?.context_token_budget

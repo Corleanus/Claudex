@@ -6,6 +6,8 @@
  * tiered heuristics with quality gates.
  */
 
+import { linesOutsideCodeFences } from './code-fence.js';
+
 const ACTION_VERBS = new Set([
   'use', 'add', 'remove', 'replace', 'create', 'implement', 'switch', 'move',
   'keep', 'skip', 'merge', 'split', 'export', 'import', 'change', 'fix',
@@ -46,48 +48,37 @@ function truncate(text: string, maxLen: number): string {
  * Code fences are skipped. Quality gate rejects filler and questions.
  */
 export function extractDecisionFromResponse(text: string): string | null {
-  const lines = text.split('\n');
-  let inCodeFence = false;
-
   const candidates: Array<{ tier: number; line: string }> = [];
 
-  for (const raw of lines) {
-    const line = raw.trimStart();
-    if (line.startsWith('```')) {
-      inCodeFence = !inCodeFence;
-      continue;
-    }
-    if (inCodeFence) continue;
-    if (!line) continue;
-
+  for (const { raw, trimmed } of linesOutsideCodeFences(text)) {
     // Tier 1: Explicit decision markers
-    if (/^(Decision:|Plan:|Approach:|Going with|Chose|Choosing)/i.test(line)) {
+    if (/^(Decision:|Plan:|Approach:|Going with|Chose|Choosing)/i.test(trimmed)) {
       candidates.push({ tier: 1, line: raw.trim() });
       continue;
     }
 
     // Tier 2: Action intent
     if (
-      /^(I'll|We'll|Let's|I will|We will|I'm going to|We're going to)/i.test(line) ||
-      /^(The approach is|The plan is|The fix is|The solution is)/i.test(line)
+      /^(I'll|We'll|Let's|I will|We will|I'm going to|We're going to)/i.test(trimmed) ||
+      /^(The approach is|The plan is|The fix is|The solution is)/i.test(trimmed)
     ) {
       candidates.push({ tier: 2, line: raw.trim() });
       continue;
     }
 
     // Tier 3: Structured formats
-    if (/^[-*]\s+\*\*[^*]+\*\*/.test(line)) {
+    if (/^[-*]\s+\*\*[^*]+\*\*/.test(trimmed)) {
       candidates.push({ tier: 3, line: raw.trim() });
       continue;
     }
-    if (line.startsWith('**') && hasActionVerb(line)) {
+    if (trimmed.startsWith('**') && hasActionVerb(trimmed)) {
       candidates.push({ tier: 3, line: raw.trim() });
       continue;
     }
 
     // Tier 4: Action-verb bullets
-    if (/^[-*]\s/.test(line) || /^\d+\.\s/.test(line)) {
-      const words = line.split(/\s+/).slice(0, 5);
+    if (/^[-*]\s/.test(trimmed) || /^\d+\.\s/.test(trimmed)) {
+      const words = trimmed.split(/\s+/).slice(0, 5);
       if (words.some(w => ACTION_VERBS.has(w.toLowerCase().replace(/[^a-z]/g, '')))) {
         candidates.push({ tier: 4, line: raw.trim() });
       }

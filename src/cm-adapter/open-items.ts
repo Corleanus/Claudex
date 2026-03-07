@@ -5,38 +5,30 @@
  * Scans assistant messages for TODO/FIXME/action-needed patterns.
  */
 
-import { appendOpenItem } from './state-files.js';
+import { linesOutsideCodeFences } from './code-fence.js';
+import { batchAppendOpenItems } from './state-files.js';
 
 /**
  * Scan assistant text for open items (TODOs, unchecked checkboxes, action keywords).
- * Writes each found item to the state file, deduped via semantic matching.
+ * Collects all candidates first, then writes once via batched dedup.
  */
 export async function scanAndCaptureOpenItems(
   sessionId: string,
   assistantText: string,
 ): Promise<void> {
-  const lines = assistantText.split('\n');
-  let inCodeFence = false;
+  const candidates: string[] = [];
 
-  for (const line of lines) {
-    if (line.trimStart().startsWith('```')) {
-      inCodeFence = !inCodeFence;
-      continue;
-    }
-    if (inCodeFence) continue;
-
-    const isCheckbox = /^\s*-\s*\[\s*\]/.test(line);
-    const isBulletOrNumbered = /^[\s]*[-*]|^\s*\d+\./.test(line);
-    const hasActionKeyword = /\b(need to|TODO|still need|will check|remaining:|next step|haven't yet|FIXME)\b/i.test(line);
+  for (const { raw, trimmed } of linesOutsideCodeFences(assistantText)) {
+    const isCheckbox = /^\s*-\s*\[\s*\]/.test(raw);
+    const isBulletOrNumbered = /^[-*]|^\d+\./.test(trimmed);
+    const hasActionKeyword = /\b(need to|TODO|still need|will check|remaining:|next step|haven't yet|FIXME)\b/i.test(raw);
     const isBulletWithAction = isBulletOrNumbered && hasActionKeyword;
 
     if (isCheckbox || isBulletWithAction) {
-      const trimmed = line.trim();
-      if (trimmed.length > 150) {
-        await appendOpenItem(sessionId, trimmed.slice(0, 147) + '...');
-      } else {
-        await appendOpenItem(sessionId, trimmed);
-      }
+      const item = trimmed.length > 150 ? trimmed.slice(0, 147) + '...' : trimmed;
+      candidates.push(item);
     }
   }
+
+  await batchAppendOpenItems(sessionId, candidates);
 }

@@ -27,17 +27,17 @@ runHook(HOOK_NAME, async (input) => {
   const preInput = input as PreCompactInput;
   const sessionId = preInput.session_id || 'unknown';
 
-  // Read state files before reset
+  // Read only learnings before reset
   let stateFiles;
   try {
-    stateFiles = await readStateFiles(sessionId);
+    stateFiles = await readStateFiles(sessionId, ['learnings']);
   } catch (err) {
     logToFile(HOOK_NAME, 'WARN', 'Failed to read state files', err);
     return {};
   }
 
   // Promote in-session learnings to cross-session store
-  if (stateFiles.learnings.length > 0) {
+  if (stateFiles.learnings && stateFiles.learnings.length > 0) {
     const checkpointId = crypto.randomUUID();
     try {
       await promoteLearnings(stateFiles.learnings, checkpointId, sessionId);

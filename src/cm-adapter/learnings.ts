@@ -9,12 +9,9 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import { normalizeLearningFingerprint } from './fingerprint.js';
+import { ECHO_HOME, AGENT_ID, MAX_CROSS_SESSION_LEARNINGS } from './constants.js';
 import type { CrossSessionLearningsStore } from './types.js';
-
-const ECHO_HOME = path.join(os.homedir(), '.echo');
-const AGENT_ID = 'echo';
-const MAX_ENTRIES = 50;
 
 function learningsDir(): string {
   return path.join(ECHO_HOME, 'context', 'learnings', AGENT_ID);
@@ -62,10 +59,6 @@ async function writeCrossSessionLearnings(store: CrossSessionLearningsStore): Pr
   await atomicWriteFile(learningsPath(), JSON.stringify(store, null, 2));
 }
 
-function fingerprint(text: string): string {
-  return text.toLowerCase().trim().replace(/^[-*\u2022]\s*/, '').replace(/\s+/g, ' ');
-}
-
 /**
  * Promote in-session learnings to cross-session store.
  * Increments promotion_count for existing entries, adds new ones,
@@ -80,8 +73,8 @@ export async function promoteLearnings(
   const now = new Date().toISOString();
 
   for (const learning of learnings) {
-    const fp = fingerprint(learning.text);
-    const existing = store.learnings.find(l => fingerprint(l.text) === fp);
+    const fp = normalizeLearningFingerprint(learning.text);
+    const existing = store.learnings.find(l => normalizeLearningFingerprint(l.text) === fp);
 
     if (existing) {
       if (existing.last_checkpoint_id === checkpointId) continue;
@@ -101,11 +94,11 @@ export async function promoteLearnings(
     }
   }
 
-  if (store.learnings.length > MAX_ENTRIES) {
+  if (store.learnings.length > MAX_CROSS_SESSION_LEARNINGS) {
     store.learnings.sort(
       (a, b) => new Date(a.last_promoted_at).getTime() - new Date(b.last_promoted_at).getTime(),
     );
-    store.learnings = store.learnings.slice(-MAX_ENTRIES);
+    store.learnings = store.learnings.slice(-MAX_CROSS_SESSION_LEARNINGS);
   }
 
   await writeCrossSessionLearnings(store);

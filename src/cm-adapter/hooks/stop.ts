@@ -89,6 +89,25 @@ runHook(HOOK_NAME, async (input) => {
   const sessionId = stopInput.session_id || 'unknown';
   const transcriptPath = stopInput.transcript_path;
 
+  if (!transcriptPath) return {};
+
+  const messages = extractLastTurnMessages(transcriptPath);
+  if (!messages) return {};
+
+  // Extract decision (if applicable)
+  let decision: string | null = null;
+  if (
+    messages.userText.length < 50 &&
+    messages.assistantText.length > 500 &&
+    isConfirmationMessage(messages.userText)
+  ) {
+    decision = extractDecisionFromResponse(messages.assistantText);
+  }
+
+  // Only ensure state dir if we have data to write
+  const hasOpenItems = messages.assistantText.length > 0;
+  if (!decision && !hasOpenItems) return {};
+
   try {
     await ensureStateDir(sessionId);
   } catch (err) {
@@ -96,29 +115,17 @@ runHook(HOOK_NAME, async (input) => {
     return {};
   }
 
-  if (!transcriptPath) return {};
-
-  const messages = extractLastTurnMessages(transcriptPath);
-  if (!messages) return {};
-
-  // Decision extraction: detect short user confirmation after long agent response
-  try {
-    if (
-      messages.userText.length < 50 &&
-      messages.assistantText.length > 500 &&
-      isConfirmationMessage(messages.userText)
-    ) {
-      const decision = extractDecisionFromResponse(messages.assistantText);
-      if (decision) {
-        await appendDecision(sessionId, {
-          what: decision,
-          when: new Date().toISOString(),
-        });
-        logToFile(HOOK_NAME, 'DEBUG', `Decision captured: ${decision.slice(0, 80)}`);
-      }
+  // Decision capture
+  if (decision) {
+    try {
+      await appendDecision(sessionId, {
+        what: decision,
+        when: new Date().toISOString(),
+      });
+      logToFile(HOOK_NAME, 'DEBUG', `Decision captured: ${decision.slice(0, 80)}`);
+    } catch (err) {
+      logToFile(HOOK_NAME, 'WARN', 'Decision extraction failed', err);
     }
-  } catch (err) {
-    logToFile(HOOK_NAME, 'WARN', 'Decision extraction failed', err);
   }
 
   // Open items capture from assistant text

@@ -297,6 +297,60 @@ Five independent sections, each with isolated error handling:
 - Respects file-based cooldown (survives across ephemeral hook processes)
 - Executes the flush sequence: persist pressure scores, write flat-file mirrors, request hologram re-score
 
+## Coordination with Context Manager
+
+When running alongside OpenClaw's Context Manager, Claudex reads a coordination config to avoid dual-writer conflicts. Each field is deep-validated against safe defaults on every read -- tampered or missing values fall back silently.
+
+### Configuration
+
+Create `~/.echo/coordination.json`:
+
+```json
+{
+  "version": 1,
+  "checkpoint_primary": "claudex",
+  "injection_budget": {
+    "claudex": 2500,
+    "context_manager": 1500,
+    "total": 4000
+  },
+  "post_compact_restore": "claudex",
+  "tool_tracking": "both",
+  "thread_tracking": "claudex",
+  "learnings": "context_manager",
+  "gauge_display": "claudex"
+}
+```
+
+### Ownership Rules
+
+Each field controls which system owns that function:
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `checkpoint_primary` | `claudex`, `context_manager` | Which system writes structured checkpoints |
+| `tool_tracking` | `claudex`, `context_manager`, `both` | Which system tracks tool use |
+| `thread_tracking` | `claudex`, `context_manager` | Which system maintains conversation thread state |
+| `learnings` | `claudex`, `context_manager` | Which system captures and promotes learnings |
+| `gauge_display` | `claudex`, `context_manager` | Which system renders the token gauge |
+| `post_compact_restore` | `claudex`, `context_manager` | Which system restores context after compaction |
+
+When the file is missing, Claudex assumes standalone mode (owns everything).
+
+### CM Adapter Hooks
+
+The CM adapter hooks (`cm-post-tool-use.mjs`, `cm-pre-compact.mjs`) run alongside standard Claudex hooks to bridge data to the Context Manager. Register them via:
+
+```bash
+npx claudex setup --cm-adapter
+```
+
+Or manually add to `~/.claude/settings.json`:
+- **PostToolUse:** add `cm-post-tool-use.mjs`
+- **PreCompact:** add `cm-pre-compact.mjs`
+
+Note: `cm-stop.mjs` is built but not registerable -- Claude Code does not expose a Stop hook event.
+
 ## Degradation Tiers
 
 The system is designed to never crash, regardless of which components are available:
