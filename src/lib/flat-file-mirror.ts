@@ -12,7 +12,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { CLAUDEX_HOME, dailyMemoryPath } from '../shared/paths.js';
+import { CLAUDEX_HOME, dailyMemoryPath, sanitizeSessionId, isContainedPath } from '../shared/paths.js';
 import { createLogger } from '../shared/logger.js';
 
 const log = createLogger('flat-file-mirror');
@@ -141,18 +141,30 @@ export function sanitizeFilename(title: string): string {
  */
 export function mirrorReasoning(chain: ReasoningChain, scope: Scope): void {
   try {
+    const safeSessionId = sanitizeSessionId(chain.session_id);
+    if (!safeSessionId || safeSessionId !== chain.session_id) {
+      log.warn(`Rejecting reasoning mirror: unsafe session_id "${chain.session_id}"`);
+      return;
+    }
+
     const ts = chain.timestamp
       .replace(/:/g, '-')
       .replace('.', '-')
       .replace('Z', '');
     const filename = `${ts}-${sanitizeFilename(chain.title)}.md`;
 
-    const dir =
+    const expectedRoot =
       scope.type === 'global'
-        ? path.join(CLAUDEX_HOME, 'reasoning', chain.session_id)
-        : path.join(scope.path, 'context', 'reasoning', chain.session_id);
+        ? path.join(CLAUDEX_HOME, 'reasoning')
+        : path.join(scope.path, 'context', 'reasoning');
 
+    const dir = path.join(expectedRoot, safeSessionId);
     const filePath = path.join(dir, filename);
+
+    if (!isContainedPath(filePath, expectedRoot)) {
+      log.warn(`Path containment violation in mirrorReasoning: ${filePath}`);
+      return;
+    }
 
     const decisions =
       chain.decisions && chain.decisions.length > 0
@@ -207,18 +219,30 @@ export function mirrorReasoning(chain: ReasoningChain, scope: Scope): void {
  */
 export function mirrorConsensus(decision: ConsensusDecision, scope: Scope): void {
   try {
+    const safeSessionId = sanitizeSessionId(decision.session_id);
+    if (!safeSessionId || safeSessionId !== decision.session_id) {
+      log.warn(`Rejecting consensus mirror: unsafe session_id "${decision.session_id}"`);
+      return;
+    }
+
     const ts = decision.timestamp
       .replace(/:/g, '-')
       .replace('.', '-')
       .replace('Z', '');
     const filename = `${ts}-${sanitizeFilename(decision.title)}.md`;
 
-    const dir =
+    const expectedRoot =
       scope.type === 'global'
-        ? path.join(CLAUDEX_HOME, 'consensus', decision.session_id)
-        : path.join(scope.path, 'context', 'consensus', decision.session_id);
+        ? path.join(CLAUDEX_HOME, 'consensus')
+        : path.join(scope.path, 'context', 'consensus');
 
+    const dir = path.join(expectedRoot, safeSessionId);
     const filePath = path.join(dir, filename);
+
+    if (!isContainedPath(filePath, expectedRoot)) {
+      log.warn(`Path containment violation in mirrorConsensus: ${filePath}`);
+      return;
+    }
 
     const tags =
       decision.tags && decision.tags.length > 0

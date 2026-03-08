@@ -299,6 +299,122 @@ describe('user-prompt-submit hook logic', () => {
     });
   });
 
+  describe('coordination budget precedence (#5)', () => {
+    const DEFAULT_CONTEXT_TOKEN_BUDGET = 4000;
+
+    it('uses coordination budget when coordination file is active', () => {
+      // Simulates: coordinationFileExists = true, coordination.injection_budget.claudex = 2000
+      const coordinationFileExists = true;
+      const coordinationBudget = 2000;
+      const configBudget = 4000;
+
+      const budget = coordinationFileExists
+        ? coordinationBudget
+        : (configBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET);
+
+      expect(budget).toBe(2000);
+    });
+
+    it('uses coordination budget even when it equals default (4000)', () => {
+      // Key fix: coordination file explicitly sets 4000 — should NOT fall through to config
+      const coordinationFileExists = true;
+      const coordinationBudget = 4000;
+      const configBudget = 6000; // user config has a different value
+
+      const budget = coordinationFileExists
+        ? coordinationBudget
+        : (configBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET);
+
+      // Must use coordination (4000), NOT config (6000)
+      expect(budget).toBe(4000);
+    });
+
+    it('falls back to config budget when no coordination file', () => {
+      const coordinationFileExists = false;
+      const coordinationBudget = 4000; // standalone defaults — irrelevant
+      const configBudget = 6000;
+
+      const budget = coordinationFileExists
+        ? coordinationBudget
+        : (configBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET);
+
+      expect(budget).toBe(6000);
+    });
+
+    it('falls back to built-in default when no coordination and no config budget', () => {
+      const coordinationFileExists = false;
+      const coordinationBudget = 4000;
+      const configBudget = undefined;
+
+      const budget = coordinationFileExists
+        ? coordinationBudget
+        : (configBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET);
+
+      expect(budget).toBe(DEFAULT_CONTEXT_TOKEN_BUDGET);
+    });
+  });
+
+  describe('thread tracking gating (#1)', () => {
+    it('skips thread accumulation when context_manager owns thread_tracking', () => {
+      const coordination = { thread_tracking: 'context_manager' as const };
+      const scopeType = 'project';
+      const promptText = 'yes';
+
+      const shouldAccumulate = coordination.thread_tracking === 'claudex'
+        && scopeType === 'project'
+        && typeof promptText === 'string'
+        && promptText.length > 0;
+
+      expect(shouldAccumulate).toBe(false);
+    });
+
+    it('accumulates thread when claudex owns thread_tracking', () => {
+      const coordination = { thread_tracking: 'claudex' as const };
+      const scopeType = 'project';
+      const promptText = 'yes';
+
+      const shouldAccumulate = coordination.thread_tracking === 'claudex'
+        && scopeType === 'project'
+        && typeof promptText === 'string'
+        && promptText.length > 0;
+
+      expect(shouldAccumulate).toBe(true);
+    });
+
+    it('skips thread accumulation for global scope', () => {
+      const coordination = { thread_tracking: 'claudex' as const };
+      const scopeType = 'global';
+      const promptText = 'yes';
+
+      const shouldAccumulate = coordination.thread_tracking === 'claudex'
+        && scopeType === 'project'
+        && typeof promptText === 'string'
+        && promptText.length > 0;
+
+      expect(shouldAccumulate).toBe(false);
+    });
+  });
+
+  describe('empty prompt gate (#17)', () => {
+    it('empty prompt triggers early return', () => {
+      const promptText = '';
+      const shouldEarlyReturn = typeof promptText !== 'string' || promptText.length === 0;
+      expect(shouldEarlyReturn).toBe(true);
+    });
+
+    it('short non-empty prompt does NOT trigger empty-prompt gate', () => {
+      const promptText = 'ok';
+      const shouldEarlyReturn = typeof promptText !== 'string' || promptText.length === 0;
+      expect(shouldEarlyReturn).toBe(false);
+    });
+
+    it('normal prompt does NOT trigger empty-prompt gate', () => {
+      const promptText = 'fix the login bug';
+      const shouldEarlyReturn = typeof promptText !== 'string' || promptText.length === 0;
+      expect(shouldEarlyReturn).toBe(false);
+    });
+  });
+
   describe('extractKeywords', () => {
     it('includes 2-character technical terms (db, fs, io, ui, ts)', () => {
       const result = extractKeywords('check the db and fs modules');

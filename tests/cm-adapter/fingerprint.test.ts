@@ -76,4 +76,39 @@ describe('normalizeLearningFingerprint', () => {
       normalizeLearningFingerprint('use italic style'),
     );
   });
+
+  it('strips double-underscore bold so "__bold__" matches "bold"', () => {
+    expect(normalizeLearningFingerprint('use __bold__ style')).toBe(
+      normalizeLearningFingerprint('use bold style'),
+    );
+  });
+
+  // ── Link and header stripping ──────────────────────────────────
+  it('strips markdown links so "[text](url)" becomes "text"', () => {
+    expect(normalizeLearningFingerprint('see [the docs](https://example.com) for details')).toBe(
+      normalizeLearningFingerprint('see the docs for details'),
+    );
+  });
+
+  it('strips markdown links with complex URLs', () => {
+    expect(normalizeLearningFingerprint('[click here](https://example.com/path?q=1&r=2#hash)')).toBe('click here');
+  });
+
+  it('strips multiple links in one line', () => {
+    expect(normalizeLearningFingerprint('use [foo](http://a.com) and [bar](http://b.com)')).toBe('use foo and bar');
+  });
+
+  it('strips heading markers so "## heading" becomes "heading"', () => {
+    expect(normalizeLearningFingerprint('## Use SQLite for storage')).toBe(
+      normalizeLearningFingerprint('Use SQLite for storage'),
+    );
+  });
+
+  it('strips single # heading marker', () => {
+    expect(normalizeLearningFingerprint('# Title text')).toBe('title text');
+  });
+
+  it('strips ### heading marker', () => {
+    expect(normalizeLearningFingerprint('### Deep heading')).toBe('deep heading');
+  });
 });

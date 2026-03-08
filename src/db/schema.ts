@@ -22,7 +22,7 @@ export function migration_1(runner: MigrationRunner): void {
   log.info('Applying migration 1: observations + sessions tables');
 
   runner.db.exec(`
-    CREATE TABLE observations (
+    CREATE TABLE IF NOT EXISTS observations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       project TEXT,
@@ -40,13 +40,13 @@ export function migration_1(runner: MigrationRunner): void {
       created_at_epoch INTEGER NOT NULL
     );
 
-    CREATE INDEX idx_observations_session_id ON observations(session_id);
-    CREATE INDEX idx_observations_project ON observations(project);
-    CREATE INDEX idx_observations_category ON observations(category);
-    CREATE INDEX idx_observations_timestamp_epoch ON observations(timestamp_epoch DESC);
-    CREATE INDEX idx_observations_importance ON observations(importance DESC);
+    CREATE INDEX IF NOT EXISTS idx_observations_session_id ON observations(session_id);
+    CREATE INDEX IF NOT EXISTS idx_observations_project ON observations(project);
+    CREATE INDEX IF NOT EXISTS idx_observations_category ON observations(category);
+    CREATE INDEX IF NOT EXISTS idx_observations_timestamp_epoch ON observations(timestamp_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_observations_importance ON observations(importance DESC);
 
-    CREATE TABLE sessions (
+    CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT UNIQUE NOT NULL,
       scope TEXT NOT NULL,
@@ -60,9 +60,9 @@ export function migration_1(runner: MigrationRunner): void {
       observation_count INTEGER DEFAULT 0
     );
 
-    CREATE INDEX idx_sessions_session_id ON sessions(session_id);
-    CREATE INDEX idx_sessions_project ON sessions(project);
-    CREATE INDEX idx_sessions_status ON sessions(status);
+    CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project);
+    CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
   `);
 
   runner.recordVersion(1);

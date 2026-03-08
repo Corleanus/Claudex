@@ -98,7 +98,8 @@ function decayStaleScores(db: Database.Database, cutoffEpoch: number): number {
     const stmt = db.prepare(
       `UPDATE pressure_scores
        SET raw_pressure = 0, temperature = 'COLD', updated_at = ?, updated_at_epoch = ?
-       WHERE last_accessed_epoch IS NULL OR last_accessed_epoch < ?`
+       WHERE (last_accessed_epoch IS NULL OR last_accessed_epoch < ?)
+         AND (raw_pressure != 0 OR temperature != 'COLD')`
     );
     return stmt.run(now, nowEpoch, cutoffEpoch).changes;
   } catch { return 0; }

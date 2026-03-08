@@ -21,7 +21,7 @@ export function migration_3(runner: MigrationRunner): void {
   log.info('Applying migration 3: reasoning_chains, consensus_decisions, pressure_scores');
 
   runner.db.exec(`
-    CREATE TABLE reasoning_chains (
+    CREATE TABLE IF NOT EXISTS reasoning_chains (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       project TEXT,
@@ -36,11 +36,11 @@ export function migration_3(runner: MigrationRunner): void {
       created_at TEXT NOT NULL,
       created_at_epoch INTEGER NOT NULL
     );
-    CREATE INDEX idx_reasoning_session ON reasoning_chains(session_id);
-    CREATE INDEX idx_reasoning_project ON reasoning_chains(project);
-    CREATE INDEX idx_reasoning_epoch ON reasoning_chains(timestamp_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_reasoning_session ON reasoning_chains(session_id);
+    CREATE INDEX IF NOT EXISTS idx_reasoning_project ON reasoning_chains(project);
+    CREATE INDEX IF NOT EXISTS idx_reasoning_epoch ON reasoning_chains(timestamp_epoch DESC);
 
-    CREATE TABLE consensus_decisions (
+    CREATE TABLE IF NOT EXISTS consensus_decisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       project TEXT,
@@ -58,12 +58,12 @@ export function migration_3(runner: MigrationRunner): void {
       created_at TEXT NOT NULL,
       created_at_epoch INTEGER NOT NULL
     );
-    CREATE INDEX idx_consensus_session ON consensus_decisions(session_id);
-    CREATE INDEX idx_consensus_project ON consensus_decisions(project);
-    CREATE INDEX idx_consensus_status ON consensus_decisions(status);
-    CREATE INDEX idx_consensus_epoch ON consensus_decisions(timestamp_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_consensus_session ON consensus_decisions(session_id);
+    CREATE INDEX IF NOT EXISTS idx_consensus_project ON consensus_decisions(project);
+    CREATE INDEX IF NOT EXISTS idx_consensus_status ON consensus_decisions(status);
+    CREATE INDEX IF NOT EXISTS idx_consensus_epoch ON consensus_decisions(timestamp_epoch DESC);
 
-    CREATE TABLE pressure_scores (
+    CREATE TABLE IF NOT EXISTS pressure_scores (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       file_path TEXT NOT NULL,
       project TEXT NOT NULL DEFAULT '__global__',
@@ -74,9 +74,9 @@ export function migration_3(runner: MigrationRunner): void {
       updated_at TEXT NOT NULL,
       updated_at_epoch INTEGER NOT NULL
     );
-    CREATE UNIQUE INDEX idx_pressure_file_project ON pressure_scores(file_path, project);
-    CREATE INDEX idx_pressure_temperature ON pressure_scores(temperature);
-    CREATE INDEX idx_pressure_raw ON pressure_scores(raw_pressure DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pressure_file_project ON pressure_scores(file_path, project);
+    CREATE INDEX IF NOT EXISTS idx_pressure_temperature ON pressure_scores(temperature);
+    CREATE INDEX IF NOT EXISTS idx_pressure_raw ON pressure_scores(raw_pressure DESC);
   `);
 
   runner.recordVersion(3);

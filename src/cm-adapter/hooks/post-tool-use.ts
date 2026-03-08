@@ -9,7 +9,7 @@
 
 import { runHook, logToFile } from '../../hooks/_infrastructure.js';
 import { readCoordinationConfig } from '../../shared/coordination.js';
-import { ensureStateDir, appendResourceUsage } from '../state-files.js';
+import { appendResourceUsage } from '../state-files.js';
 import type { PostToolUseInput } from '../../shared/types.js';
 
 const HOOK_NAME = 'cm-post-tool-use';
@@ -30,14 +30,7 @@ runHook(HOOK_NAME, async (input) => {
   const toolName = postInput.tool_name || '';
   const toolInput = postInput.tool_input || {};
 
-  try {
-    await ensureStateDir(sessionId);
-  } catch (err) {
-    logToFile(HOOK_NAME, 'WARN', 'Failed to ensure state dir', err);
-    return {};
-  }
-
-  // Track tool + file in a single read/write cycle
+  // Extract file path from tool input (if present)
   const rawPath =
     typeof toolInput.path === 'string'
       ? toolInput.path
@@ -46,11 +39,13 @@ runHook(HOOK_NAME, async (input) => {
         : null;
   const filePath = rawPath ? sanitizePath(rawPath) : null;
 
+  // Classify tool as read or write — explicit write-tool set, everything else defaults to 'read'
   const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit']);
   const kind = filePath
     ? (WRITE_TOOLS.has(toolName) ? 'modified' : 'read')
     : undefined;
 
+  // appendResourceUsage handles ensureStateDir internally — no separate call needed
   try {
     await appendResourceUsage(sessionId, toolName, filePath, kind);
   } catch (err) {

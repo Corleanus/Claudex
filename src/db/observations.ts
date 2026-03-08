@@ -175,12 +175,15 @@ export function getRecentObservations(db: Database.Database, limit: number, proj
  *
  * @param epochMs - Only return observations with timestamp_epoch > this value (milliseconds)
  * @param project - undefined/null: global-scope only (WHERE project IS NULL), string: specific project
+ * @param limit - Maximum rows to return (default 50). Pass 0 for no limit.
  */
-export function getObservationsSince(db: Database.Database, epochMs: number, project?: string | null): Observation[] {
+export function getObservationsSince(db: Database.Database, epochMs: number, project?: string | null, limit = 50): Observation[] {
   const startMs = Date.now();
   try {
     let sql: string;
     let rows: ObservationRow[];
+
+    const limitClause = limit > 0 ? `LIMIT ${limit}` : '';
 
     if (project === null) {
       // Global scope: only records with project IS NULL
@@ -190,7 +193,7 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
              FROM observations
              WHERE timestamp_epoch > ? AND project IS NULL AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
-             LIMIT 50`;
+             ${limitClause}`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs)) as ObservationRow[];
     } else if (project !== undefined) {
       // Specific project
@@ -200,7 +203,7 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
              FROM observations
              WHERE timestamp_epoch > ? AND project = ? AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
-             LIMIT 50`;
+             ${limitClause}`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs), project) as ObservationRow[];
     } else {
       // Global scope: only records with project IS NULL (same as null)
@@ -210,7 +213,7 @@ export function getObservationsSince(db: Database.Database, epochMs: number, pro
              FROM observations
              WHERE timestamp_epoch > ? AND project IS NULL AND deleted_at_epoch IS NULL
              ORDER BY timestamp_epoch DESC
-             LIMIT 50`;
+             ${limitClause}`;
       rows = db.prepare(sql).all(ensureEpochMs(epochMs)) as ObservationRow[];
     }
 

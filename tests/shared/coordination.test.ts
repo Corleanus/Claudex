@@ -42,8 +42,8 @@ describe('readCoordinationConfig', () => {
     _resetCoordinationCache();
     // Default: each call gets a unique mtime so caching doesn't interfere with existing tests
     vi.mocked(fs.statSync).mockImplementation(() => ({ mtimeMs: ++mtimeCounter }) as unknown as fs.Stats);
-    // Default: not a symlink
-    vi.mocked(fs.lstatSync).mockImplementation(() => ({ isSymbolicLink: () => false }) as unknown as fs.Stats);
+    // Default: not a symlink, not world-writable
+    vi.mocked(fs.lstatSync).mockImplementation(() => ({ isSymbolicLink: () => false, mode: 0o100644 }) as unknown as fs.Stats);
   });
 
   it('returns standalone defaults when file is missing', () => {
@@ -245,6 +245,7 @@ describe('readCoordinationConfig', () => {
     const result = readCoordinationConfig();
     expect(result.injection_budget.claudex).toBe(8000);
     expect(result.injection_budget.context_manager).toBe(8000);
+    expect(result.injection_budget.total).toBe(8000);
   });
 
   it('clamps too-small budget to MIN_BUDGET (256)', () => {
@@ -269,6 +270,50 @@ describe('readCoordinationConfig', () => {
     expect(result.injection_budget.context_manager).toBe(0);
   });
 
+  // --- Budget total clamping and sum invariant ---
+
+  it('clamps total budget to MAX_BUDGET (8000)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+      injection_budget: { claudex: 2000, context_manager: 2000, total: 99999 },
+    }));
+
+    const result = readCoordinationConfig();
+    expect(result.injection_budget.total).toBe(8000);
+  });
+
+  it('clamps too-small total to MIN_BUDGET (256)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+      injection_budget: { claudex: 0, context_manager: 0, total: 10 },
+    }));
+
+    const result = readCoordinationConfig();
+    expect(result.injection_budget.total).toBe(256);
+  });
+
+  it('enforces sum invariant: total >= claudex + context_manager', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+      injection_budget: { claudex: 3000, context_manager: 3000, total: 1000 },
+    }));
+
+    const result = readCoordinationConfig();
+    // claudex=3000 + context_manager=3000 = 6000, total was clamped to 1000 then raised
+    expect(result.injection_budget.total).toBe(6000);
+  });
+
+  it('caps sum-invariant total at MAX_BUDGET', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+      injection_budget: { claudex: 7000, context_manager: 7000, total: 256 },
+    }));
+
+    const result = readCoordinationConfig();
+    // Both clamped to 7000 each, sum=14000, but capped at MAX_BUDGET=8000
+    expect(result.injection_budget.total).toBe(8000);
+  });
+
   // --- Symlink rejection ---
 
   it('returns defaults when coordination.json is a symlink', () => {
@@ -279,6 +324,45 @@ describe('readCoordinationConfig', () => {
 
     const result = readCoordinationConfig();
     expect(result).toEqual(STANDALONE_DEFAULTS);
+  });
+
+  // --- World-writable rejection (non-Windows) ---
+
+  it('returns defaults when file is world-writable on non-Windows', () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    try {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.lstatSync).mockReturnValue({
+        isSymbolicLink: () => false,
+        mode: 0o100666, // world-writable (mode & 0o002 !== 0)
+      } as unknown as fs.Stats);
+
+      const result = readCoordinationConfig();
+      expect(result).toEqual(STANDALONE_DEFAULTS);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
+  });
+
+  it('allows world-writable file on Windows (permissions model differs)', () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.lstatSync).mockReturnValue({
+        isSymbolicLink: () => false,
+        mode: 0o100666,
+      } as unknown as fs.Stats);
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        version: 2,
+      }));
+
+      const result = readCoordinationConfig();
+      expect(result.version).toBe(2); // file was read, not rejected
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
   });
 
   // --- Version validation ---

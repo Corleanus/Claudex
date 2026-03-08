@@ -96,6 +96,7 @@ export function assembleContext(
     // When postCompaction + GSD available, render a single merged section
     // that replaces individual GSD + HOT + WARM + Session Continuity sections
     const useUnifiedPath = sources.postCompaction && (hasGsd || hasCheckpointGsd);
+    let unifiedPathProducedContent = false;
 
     if (useUnifiedPath) {
       const hotFiles = sources.hologram?.hot ?? [];
@@ -108,6 +109,7 @@ export function assembleContext(
       );
 
       if (unified) {
+        unifiedPathProducedContent = true;
         // 1. Identity + Project (same as normal)
         if (hasIdentity) tryAppend(buildIdentitySection(sources), 'identity');
         if (hasProject) tryAppend(buildProjectSection(sources), 'project');
@@ -145,8 +147,8 @@ export function assembleContext(
       }
     }
 
-    // Standard path (non-post-compact, or no GSD available for unified section)
-    if (!useUnifiedPath) {
+    // Standard path (non-post-compact, no GSD for unified, or unified section was empty)
+    if (!useUnifiedPath || !unifiedPathProducedContent) {
       // 1. Identity (lightweight, always fits)
       if (hasIdentity) {
         tryAppend(buildIdentitySection(sources), 'identity');

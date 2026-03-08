@@ -51,13 +51,6 @@ const HOOK_MAP: Record<string, string[]> = {
   PreCompact:       ['pre-compact'],
 };
 
-/** Additional hooks registered when --cm-adapter is passed */
-const CM_ADAPTER_HOOK_MAP: Record<string, string[]> = {
-  PostToolUse: ['cm-post-tool-use'],
-  PreCompact:  ['cm-pre-compact'],
-  // Note: cm-stop.mjs is built but Claude Code does not expose a Stop hook event
-};
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -95,14 +88,16 @@ function forwardSlashes(p: string): string {
 }
 
 /**
- * Read a JSON file, returning the parsed object or a fallback on any error.
+ * Read a JSON file, returning the parsed object or null on error.
+ * Returns null (not a fallback) on parse errors to prevent callers from
+ * overwriting a corrupt-but-non-empty file with defaults.
  */
-function readJsonFile(filePath: string, fallback: Record<string, unknown>): Record<string, unknown> {
+function readJsonFile(filePath: string): Record<string, unknown> | null {
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    return { ...fallback };
+    return null;
   }
 }
 
@@ -163,30 +158,28 @@ function writeProjectsJson(): { written: boolean; path: string } {
  * hooks are preserved. Always overwrites — hooks always point to current install.
  */
 
-const BASE_HOOK_BASENAMES: string[] = Object.values(HOOK_MAP).flat();
-
-const CM_HOOK_BASENAMES: string[] = [
-  ...Object.values(CM_ADAPTER_HOOK_MAP).flat(),
-  'cm-stop', // built but no Claude Code hook event for it
+/** Derived from HOOK_MAP values — single source of truth for hook basenames. */
+const CLAUDEX_HOOK_BASENAMES = [
+  ...new Set(Object.values(HOOK_MAP).flat()),
 ];
 
-const ALL_CLAUDEX_HOOK_BASENAMES: string[] = [...BASE_HOOK_BASENAMES, ...CM_HOOK_BASENAMES];
-
+/**
+ * Check whether a hook command belongs to Claudex.
+ * Matches commands that reference a Claudex dist-output file, e.g.:
+ *   node "C:/Users/.../Claudex/dist/pre-compact.mjs"
+ * Uses path-segment matching (dist/<name>.<ext>) to avoid false positives
+ * on third-party hooks whose names happen to contain a Claudex hook name.
+ */
 function isClaudexHookCommand(cmd: string): boolean {
-  return ALL_CLAUDEX_HOOK_BASENAMES.some(name => {
-    const pattern = `${name}.mjs`;
-    return cmd.includes(`dist/${pattern}`) || cmd.endsWith(pattern);
-  });
+  const normalized = cmd.replace(/\\/g, '/');
+  return CLAUDEX_HOOK_BASENAMES.some(n =>
+    normalized.includes(`dist/${n}.mjs`) ||
+    normalized.includes(`dist/${n}.cmd`) ||
+    normalized.includes(`dist/${n}.sh`),
+  );
 }
 
-function isCmAdapterHookCommand(cmd: string): boolean {
-  return CM_HOOK_BASENAMES.some(name => {
-    const pattern = `${name}.mjs`;
-    return cmd.includes(`dist/${pattern}`) || cmd.endsWith(pattern);
-  });
-}
-
-function patchSettings(repoRoot: string, includeCmAdapter = false): { patched: string[]; settingsPath: string } {
+function patchSettings(repoRoot: string): { patched: string[]; settingsPath: string } {
   const claudeDir = path.join(os.homedir(), '.claude');
   const settingsPath = path.join(claudeDir, 'settings.json');
 
@@ -194,18 +187,22 @@ function patchSettings(repoRoot: string, includeCmAdapter = false): { patched: s
     fs.mkdirSync(claudeDir, { recursive: true });
   }
 
-  const settings = readJsonFile(settingsPath, {});
+  let settings = readJsonFile(settingsPath);
+  if (settings === null) {
+    // File is missing or corrupt — if it exists on disk, back it up before overwriting
+    if (fs.existsSync(settingsPath)) {
+      const backupPath = settingsPath + `.backup.${Date.now()}`;
+      fs.copyFileSync(settingsPath, backupPath);
+      log(`Backed up corrupt settings to ${forwardSlashes(backupPath)}`);
+    }
+    settings = {};
+  }
   if (!settings.hooks || typeof settings.hooks !== 'object') {
     settings.hooks = {};
   }
   const hooks = settings.hooks as Record<string, unknown[]>;
 
   const patched: string[] = [];
-
-  // When --cm-adapter is not passed, preserve any existing CM adapter hooks
-  const shouldStripHook = includeCmAdapter
-    ? (cmd: string) => isClaudexHookCommand(cmd)
-    : (cmd: string) => isClaudexHookCommand(cmd) && !isCmAdapterHookCommand(cmd);
 
   for (const [event, wrapperNames] of Object.entries(HOOK_MAP)) {
     const hookCommands = wrapperNames.map(name => ({
@@ -219,41 +216,13 @@ function patchSettings(repoRoot: string, includeCmAdapter = false): { patched: s
     const entries = hooks[event] as Array<{ matcher?: string; hooks?: Array<{ type: string; command: string }> }>;
 
     // Strip Claudex hooks from each existing group; drop groups that become empty
-    // When --cm-adapter is not passed, CM adapter hooks are preserved
     const nonClaudex = entries
-      .map(g => ({ ...g, hooks: (g.hooks ?? []).filter(h => !shouldStripHook(h.command ?? '')) }))
+      .map(g => ({ ...g, hooks: (g.hooks ?? []).filter(h => !isClaudexHookCommand(h.command ?? '')) }))
       .filter(g => g.hooks.length > 0);
 
     // Claudex entry first, then preserved non-Claudex groups
     hooks[event] = [{ matcher: '*', hooks: hookCommands }, ...nonClaudex];
     patched.push(event);
-  }
-
-  // Append CM adapter hooks when requested
-  if (includeCmAdapter) {
-    for (const [event, wrapperNames] of Object.entries(CM_ADAPTER_HOOK_MAP)) {
-      const cmCommands = wrapperNames.map(name => ({
-        type: 'command' as const,
-        command: `node "${forwardSlashes(path.join(repoRoot, 'dist', `${name}.mjs`))}"`,
-      }));
-
-      if (!Array.isArray(hooks[event])) {
-        hooks[event] = [];
-      }
-      const entries = hooks[event] as Array<{ matcher?: string; hooks?: Array<{ type: string; command: string }> }>;
-
-      // Find the Claudex matcher group and append CM hooks to it
-      const claudexGroup = entries.find(g => g.matcher === '*' && g.hooks?.some(h => isClaudexHookCommand(h.command ?? '')));
-      if (claudexGroup?.hooks) {
-        claudexGroup.hooks.push(...cmCommands);
-      } else {
-        // No existing Claudex group — add a new one
-        entries.push({ matcher: '*', hooks: cmCommands });
-      }
-      if (!patched.includes(`${event} (+cm-adapter)`)) {
-        patched.push(`${event} (+cm-adapter)`);
-      }
-    }
   }
 
   writeJsonFile(settingsPath, settings);
@@ -269,17 +238,12 @@ function main(): void {
   const command = args[0];
 
   if (command !== 'setup') {
-    console.log('Usage: claudex <command> [options]');
+    console.log('Usage: claudex <command>');
     console.log('');
     console.log('Commands:');
-    console.log('  setup              Create ~/.claudex/ dirs, write config, register Claude hooks');
-    console.log('');
-    console.log('Options:');
-    console.log('  --cm-adapter       Also register CM adapter hooks (cm-post-tool-use, cm-pre-compact)');
+    console.log('  setup    Create ~/.claudex/ dirs, write config, register Claude hooks');
     process.exit(command ? 1 : 0);
   }
-
-  const cmAdapter = args.includes('--cm-adapter');
 
   console.log(`\n  Claudex Setup  v${VERSION}`);
   console.log('  ─────────────────────────');
@@ -319,12 +283,8 @@ function main(): void {
     log(`Claudex install: ${forwardSlashes(repoRoot)}`);
     log(`OS: ${process.platform}`);
 
-    const hookResult = patchSettings(repoRoot, cmAdapter);
+    const hookResult = patchSettings(repoRoot);
     for (const event of hookResult.patched) log(`+ ${event}`);
-    if (cmAdapter) {
-      log('CM adapter hooks registered (cm-post-tool-use, cm-pre-compact)');
-      log('Note: cm-stop.mjs is built but Claude Code has no Stop hook event');
-    }
     log(`Settings: ${forwardSlashes(hookResult.settingsPath)}`);
 
     // Summary

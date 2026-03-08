@@ -44,8 +44,14 @@ export function detectDecisionSignal(message: string): { detected: boolean; type
   }
 
   // Choice patterns (any length): "use X", "go with X", "pick X", "choose X"
-  if (/\b(use|go with|pick|choose|prefer|switch to|let's use)\b/i.test(trimmed) && trimmed.length < 200) {
-    return { detected: true, type: 'choice' };
+  // Negation guard: skip if the match is preceded by negation words
+  const choiceMatch = /\b(use|go with|pick|choose|prefer|switch to|let's use)\b/i.exec(trimmed);
+  if (choiceMatch && trimmed.length < 200) {
+    const preceding = trimmed.slice(0, choiceMatch.index).toLowerCase();
+    const negated = /\b(don'?t|not|shouldn'?t|won'?t|never|avoid|no need to|stop)\s*$/i.test(preceding);
+    if (!negated) {
+      return { detected: true, type: 'choice' };
+    }
   }
 
   // Rejection (short negatives, < 30 chars)

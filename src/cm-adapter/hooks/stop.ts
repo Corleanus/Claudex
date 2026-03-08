@@ -18,7 +18,13 @@ import type { StopInput } from '../../shared/types.js';
 
 const HOOK_NAME = 'cm-stop';
 
-/** Extract last user/assistant turn from transcript using shared tail reader. */
+/**
+ * Extract last user/assistant turn from transcript.
+ * Uses the shared readTranscriptTail() utility for JSONL parsing — this function
+ * adds domain-specific last-turn extraction logic on top (not duplicating parsing).
+ * The main stop hook (src/hooks/stop.ts) uses detectDecisionSignals() for a different
+ * purpose (tool-use signal detection), so both coexist without true duplication.
+ */
 function extractLastTurnMessages(
   transcriptPath: string,
 ): { userText: string; assistantText: string } | null {

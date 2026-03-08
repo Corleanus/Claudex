@@ -441,6 +441,24 @@ export function writeCrossPhaseSummary(projectDir: string, claudexDir: string): 
 
     // Ensure directory exists and write
     fs.mkdirSync(contextDir, { recursive: true });
+
+    // Symlink + containment safety
+    try {
+      const lstat = fs.lstatSync(outputPath);
+      if (lstat.isSymbolicLink()) {
+        log.warn(`CROSS-PHASE.md is a symlink — refusing to write: ${outputPath}`);
+        return false;
+      }
+    } catch {
+      // File doesn't exist yet — safe to proceed
+    }
+    const resolvedOutput = path.resolve(outputPath);
+    const resolvedDir = path.resolve(contextDir);
+    if (!resolvedOutput.startsWith(resolvedDir + path.sep) && resolvedOutput !== resolvedDir) {
+      log.warn(`CROSS-PHASE.md path escapes context directory — refusing to write: ${outputPath}`);
+      return false;
+    }
+
     fs.writeFileSync(outputPath, content, 'utf-8');
 
     return true;

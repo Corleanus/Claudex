@@ -17,10 +17,12 @@ export interface CoordinationConfig {
     context_manager: number;
     total: number;
   };
+  /** @reserved Not yet consumed by runtime — planned for post-compact context restoration handoff */
   post_compact_restore: 'claudex' | 'context_manager';
   tool_tracking: 'claudex' | 'context_manager' | 'both';
   thread_tracking: 'claudex' | 'context_manager';
   learnings: 'claudex' | 'context_manager';
+  /** @reserved Not yet consumed by runtime — planned for context gauge display ownership */
   gauge_display: 'claudex' | 'context_manager';
 }
 
@@ -72,6 +74,12 @@ function clampBudget(value: number): number {
   return Math.max(MIN_BUDGET, Math.min(MAX_BUDGET, value));
 }
 
+/**
+ * Mtime-based cache. Hooks are ephemeral (each invocation = new process),
+ * and each hook currently calls readCoordinationConfig() at most once,
+ * so this cache has limited practical value. It exists as a safety net
+ * in case future code paths call the function multiple times per invocation.
+ */
 let cachedConfig: CoordinationConfig | null = null;
 let cachedMtime: number = 0;
 
@@ -95,10 +103,14 @@ export function readCoordinationConfig(): CoordinationConfig {
       return structuredClone(STANDALONE_DEFAULTS);
     }
 
-    // Reject symlinks for safety
+    // Reject symlinks and world-writable files for safety
     try {
       const lstat = fs.lstatSync(COORDINATION_PATH);
       if (lstat.isSymbolicLink()) {
+        return structuredClone(STANDALONE_DEFAULTS);
+      }
+      // On non-Windows: reject world-writable files (mode & 0o002)
+      if (process.platform !== 'win32' && (lstat.mode & 0o002) !== 0) {
         return structuredClone(STANDALONE_DEFAULTS);
       }
     } catch { /* stat failed — proceed with caution */ }
@@ -131,6 +143,13 @@ export function readCoordinationConfig(): CoordinationConfig {
     // Clamp budgets to safe range
     result.injection_budget.claudex = clampBudget(result.injection_budget.claudex);
     result.injection_budget.context_manager = clampBudget(result.injection_budget.context_manager);
+    result.injection_budget.total = clampBudget(result.injection_budget.total);
+
+    // Enforce sum invariant: total must be >= sum of parts
+    const budgetSum = result.injection_budget.claudex + result.injection_budget.context_manager;
+    if (result.injection_budget.total < budgetSum) {
+      result.injection_budget.total = Math.min(budgetSum, MAX_BUDGET);
+    }
 
     cachedConfig = result;
     cachedMtime = mtime;

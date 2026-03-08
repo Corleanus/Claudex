@@ -18,6 +18,7 @@ import {
   RESUME_LOAD,
   GSD_LOAD,
 } from './types.js';
+import { escapeUntrustedText } from '../lib/context-sections.js';
 
 // =============================================================================
 // Selective Loading
@@ -72,14 +73,14 @@ function formatAiderTrick(checkpoint: Checkpoint): string {
 
   // "I asked you to [working.task]."
   if (checkpoint.working?.task) {
-    parts.push(`I asked you to ${checkpoint.working.task}.`);
+    parts.push(`I asked you to ${escapeUntrustedText(checkpoint.working.task, 300)}.`);
   }
 
   // "You proposed [decisions[-1].what]."
   if (checkpoint.decisions.length > 0) {
     const lastDecision = checkpoint.decisions[checkpoint.decisions.length - 1];
     if (lastDecision && typeof lastDecision.what === 'string') {
-      parts.push(`You proposed ${lastDecision.what}.`);
+      parts.push(`You proposed ${escapeUntrustedText(lastDecision.what, 300)}.`);
     }
 
     // Check if the last exchange is an approval
@@ -87,7 +88,7 @@ function formatAiderTrick(checkpoint: Checkpoint): string {
     if (Array.isArray(exchanges) && exchanges.length > 0) {
       const lastExchange = exchanges[exchanges.length - 1];
       if (lastExchange && lastExchange.role === 'user' && typeof lastExchange.gist === 'string') {
-        parts.push(`I ${lastExchange.gist.toLowerCase()}.`);
+        parts.push(`I ${escapeUntrustedText(lastExchange.gist.toLowerCase(), 200)}.`);
       }
     }
   }
@@ -100,7 +101,7 @@ function formatAiderTrick(checkpoint: Checkpoint): string {
       if (!f || typeof f.path !== 'string') continue;
       const verb = verbMap[f.action] ?? 'modified';
       if (!grouped.has(verb)) grouped.set(verb, []);
-      grouped.get(verb)!.push(f.path);
+      grouped.get(verb)!.push(escapeUntrustedText(f.path, 200));
     }
     for (const [verb, paths] of grouped) {
       if (paths.length <= 3) {
@@ -113,7 +114,7 @@ function formatAiderTrick(checkpoint: Checkpoint): string {
 
   // "Next step: [working.next_action]."
   if (checkpoint.working?.next_action) {
-    parts.push(`Next step: ${checkpoint.working.next_action}.`);
+    parts.push(`Next step: ${escapeUntrustedText(checkpoint.working.next_action, 300)}.`);
   }
 
   return parts.join(' ');
@@ -141,13 +142,13 @@ export function formatCheckpointForInjection(
   // Working state
   if (sections.includes('working') && checkpoint.working) {
     lines.push(`## Working State`);
-    lines.push(`- Task: ${checkpoint.working.task}`);
-    lines.push(`- Status: ${checkpoint.working.status}`);
+    lines.push(`- Task: ${escapeUntrustedText(checkpoint.working.task, 300)}`);
+    lines.push(`- Status: ${escapeUntrustedText(checkpoint.working.status, 50)}`);
     if (checkpoint.working.branch) {
-      lines.push(`- Branch: ${checkpoint.working.branch}`);
+      lines.push(`- Branch: ${escapeUntrustedText(checkpoint.working.branch, 200)}`);
     }
     if (checkpoint.working.next_action) {
-      lines.push(`- Next: ${checkpoint.working.next_action}`);
+      lines.push(`- Next: ${escapeUntrustedText(checkpoint.working.next_action, 300)}`);
     }
     lines.push('');
   }
@@ -156,7 +157,7 @@ export function formatCheckpointForInjection(
   if (sections.includes('open_questions') && checkpoint.open_questions.length > 0) {
     lines.push(`## Open Questions`);
     for (const q of checkpoint.open_questions) {
-      lines.push(`- ${q}`);
+      lines.push(`- ${escapeUntrustedText(q, 300)}`);
     }
     lines.push('');
   }
@@ -166,7 +167,7 @@ export function formatCheckpointForInjection(
     lines.push(`## Decisions`);
     for (const d of checkpoint.decisions) {
       const rev = d.reversible ? ' (reversible)' : '';
-      lines.push(`- **${d.what}**${rev}: ${d.why}`);
+      lines.push(`- **${escapeUntrustedText(d.what, 200)}**${rev}: ${escapeUntrustedText(d.why, 300)}`);
     }
     lines.push('');
   }
@@ -185,7 +186,7 @@ export function formatCheckpointForInjection(
   if (sections.includes('files') && checkpoint.files?.hot?.length > 0) {
     lines.push(`## Active Files`);
     for (const f of checkpoint.files.hot) {
-      lines.push(`- \`${f}\``);
+      lines.push(`- \`${escapeUntrustedText(f, 200)}\``);
     }
     lines.push('');
   }
@@ -194,23 +195,23 @@ export function formatCheckpointForInjection(
   if (sections.includes('gsd') && checkpoint.gsd?.active) {
     lines.push(`## Project Phase (GSD)`);
     if (checkpoint.gsd.milestone) {
-      lines.push(`- Milestone: ${checkpoint.gsd.milestone}`);
+      lines.push(`- Milestone: ${escapeUntrustedText(checkpoint.gsd.milestone, 200)}`);
     }
     if (checkpoint.gsd.phase_name) {
-      lines.push(`- Phase ${checkpoint.gsd.phase}: ${checkpoint.gsd.phase_name}`);
+      lines.push(`- Phase ${checkpoint.gsd.phase}: ${escapeUntrustedText(checkpoint.gsd.phase_name, 200)}`);
     } else {
       lines.push(`- Phase: ${checkpoint.gsd.phase}`);
     }
     if (checkpoint.gsd.phase_goal) {
-      lines.push(`- Goal: ${checkpoint.gsd.phase_goal}`);
+      lines.push(`- Goal: ${escapeUntrustedText(checkpoint.gsd.phase_goal, 300)}`);
     }
     if (checkpoint.gsd.plan_status) {
-      lines.push(`- Plan: ${checkpoint.gsd.plan_status}`);
+      lines.push(`- Plan: ${escapeUntrustedText(checkpoint.gsd.plan_status, 200)}`);
     }
     if (checkpoint.gsd.requirements?.length > 0) {
       lines.push(`- Requirements:`);
       for (const r of checkpoint.gsd.requirements) {
-        lines.push(`  - ${r.id} [${r.status}]: ${r.description}`);
+        lines.push(`  - ${escapeUntrustedText(r.id, 50)} [${escapeUntrustedText(r.status, 50)}]: ${escapeUntrustedText(r.description, 300)}`);
       }
     }
     lines.push('');

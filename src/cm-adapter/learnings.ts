@@ -105,25 +105,68 @@ function applyPromotions(
   }
 }
 
+const LOCK_STALE_MS = 10_000; // Locks older than 10s are considered stale
+
+async function acquireLock(lockPath: string): Promise<boolean> {
+  try {
+    await fs.promises.writeFile(lockPath, `${process.pid}\n${Date.now()}`, {
+      flag: 'wx', // Fail if file already exists
+      encoding: 'utf-8',
+    });
+    return true;
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code !== 'EEXIST') return false;
+
+    // Check if existing lock is stale
+    try {
+      const content = await fs.promises.readFile(lockPath, 'utf-8');
+      const timestamp = parseInt(content.split('\n')[1] ?? '0', 10);
+      if (Date.now() - timestamp > LOCK_STALE_MS) {
+        await fs.promises.unlink(lockPath).catch(() => {});
+        // Retry once after removing stale lock
+        try {
+          await fs.promises.writeFile(lockPath, `${process.pid}\n${Date.now()}`, {
+            flag: 'wx',
+            encoding: 'utf-8',
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    } catch {
+      // Can't read lock file — treat as held
+    }
+    return false;
+  }
+}
+
+async function releaseLock(lockPath: string): Promise<void> {
+  await fs.promises.unlink(lockPath).catch(() => {});
+}
+
 export async function promoteLearnings(
   learnings: Array<{ text: string; when: string }>,
   checkpointId: string,
   sessionId: string,
 ): Promise<void> {
   const storePath = learningsPath();
-  const initialRaw = await fs.promises.readFile(storePath, 'utf-8').catch(() => '');
-  const store = validateLearningsStore(JSON.parse(initialRaw || '{}'));
+  const lockPath = storePath + '.lock';
 
-  applyPromotions(store, learnings, checkpointId, sessionId);
-
-  // Optimistic conflict check: re-read and retry once if content changed
-  const currentRaw = await fs.promises.readFile(storePath, 'utf-8').catch(() => '');
-  if (currentRaw !== initialRaw) {
-    const freshStore = validateLearningsStore(JSON.parse(currentRaw || '{}'));
-    applyPromotions(freshStore, learnings, checkpointId, sessionId);
-    await writeCrossSessionLearnings(freshStore);
+  const acquired = await acquireLock(lockPath);
+  if (!acquired) {
+    // Another process holds the lock — skip gracefully
     return;
   }
 
-  await writeCrossSessionLearnings(store);
+  try {
+    const raw = await fs.promises.readFile(storePath, 'utf-8').catch(() => '');
+    const store = validateLearningsStore(JSON.parse(raw || '{}'));
+
+    applyPromotions(store, learnings, checkpointId, sessionId);
+    await writeCrossSessionLearnings(store);
+  } finally {
+    await releaseLock(lockPath);
+  }
 }

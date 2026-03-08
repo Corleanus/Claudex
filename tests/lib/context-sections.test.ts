@@ -78,6 +78,18 @@ describe('escapeUntrustedText', () => {
     expect(result).not.toMatch(/^##\s/m);
     expect(result).not.toMatch(/^###\s/m);
   });
+
+  it('neutralizes triple backtick fence breakers', () => {
+    const result = escapeUntrustedText('before ```\n# injected\n``` after');
+    expect(result).not.toContain('```');
+    expect(result).toContain('\uFF40\uFF40\uFF40'); // fullwidth backtick
+  });
+
+  it('neutralizes longer fence sequences (````)', () => {
+    const result = escapeUntrustedText('````escape````');
+    expect(result).not.toContain('````');
+    expect(result).toContain('\uFF40'.repeat(4));
+  });
 });
 
 // =============================================================================
@@ -127,10 +139,31 @@ describe('injection-safe section builders', () => {
     const output = buildReasoningSection(chains);
     // Title should be escaped
     expect(output).not.toMatch(/^##\sInject/m);
-    // Reasoning should be fenced (inside ```)
-    expect(output).toContain('```');
-    // The raw markdown heading inside reasoning is not interpreted because it's fenced
-    expect(output).toContain('### Secret reasoning');
+    // Reasoning content is escaped (headings and frontmatter neutralized)
+    expect(output).not.toMatch(/^###\sSecret/m);
+    expect(output).toContain('\u2014\u2014\u2014');
+  });
+
+  it('buildReasoningSection escapes fence-breaking backticks in reasoning content', () => {
+    const chains: ReasoningChain[] = [{
+      id: 1,
+      session_id: 's1',
+      timestamp: new Date(now).toISOString(),
+      timestamp_epoch: now,
+      trigger: 'pre_compact',
+      title: 'Normal title',
+      reasoning: 'before ```\n# Injected heading\n``` after',
+      importance: 3,
+      created_at: new Date(now).toISOString(),
+      created_at_epoch: now,
+    }];
+
+    const output = buildReasoningSection(chains);
+    // The reasoning content between the outer fences must not contain raw triple backticks
+    // Split on the outer fence markers (lines 1 and last)
+    const innerContent = output.split('```')[1] ?? '';
+    // Inner content should contain fullwidth backticks, not raw backticks
+    expect(innerContent).toContain('\uFF40\uFF40\uFF40');
   });
 
   it('buildRecentObservationsSection escapes injection in title', () => {

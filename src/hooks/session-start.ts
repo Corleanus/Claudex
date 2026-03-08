@@ -132,7 +132,8 @@ export async function acquireIndexLock(): Promise<(() => void) | null> {
 async function registerInIndex(entry: SessionIndexEntry): Promise<void> {
   const releaseLock = await acquireIndexLock();
   if (!releaseLock) {
-    logToFile(HOOK_NAME, 'WARN', 'Could not acquire index.json lock, proceeding without lock');
+    logToFile(HOOK_NAME, 'WARN', 'Could not acquire index.json lock, skipping index.json write to prevent corruption');
+    return;
   }
 
   try {

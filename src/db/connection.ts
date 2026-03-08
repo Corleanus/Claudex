@@ -27,7 +27,9 @@ const log = createLogger('database');
  * @returns Configured Database instance, or null on failure
  */
 export function getDatabase(dbPath?: string): Database.Database | null {
-  const resolvedPath = dbPath ?? PATHS.database;
+  // Priority: explicit argument > config.database.path > PATHS.database
+  const config = loadConfig();
+  const resolvedPath = dbPath ?? config.database?.path ?? PATHS.database;
   let db: Database.Database | undefined;
 
   try {
@@ -39,9 +41,6 @@ export function getDatabase(dbPath?: string): Database.Database | null {
     }
 
     db = new Database(resolvedPath);
-
-    // Apply PRAGMAs
-    const config = loadConfig();
     if (config.database?.wal_mode !== false) {
       db.pragma('journal_mode = WAL');
     }

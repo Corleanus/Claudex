@@ -24,6 +24,7 @@ import { readTokenGaugeWithDetection } from '../lib/token-gauge.js';
 import { writeCheckpoint } from '../checkpoint/writer.js';
 import { readDecisions, readQuestions } from '../checkpoint/state-files.js';
 import { PATHS } from '../shared/paths.js';
+import { ECHO_HOME } from '../cm-adapter/constants.js';
 import { queryHologram, extractRecentFiles, queryFts5, getRecent } from './_prompt-queries.js';
 import type { UserPromptSubmitInput } from '../shared/types.js';
 import type { GsdState } from '../gsd/types.js';
@@ -57,14 +58,23 @@ runHook(HOOK_NAME, async (input) => {
   const scope = detectScope(cwd);
   logToFile(HOOK_NAME, 'DEBUG', `Scope: ${scope.type === 'project' ? `project:${scope.name}` : 'global'}`);
 
-  // 2.0. Resolve configurable token budget (coordination config overrides default)
-  // Coordination is read once and used for: (a) injection_budget (line ~64),
-  // (b) thread_tracking gate (line ~71), and (c) checkpoint_primary gate (line ~444).
+  // 2.0a. Early exit for empty prompts — skip all config reads and thread tracking
+  if (typeof promptText !== 'string' || promptText.length === 0) {
+    logToFile(HOOK_NAME, 'DEBUG', 'Empty prompt, skipping entirely');
+    return {};
+  }
+
+  // 2.0b. Resolve configurable token budget (coordination config overrides default)
+  // Coordination is read once and used for: (a) injection_budget,
+  // (b) thread_tracking gate, and (c) checkpoint_primary gate.
   const config = loadConfig();
   const coordination = readCoordinationConfig();
-  // Prefer coordination budget if explicitly configured (differs from standalone default of 4000),
-  // otherwise fall back to user config or the built-in default.
-  const CONTEXT_TOKEN_BUDGET = coordination.injection_budget.claudex !== DEFAULT_CONTEXT_TOKEN_BUDGET
+
+  // Detect whether a coordination file actually exists (vs standalone defaults).
+  // When coordination is active, its injection_budget.claudex takes precedence
+  // unconditionally — even if it equals the default 4000.
+  const coordinationFileExists = fs.existsSync(path.join(ECHO_HOME, 'coordination.json'));
+  const CONTEXT_TOKEN_BUDGET = coordinationFileExists
     ? coordination.injection_budget.claudex
     : (config.hooks?.context_token_budget ?? DEFAULT_CONTEXT_TOKEN_BUDGET);
 

@@ -6,7 +6,10 @@
  * 2. Promotes them to cross-session learnings store
  * 3. Resets state files for the next context window
  *
- * Coordination: runs when learnings is "context_manager".
+ * Coordination: gated on learnings === "context_manager", which implies all
+ * CM-owned state domains (decisions, open_items, resources) are also active.
+ * The coordination schema has no separate fields for those domains — learnings
+ * ownership is the canonical signal that the CM adapter is active.
  */
 
 import * as crypto from 'node:crypto';
@@ -55,7 +58,9 @@ runHook(HOOK_NAME, async (input) => {
     }
   }
 
-  // Reset non-learnings state (safe to reset regardless)
+  // Reset non-learnings CM state — safe because this hook only runs when
+  // coordination.learnings === 'context_manager', meaning the CM adapter
+  // owns all these domains (decisions, open_items, resources).
   try {
     await resetStateFiles(sessionId, ['decisions', 'open_items', 'resources']);
     logToFile(HOOK_NAME, 'DEBUG', 'Non-learnings state reset');

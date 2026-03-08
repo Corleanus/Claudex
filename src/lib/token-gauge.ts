@@ -9,6 +9,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as nodePath from 'node:path';
 import { recordMetric } from '../shared/metrics.js';
 
 // =============================================================================
@@ -51,6 +52,12 @@ const MODELS_1M_CAPABLE: string[] = [
 ];
 
 const WINDOW_1M = 1_000_000;
+
+/** Maximum transcript file size we'll read. Files larger than this are rejected. */
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+
+/** We only need the tail of the transcript — recent API responses contain the latest usage. */
+const MAX_TAIL_BYTES = 100 * 1024; // 100 KB
 
 function is1MCapableModel(model: string): boolean {
   return MODELS_1M_CAPABLE.some(prefix => model.startsWith(prefix));
@@ -123,6 +130,64 @@ export function formatGauge(utilization: number, inputTokens: number, windowSize
   };
 
   return `[${bar} ${pct}% | ${formatK(inputTokens)}/${formatK(windowSize)}]`;
+}
+
+// =============================================================================
+// Path Validation & Tail Reading
+// =============================================================================
+
+/**
+ * Validate that a transcript path is safe to read.
+ * Must end with .jsonl and resolve under a directory containing .claude or AppData.
+ */
+function isValidTranscriptPath(transcriptPath: string): boolean {
+  // Must be a .jsonl file
+  if (!transcriptPath.endsWith('.jsonl')) return false;
+
+  // Resolve to absolute and normalize separators for cross-platform check
+  const resolved = nodePath.resolve(transcriptPath).replace(/\\/g, '/');
+  // Transcript files live under .claude/ or AppData/ directories
+  if (resolved.includes('/.claude/') || resolved.includes('/AppData/')) return true;
+
+  // Also accept temp directories (used by tests)
+  const tmpDir = (process.env.TMPDIR || process.env.TEMP || process.env.TMP || '/tmp').replace(/\\/g, '/');
+  if (resolved.startsWith(tmpDir)) return true;
+
+  return false;
+}
+
+/**
+ * Read only the tail of a file (last MAX_TAIL_BYTES). Returns the content string.
+ * If the file is smaller than MAX_TAIL_BYTES, reads the whole file.
+ * Discards the first (potentially partial) line when reading a tail slice.
+ */
+function readTailContent(transcriptPath: string, fileSize: number): string | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+    const readSize = Math.min(fileSize, MAX_TAIL_BYTES);
+    const start = Math.max(0, fileSize - readSize);
+    const buffer = Buffer.alloc(readSize);
+    fs.readSync(fd, buffer, 0, readSize, start);
+    let content = buffer.toString('utf-8');
+
+    // If we didn't read from the beginning, the first line is likely partial — discard it
+    if (start > 0) {
+      const firstNewline = content.indexOf('\n');
+      if (firstNewline !== -1) {
+        content = content.slice(firstNewline + 1);
+      }
+      // If there's no newline at all in 100KB, the data is one giant line — unusable
+    }
+
+    return content;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
 }
 
 // =============================================================================
@@ -221,12 +286,17 @@ export function readTokenGauge(transcriptPath: string | undefined, windowSize?: 
       return { ...UNAVAILABLE_READING, window_size: ws };
     }
 
+    // Guard: path validation (must be .jsonl under expected directory)
+    if (!isValidTranscriptPath(transcriptPath)) {
+      return { ...UNAVAILABLE_READING, window_size: ws };
+    }
+
     // Guard: file doesn't exist
     if (!fs.existsSync(transcriptPath)) {
       return { ...UNAVAILABLE_READING, window_size: ws };
     }
 
-    // Guard: empty file
+    // Guard: empty file or oversized file
     let stat: fs.Stats;
     try {
       stat = fs.statSync(transcriptPath);
@@ -234,15 +304,13 @@ export function readTokenGauge(transcriptPath: string | undefined, windowSize?: 
       return { ...UNAVAILABLE_READING, window_size: ws };
     }
 
-    if (stat.size === 0) {
+    if (stat.size === 0 || stat.size > MAX_FILE_SIZE) {
       return { ...UNAVAILABLE_READING, window_size: ws };
     }
 
-    // Read file content
-    let content: string;
-    try {
-      content = fs.readFileSync(transcriptPath, 'utf-8');
-    } catch {
+    // Read only the tail of the file — usage data is in recent entries
+    const content = readTailContent(transcriptPath, stat.size);
+    if (!content) {
       return { ...UNAVAILABLE_READING, window_size: ws };
     }
 
@@ -299,16 +367,20 @@ export function readTokenGaugeWithDetection(
   }
 
   try {
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      return { ...UNAVAILABLE_READING };
-    }
+    if (!transcriptPath) return { ...UNAVAILABLE_READING };
+
+    // Path validation (must be .jsonl under expected directory)
+    if (!isValidTranscriptPath(transcriptPath)) return { ...UNAVAILABLE_READING };
+
+    if (!fs.existsSync(transcriptPath)) return { ...UNAVAILABLE_READING };
 
     let stat: fs.Stats;
     try { stat = fs.statSync(transcriptPath); } catch { return { ...UNAVAILABLE_READING }; }
-    if (stat.size === 0) return { ...UNAVAILABLE_READING };
+    if (stat.size === 0 || stat.size > MAX_FILE_SIZE) return { ...UNAVAILABLE_READING };
 
-    let content: string;
-    try { content = fs.readFileSync(transcriptPath, 'utf-8'); } catch { return { ...UNAVAILABLE_READING }; }
+    // Read only the tail of the file — usage data is in recent entries
+    const content = readTailContent(transcriptPath, stat.size);
+    if (!content) return { ...UNAVAILABLE_READING };
 
     // Single parse for both model and usage
     const { model, usage } = extractLastAssistantData(content);

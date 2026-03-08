@@ -161,8 +161,9 @@ export function writePhaseSummary(
       log.warn(`SUMMARY.md is a symlink — refusing to write: ${summaryPath}`);
       return false;
     }
-    if (fs.existsSync(summaryPath) && !isContainedPath(summaryPath, contextDir)) {
-      log.warn(`SUMMARY.md path escapes context directory — refusing to write: ${summaryPath}`);
+    const parentDir = path.dirname(summaryPath);
+    if (!isContainedPath(parentDir, contextDir)) {
+      log.warn(`SUMMARY.md parent path escapes context directory — refusing to write: ${summaryPath}`);
       return false;
     }
 

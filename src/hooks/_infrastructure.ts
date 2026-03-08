@@ -16,7 +16,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadConfig } from '../shared/config.js';
 import { recordMetric, getMetrics } from '../shared/metrics.js';
-import { PATHS } from '../shared/paths.js';
+import { PATHS, sanitizeSessionId } from '../shared/paths.js';
 import { redactSensitive } from '../lib/redaction.js';
 import { detectVersion, migrateInput, stampOutput, validateInput, CURRENT_SCHEMA_VERSION } from '../shared/hook-schema.js';
 import type { HookStdin, HookStdout } from '../shared/types.js';
@@ -73,6 +73,25 @@ export async function runHook(
     const validation = validateInput(hookName, input as unknown as Record<string, unknown>, CURRENT_SCHEMA_VERSION);
     if (!validation.valid) {
       logToFile(hookName, 'WARN', `Input validation warnings: ${validation.errors.join(', ')}`);
+    }
+
+    // Session ID sanitization — strict rejection at ingress to prevent path traversal.
+    // All downstream hooks receive the pre-sanitized session_id.
+    if (input.session_id) {
+      const rawSessionId = input.session_id;
+      const sanitized = sanitizeSessionId(rawSessionId);
+      if (!sanitized) {
+        logToFile(hookName, 'ERROR', `Session ID sanitized to empty string, rejecting. Raw: "${rawSessionId}"`);
+        writeStdout(stampOutput({}) as unknown as HookStdout, true);
+        return;
+      }
+      if (sanitized !== rawSessionId) {
+        logToFile(hookName, 'ERROR', `Session ID contains unsafe characters, rejecting. Raw: "${rawSessionId}", sanitized: "${sanitized}"`);
+        writeStdout(stampOutput({}) as unknown as HookStdout, true);
+        return;
+      }
+      // Overwrite with sanitized value (even though identical, ensures type-level guarantee)
+      input.session_id = sanitized;
     }
 
     const startMs = Date.now();

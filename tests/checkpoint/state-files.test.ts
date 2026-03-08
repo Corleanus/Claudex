@@ -25,6 +25,7 @@ import {
   archiveStateFiles,
   cleanupOldArchives,
   validateSessionId,
+  ensureDir,
 } from '../../src/checkpoint/state-files.js';
 
 // =============================================================================
@@ -606,5 +607,81 @@ describe('atomic write verification (R29)', () => {
     expect(fs.existsSync(mainPath)).toBe(true);
     const content = fs.readFileSync(mainPath, 'utf-8');
     expect(content.length).toBeGreaterThan(0);
+  });
+});
+
+// =============================================================================
+// R12: ensureDir creates directories with restricted permissions
+// =============================================================================
+
+describe('ensureDir permissions (R12)', () => {
+  it('creates directory successfully', () => {
+    const testDir = path.join(tmpDir, 'restricted-test', 'nested');
+    ensureDir(testDir);
+    expect(fs.existsSync(testDir)).toBe(true);
+    expect(fs.statSync(testDir).isDirectory()).toBe(true);
+  });
+
+  it('passes mode 0o700 to mkdirSync on Unix', () => {
+    // On Windows, mode is ignored by the OS, but the code should pass it.
+    // On Unix, this test verifies the directory has owner-only permissions.
+    if (process.platform !== 'win32') {
+      const testDir = path.join(tmpDir, 'perm-test-dir');
+      ensureDir(testDir);
+      const stat = fs.statSync(testDir);
+      // 0o700 = owner rwx only (may be further restricted by umask)
+      const mode = stat.mode & 0o777;
+      // mode should have no group/other permissions (umask may restrict further)
+      expect(mode & 0o077).toBe(0);
+    }
+  });
+
+  it('does not throw when directory already exists', () => {
+    const testDir = path.join(tmpDir, 'existing-dir');
+    fs.mkdirSync(testDir, { recursive: true });
+    expect(() => ensureDir(testDir)).not.toThrow();
+  });
+});
+
+// =============================================================================
+// R13: Session ID sanitization warnings
+// =============================================================================
+
+describe('session ID sanitization (R13)', () => {
+  it('operations still work with IDs that require sanitization', () => {
+    // IDs with special chars get sanitized; operations should still succeed
+    const decision: Decision = {
+      id: 'd1', what: 'Test', why: 'Reason', when: '2026-01-01T00:00:00Z', reversible: true,
+    };
+    // Slashes get stripped, resulting in sanitized ID
+    appendDecision(tmpDir, 'test/session', decision);
+    // Reads using same raw ID should find the file (both sanitize to 'testsession')
+    const result = readDecisions(tmpDir, 'test/session');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe('d1');
+  });
+
+  it('different raw IDs that sanitize to same value share state', () => {
+    const d1: Decision = {
+      id: 'd1', what: 'First', why: 'R1', when: '2026-01-01T00:00:00Z', reversible: true,
+    };
+    const d2: Decision = {
+      id: 'd2', what: 'Second', why: 'R2', when: '2026-01-01T00:01:00Z', reversible: false,
+    };
+    // Both sanitize to 'ab' — this is the canonicalization collision the finding warns about
+    appendDecision(tmpDir, 'a.b', d1);
+    appendDecision(tmpDir, 'a/b', d2);
+    // Both resolve to same dir, so both decisions are in the same file
+    const result = readDecisions(tmpDir, 'ab');
+    expect(result).toHaveLength(2);
+  });
+
+  it('clean session IDs pass through without issue', () => {
+    const decision: Decision = {
+      id: 'd1', what: 'Test', why: 'Reason', when: '2026-01-01T00:00:00Z', reversible: true,
+    };
+    appendDecision(tmpDir, 'clean-session-123', decision);
+    const result = readDecisions(tmpDir, 'clean-session-123');
+    expect(result).toHaveLength(1);
   });
 });

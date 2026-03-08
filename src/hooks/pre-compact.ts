@@ -63,7 +63,7 @@ function writeCompactCheckpoint(
 
   // Query for observations since last checkpoint
   const project = scope.type === 'project' ? scope.name : null;
-  const newObservations = getObservationsSince(db, lastEpoch, project);
+  const newObservations = getObservationsSince(db, lastEpoch, project, 0);
 
   if (hasCompletionMarker && newObservations.length === 0) {
     logToFile(HOOK_NAME, 'DEBUG', 'Completion marker exists and no new observations — skipping checkpoint writes');
@@ -201,6 +201,12 @@ runHook('pre-compact', async (input: HookStdin) => {
   // Guard: missing transcript_path
   if (!transcript_path) {
     logToFile('pre-compact', 'WARN', 'transcript_path missing from input — skipping');
+    return {};
+  }
+
+  // Guard: transcript path validation (must be .jsonl in expected location)
+  if (!transcript_path.endsWith('.jsonl') || !/[/\\]\.claude[/\\]|[/\\]sessions[/\\]/i.test(path.resolve(transcript_path))) {
+    logToFile('pre-compact', 'WARN', `Transcript path failed validation (must be .jsonl in .claude/sessions): ${transcript_path}`);
     return {};
   }
 

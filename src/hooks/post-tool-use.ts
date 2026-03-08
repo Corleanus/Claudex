@@ -138,22 +138,24 @@ runHook(HOOK_NAME, async (input) => {
       }
     }
 
-    // Step 3.7: Update incremental state (files-touched for checkpoint system)
-    if (observation.files_modified && observation.files_modified.length > 0) {
-      try {
-        const projectDir = scope.type === 'project' ? scope.path : PATHS.home;
-        for (const filePath of observation.files_modified) {
-          recordFileTouch(projectDir, sessionId, filePath, toolName, observation.title);
-        }
-        logToFile(HOOK_NAME, 'DEBUG', `State: recorded ${observation.files_modified.length} file touches`);
-      } catch (err) {
-        logToFile(HOOK_NAME, 'DEBUG', 'State file update failed (non-fatal)', err);
-      }
-    }
-
     // Close DB after Steps 3 + 3.5
     if (db) {
       try { db.close(); } catch { /* best effort */ }
+    }
+  }
+
+  // Step 3.7: Update incremental state (files-touched for checkpoint system)
+  // Gated on checkpoint ownership, not tool tracking — file-touch state is needed
+  // by the checkpoint system regardless of who owns tool tracking.
+  if (claudexOwnsCheckpoint && observation.files_modified && observation.files_modified.length > 0) {
+    try {
+      const projectDir = scope.type === 'project' ? scope.path : PATHS.home;
+      for (const filePath of observation.files_modified) {
+        recordFileTouch(projectDir, sessionId, filePath, toolName, observation.title);
+      }
+      logToFile(HOOK_NAME, 'DEBUG', `State: recorded ${observation.files_modified.length} file touches`);
+    } catch (err) {
+      logToFile(HOOK_NAME, 'DEBUG', 'State file update failed (non-fatal)', err);
     }
   }
 

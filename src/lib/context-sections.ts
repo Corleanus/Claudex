@@ -55,6 +55,7 @@ function formatTimeAgo(epochMs: number): string {
  * Escape untrusted text before rendering into prompt context.
  * Prevents markdown injection and caps length.
  *
+ * - Replaces triple backticks (code fence breakers)
  * - Replaces leading '#' chars (heading injection)
  * - Replaces '---' at line start (frontmatter injection)
  * - Neutralizes HTML-like angle brackets
@@ -64,6 +65,8 @@ export function escapeUntrustedText(text: string, maxLength = 200): string {
   if (!text) return '';
   let escaped = text.slice(0, maxLength);
   if (text.length > maxLength) escaped += '...';
+  // Neutralize code fence breakers: replace triple backticks with fullwidth backtick
+  escaped = escaped.replace(/`{3,}/g, (match) => '\uFF40'.repeat(match.length));
   // Neutralize markdown heading injection: replace leading # with Unicode fullwidth #
   escaped = escaped.replace(/^(#{1,6})\s/gm, (_, hashes: string) => '\uFF03'.repeat(hashes.length) + ' ');
   // Neutralize horizontal rule / frontmatter delimiter
@@ -179,7 +182,7 @@ export function buildReasoningSection(chains: ReasoningChain[]): string {
     const escapedTitle = escapeUntrustedText(c.title, 100);
     const truncated =
       c.reasoning.length > 500 ? c.reasoning.slice(0, 500) + '...' : c.reasoning;
-    return `### ${escapedTitle} (${ago})\n\`\`\`\n${truncated}\n\`\`\`\n`;
+    return `### ${escapedTitle} (${ago})\n\`\`\`\n${escapeUntrustedText(truncated, 500)}\n\`\`\`\n`;
   });
   return `## Flow Reasoning\n${lines.join('\n')}\n`;
 }
@@ -251,15 +254,15 @@ export function buildUnifiedResumeSection(
   }
 
   const lines: string[] = [];
-  lines.push(`## Resuming: Phase ${phaseNum} — ${phaseName}`);
+  lines.push(`## Resuming: Phase ${phaseNum} — ${escapeUntrustedText(phaseName, 200)}`);
   lines.push(`- Progress: ${pct}%`);
 
   if (phaseGoal) {
-    lines.push(`- Goal: ${phaseGoal}`);
+    lines.push(`- Goal: ${escapeUntrustedText(phaseGoal, 300)}`);
   }
 
   if (planStatus) {
-    lines.push(`- Plan: ${planStatus}`);
+    lines.push(`- Plan: ${escapeUntrustedText(planStatus, 200)}`);
   }
 
   // HOT files (up to 5)

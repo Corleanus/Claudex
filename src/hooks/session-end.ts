@@ -271,6 +271,8 @@ runHook('session-end', async (input: HookStdin) => {
   try {
     if (!transcript_path) {
       logToFile('session-end', 'WARN', 'transcript_path missing — skipping transcript snapshot');
+    } else if (!transcript_path.endsWith('.jsonl') || !/[/\\]\.claude[/\\]|[/\\]sessions[/\\]/i.test(path.resolve(transcript_path))) {
+      logToFile('session-end', 'WARN', `Transcript path failed validation (must be .jsonl in .claude/sessions): ${transcript_path}`);
     } else if (!fs.existsSync(transcript_path)) {
       logToFile('session-end', 'WARN', `Transcript file does not exist: ${transcript_path}`);
     } else {
@@ -416,47 +418,49 @@ Session ended without /endsession. This is a fail-safe handoff.
           }
         } catch { /* lock file gone, proceed */ }
         if (!releaseLock) {
-          logToFile('session-end', 'WARN', 'Could not acquire index.json lock, proceeding without lock');
+          logToFile('session-end', 'WARN', 'Could not acquire index.json lock, skipping index.json write to prevent corruption');
         }
       }
 
-      try {
-        const raw = fs.readFileSync(indexPath, 'utf-8');
-        const indexData = JSON.parse(raw) as {
-          schema?: string;
-          version?: number;
-          sessions?: Array<Record<string, unknown>>;
-        };
+      if (releaseLock) {
+        try {
+          const raw = fs.readFileSync(indexPath, 'utf-8');
+          const indexData = JSON.parse(raw) as {
+            schema?: string;
+            version?: number;
+            sessions?: Array<Record<string, unknown>>;
+          };
 
-        if (Array.isArray(indexData.sessions)) {
-          const matchingEntries = indexData.sessions.filter(
-            (s) => s.id === session_id || s.session_id === session_id,
-          );
+          if (Array.isArray(indexData.sessions)) {
+            const matchingEntries = indexData.sessions.filter(
+              (s) => s.id === session_id || s.session_id === session_id,
+            );
 
-          if (matchingEntries.length > 0) {
-            const endedBy = completionMarkerFound ? 'endsession' : 'hook_failsafe';
-            for (const entry of matchingEntries) {
-              entry.status = 'completed';
-              entry.ended_at = isoTimestamp;
-              entry.ended_by = endedBy;
+            if (matchingEntries.length > 0) {
+              const endedBy = completionMarkerFound ? 'endsession' : 'hook_failsafe';
+              for (const entry of matchingEntries) {
+                entry.status = 'completed';
+                entry.ended_at = isoTimestamp;
+                entry.ended_by = endedBy;
+              }
+
+              // Atomic write: temp file + rename
+              const tmpPath = indexPath + `.tmp.${process.pid}`;
+              fs.writeFileSync(tmpPath, JSON.stringify(indexData, null, 2) + '\n');
+              fs.renameSync(tmpPath, indexPath);
+              sessionIndexUpdated = true;
+              logToFile('session-end', 'INFO',
+                `Session index updated: ${matchingEntries.length} entries closed, ended_by=${endedBy}`);
+            } else {
+              logToFile('session-end', 'WARN',
+                `Session ${session_id} not found in index.json`);
             }
-
-            // Atomic write: temp file + rename
-            const tmpPath = indexPath + `.tmp.${process.pid}`;
-            fs.writeFileSync(tmpPath, JSON.stringify(indexData, null, 2) + '\n');
-            fs.renameSync(tmpPath, indexPath);
-            sessionIndexUpdated = true;
-            logToFile('session-end', 'INFO',
-              `Session index updated: ${matchingEntries.length} entries closed, ended_by=${endedBy}`);
           } else {
-            logToFile('session-end', 'WARN',
-              `Session ${session_id} not found in index.json`);
+            logToFile('session-end', 'WARN', 'index.json sessions field is not an array');
           }
-        } else {
-          logToFile('session-end', 'WARN', 'index.json sessions field is not an array');
+        } finally {
+          releaseLock();
         }
-      } finally {
-        if (releaseLock) releaseLock();
       }
     } else {
       logToFile('session-end', 'WARN', `index.json does not exist: ${indexPath}`);

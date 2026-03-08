@@ -104,7 +104,23 @@ function resolvePhaseStartEpoch(
   phaseNumber: number,
   phases: GsdPhase[],
 ): number {
-  // Primary: Use the earliest observation timestamp for this project as lower bound
+  // Determine a lower bound from filesystem metadata to prevent the DB MIN
+  // from reaching too far back (e.g., stale rows from before this phase).
+  let lowerBound = 0;
+
+  const previous = findPreviousPhase(phases, phaseNumber);
+  if (previous) {
+    const prevArchive = findArchiveFile(projectDir, previous.number);
+    if (prevArchive) {
+      try {
+        lowerBound = Math.floor(fs.statSync(prevArchive).mtimeMs);
+      } catch {
+        // fall through
+      }
+    }
+  }
+
+  // Primary: Use the earliest non-deleted observation timestamp, clamped by lower bound
   const row = db.prepare(`
     SELECT MIN(timestamp_epoch) AS min_epoch
     FROM observations
@@ -112,20 +128,12 @@ function resolvePhaseStartEpoch(
   `).get(projectName) as { min_epoch: number | null } | undefined;
 
   if (typeof row?.min_epoch === 'number') {
-    return row.min_epoch;
+    return Math.max(row.min_epoch, lowerBound);
   }
 
-  // Fallback: archive file mtime (last resort when DB has no observations)
-  const previous = findPreviousPhase(phases, phaseNumber);
-  if (previous) {
-    const prevArchive = findArchiveFile(projectDir, previous.number);
-    if (prevArchive) {
-      try {
-        return Math.floor(fs.statSync(prevArchive).mtimeMs);
-      } catch {
-        // fall through
-      }
-    }
+  // Fallback: archive mtime directly (when DB has no observations)
+  if (lowerBound > 0) {
+    return lowerBound;
   }
 
   return Date.now();

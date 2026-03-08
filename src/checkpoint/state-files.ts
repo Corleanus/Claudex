@@ -40,7 +40,14 @@ export function validateSessionId(sessionId: string): boolean {
 function stateDir(projectDir: string, sessionId: string): string {
   const safe = sanitizeSessionId(sessionId);
   if (!safe) {
+    log.warn(`Session ID sanitized to empty string, original: "${sessionId}"`);
     return path.join(projectDir, 'context', 'state', '_invalid');
+  }
+  if (safe !== sessionId) {
+    log.warn(`Session ID sanitized: "${sessionId}" -> "${safe}"`);
+  }
+  if (!validateSessionId(safe)) {
+    log.warn(`Sanitized session ID fails strict validation: "${safe}"`);
   }
   const resolved = path.resolve(projectDir, 'context', 'state', safe);
   const expectedRoot = path.resolve(projectDir, 'context', 'state');
@@ -51,10 +58,10 @@ function stateDir(projectDir: string, sessionId: string): string {
   return resolved;
 }
 
-/** Ensure a directory exists (create if missing) */
+/** Ensure a directory exists (create if missing) with restricted permissions */
 export function ensureDir(dirPath: string): void {
   if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
+    fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
   }
 }
 
